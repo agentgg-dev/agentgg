@@ -21,9 +21,5 @@ Thumbs.db
 .idea/
 
 .cache/
-<<<<<<< HEAD
 .turbo/
-.claude
-=======
-.turbo/
->>>>>>> 452429a18355c3b1e3c9afac72e636a16fc0ecf9
+.claude/
