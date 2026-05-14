@@ -1,5 +1,7 @@
 import type { Agent, Finding } from "@agentgg/core";
 import { query } from "@anthropic-ai/claude-agent-sdk";
+import type { z } from "zod";
+import { zodToJsonSchema } from "zod-to-json-schema";
 import {
   DetectionResult,
   type Detector,
@@ -51,21 +53,29 @@ const ENV_ALLOWLIST = new Set<string>([
  *
  * File mode is a one-turn agent with no tools — same behavior as before.
  * Hunt mode opens Read/Glob/Grep and lets the agent decide which files
- * to read, up to `maxTurns: 25`.
+ * to read, up to a caller-supplied `maxTurns` cap.
  */
 export class ClaudeAgentDetector implements Detector {
   readonly name: string;
   private readonly apiKey?: string;
   private readonly oauthToken?: string;
   private readonly model: string;
+  private readonly verbose: boolean;
 
-  constructor(opts: { apiKey?: string; oauthToken?: string; model: string }) {
+  constructor(opts: {
+    apiKey?: string;
+    oauthToken?: string;
+    model: string;
+    /** Stream tool-use messages (Glob/Grep/Read/etc.) to stdout as the agent runs. */
+    verbose?: boolean;
+  }) {
     if (!opts.apiKey && !opts.oauthToken) {
       throw new Error("ClaudeAgentDetector needs either apiKey or oauthToken");
     }
     this.apiKey = opts.apiKey;
     this.oauthToken = opts.oauthToken;
     this.model = opts.model;
+    this.verbose = opts.verbose ?? false;
     this.name = opts.oauthToken ? "anthropic-oauth" : "anthropic-api-via-cli";
   }
 
@@ -75,82 +85,74 @@ export class ClaudeAgentDetector implements Detector {
     content: string;
   }): Promise<Finding[]> {
     const { agent, filePath, content } = args;
-    const prompt = buildJsonOnlyFilePrompt(agent, filePath, content);
-    const resultText = await this.run({
+    const prompt = buildDetectPrompt(agent, filePath, content);
+    const result = await this.runStructured({
       prompt,
       allowedTools: [],
       maxTurns: 1,
+      schema: DetectionResult,
     });
-    const parsed = parseJsonObject(resultText);
-    const validated = DetectionResult.parse(parsed);
-    return validated.findings.map((f) => hydrateFinding(f, agent, filePath));
+    return result.findings.map((f) => hydrateFinding(f, agent, filePath));
   }
 
   async hunt(args: HuntArgs): Promise<Finding[]> {
-    const { agent, rootDir, excludePatterns, includePatterns, maxFileSizeKb } = args;
+    const { agent, rootDir, excludePatterns, includePatterns, maxFileSizeKb, maxTurns } = args;
     const prompt = buildHuntPrompt(agent, {
       excludePatterns,
       includePatterns,
       maxFileSizeKb,
     });
-    const resultText = await this.run({
+
+    // Single agentic run with SDK-enforced structured output. The
+    // model can chat in any narrative form during the session; the
+    // SDK constrains the *final* output to match the JSON schema
+    // generated from `DetectionResult`. No fence parsing, no string
+    // escapes, no shape conflicts — the typed object arrives as
+    // `msg.structured_output` and is Zod-validated defensively.
+    const result = await this.runStructured({
       prompt,
       allowedTools: ["Read", "Glob", "Grep"],
-      maxTurns: 25,
+      maxTurns,
       cwd: rootDir,
+      schema: DetectionResult,
     });
-    const parsed = parseJsonObject(resultText);
-    const validated = DetectionResult.parse(parsed);
-    // For hunt findings the LLM owns `filePath`; fallback only used if
-    // the model omitted it (which buildHuntPrompt forbids).
-    return validated.findings.map((f) =>
+
+    return result.findings.map((f) =>
       hydrateFinding(f, agent, f.filePath ?? "(unknown)"),
     );
   }
 
   async validateFinding(args: { finding: Finding; fileContent: string; scope?: string }) {
-    const basePrompt = buildValidatePrompt(args);
-    // Validators occasionally emit malformed JSON (stray `\` in a
-    // reasoning quote, etc.). One retry with a tightened prompt fixes
-    // most of them and is far cheaper than failing the whole pass.
-    // Two attempts cap the worst case at one extra LLM call.
-    let lastError: unknown;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const prompt =
-        attempt === 0
-          ? basePrompt
-          : `${basePrompt}\n\n---\nIMPORTANT: your previous response did not parse as JSON (${
-              lastError instanceof Error ? lastError.message : String(lastError)
-            }). Re-emit ONLY a single JSON object matching the schema above. Escape every backslash inside string values as \\\\. No prose, no code fences.`;
-      try {
-        const resultText = await this.run({
-          prompt,
-          allowedTools: [],
-          maxTurns: 1,
-        });
-        const parsed = parseJsonObject(resultText);
-        const validated = LlmValidation.parse(parsed);
-        return asValidationField(validated);
-      } catch (err) {
-        lastError = err;
-        if (process.env.AGENTGG_DEBUG) {
-          console.error(
-            `ClaudeAgentDetector.validateFinding attempt ${attempt + 1} failed: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-        }
-      }
-    }
-    throw lastError;
+    const prompt = buildValidatePrompt(args);
+    const validated = await this.runStructured({
+      prompt,
+      allowedTools: [],
+      maxTurns: 1,
+      schema: LlmValidation,
+    });
+    return asValidationField(validated);
   }
 
-  private async run(opts: {
+  /**
+   * Variant of `run` that asks the SDK to enforce a JSON schema on the
+   * final output and returns the Zod-validated structured result.
+   *
+   * Used by `hunt()` to skip the text→JSON parsing step entirely. The
+   * SDK converts the schema into a tool-call-style structured-output
+   * constraint at the protocol level, so the model literally cannot
+   * emit fences, prose, or mistyped fields in the final answer. The
+   * Zod `parse` at the end is defensive belt-and-suspenders in case
+   * the SDK ever hands us something unexpected.
+   */
+  private async runStructured<T extends z.ZodTypeAny>(opts: {
     prompt: string;
     allowedTools: string[];
     maxTurns: number;
     cwd?: string;
-  }): Promise<string> {
+    schema: T;
+  }): Promise<z.infer<T>> {
+    const jsonSchema = zodToJsonSchema(opts.schema) as Record<string, unknown>;
+    let structured: unknown;
     let resultText = "";
     try {
       for await (const message of query({
@@ -162,28 +164,52 @@ export class ClaudeAgentDetector implements Detector {
           maxTurns: opts.maxTurns,
           model: this.model,
           env: this.buildEnv(),
+          outputFormat: { type: "json_schema", schema: jsonSchema },
         },
       })) {
         const msg = message as Record<string, unknown>;
+        if (this.verbose && msg.type === "assistant") {
+          this.printToolUses(msg);
+        }
         if (msg.type === "result" && msg.subtype === "success") {
-          resultText = String(msg.result ?? "");
+          structured = (msg as { structured_output?: unknown }).structured_output;
+          resultText = String((msg as { result?: unknown }).result ?? "");
         }
       }
     } catch (err) {
       if (process.env.AGENTGG_DEBUG) {
         const util = await import("node:util");
-        console.error("---- ClaudeAgentDetector raw error ----");
+        console.error("---- ClaudeAgentDetector.runStructured raw error ----");
         console.error(util.inspect(err, { depth: 5, colors: false }));
-        console.error("---------------------------------------");
+        console.error("------------------------------------------------------");
       }
       throw err;
     }
-    if (!resultText) {
+    if (structured === undefined) {
       throw new Error(
-        "Claude Agent SDK produced no result text. Is the `claude` CLI installed and the credential valid?",
+        `Claude Agent SDK produced no structured_output. Raw result text: ${resultText.slice(0, 200)}…`,
       );
     }
-    return resultText;
+    return opts.schema.parse(structured) as z.infer<T>;
+  }
+
+  /**
+   * Render tool-use blocks from one SDK assistant message to stdout.
+   * The SDK emits an assistant message whenever the model produces a
+   * turn; each turn's `content` is a list of blocks, some of which are
+   * `tool_use` blocks carrying the tool name + input args. Mirroring
+   * Claude Code's interactive output so the operator can see what the
+   * agent is doing instead of staring at silence.
+   */
+  private printToolUses(msg: Record<string, unknown>): void {
+    const message = msg.message as { content?: unknown[] } | undefined;
+    if (!message || !Array.isArray(message.content)) return;
+    for (const block of message.content) {
+      const b = block as { type?: string; name?: string; input?: Record<string, unknown> };
+      if (b.type !== "tool_use" || !b.name) continue;
+      const arg = formatToolArg(b.name, b.input ?? {});
+      console.log(arg ? `    ${b.name} ${arg}` : `    ${b.name}`);
+    }
   }
 
   private buildEnv(): Record<string, string> {
@@ -201,77 +227,37 @@ export class ClaudeAgentDetector implements Detector {
 }
 
 /**
- * For file mode under the agent SDK, we want strict JSON output too.
- * The Vercel path uses Zod structured output; the agent SDK doesn't,
- * so we have to be explicit and parse defensively.
+ * Format a tool_use block's input args into a one-line summary for
+ * the verbose stream. Picks the field most useful per tool — file
+ * path for Read, pattern for Glob/Grep, command for Bash — and elides
+ * the rest. Long values are truncated so output stays readable on
+ * narrow terminals.
  */
-function buildJsonOnlyFilePrompt(
-  agent: Agent,
-  filePath: string,
-  content: string,
-): string {
-  return `${buildDetectPrompt(agent, filePath, content)}
-
----
-
-Respond with ONLY a JSON object matching this exact shape:
-
-\`\`\`
-{
-  "findings": [
-    {
-      "title": string,
-      "vulnSlug": string,
-      "lineRange": [number, number] | undefined,
-      "summary": string,
-      "details": string,
-      "poc": string,
-      "impact": string,
-      "references": string[],
-      "confidence": number
-    }
-  ]
-}
-\`\`\`
-
-Do not include any prose before or after the JSON. Do not wrap the JSON
-in markdown code fences. The response must be a single JSON object that
-parses cleanly with \`JSON.parse\`. If no vulnerabilities are found,
-return \`{ "findings": [] }\`.`;
+function formatToolArg(name: string, input: Record<string, unknown>): string {
+  const pick = (key: string): string | undefined => {
+    const v = input[key];
+    return typeof v === "string" && v.length > 0 ? v : undefined;
+  };
+  let value: string | undefined;
+  switch (name) {
+    case "Read":
+    case "Write":
+    case "Edit":
+      value = pick("file_path") ?? pick("path");
+      break;
+    case "Glob":
+      value = pick("pattern");
+      break;
+    case "Grep":
+      value = pick("pattern");
+      break;
+    case "Bash":
+      value = pick("command");
+      break;
+    default:
+      value = pick("path") ?? pick("file_path") ?? pick("pattern") ?? pick("command");
+  }
+  if (!value) return "";
+  return value.length > 100 ? `${value.slice(0, 97)}…` : value;
 }
 
-/**
- * Extract a JSON object from the model's free-form text response.
- * Handles three common shapes:
- *   1. Pure JSON (what we asked for)
- *   2. JSON wrapped in ```json fences (model ignored the instruction)
- *   3. JSON embedded in prose (model added explanation)
- */
-export function parseJsonObject(text: string): unknown {
-  const trimmed = text.trim();
-
-  // Strip a leading/trailing markdown fence if present.
-  const fenceMatch = trimmed.match(/^```(?:json)?\s*\n([\s\S]*?)\n```\s*$/);
-  if (fenceMatch) {
-    return JSON.parse(fenceMatch[1]);
-  }
-
-  // Try direct parse first.
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    // Fall through to the substring extraction below.
-  }
-
-  // Last resort: pull the first {...} balanced block we can find.
-  const firstBrace = trimmed.indexOf("{");
-  const lastBrace = trimmed.lastIndexOf("}");
-  if (firstBrace >= 0 && lastBrace > firstBrace) {
-    const candidate = trimmed.slice(firstBrace, lastBrace + 1);
-    return JSON.parse(candidate);
-  }
-
-  throw new Error(
-    `ClaudeAgentDetector: response did not contain parseable JSON. Got: ${trimmed.slice(0, 200)}…`,
-  );
-}

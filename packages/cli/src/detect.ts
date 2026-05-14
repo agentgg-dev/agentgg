@@ -125,6 +125,8 @@ export interface HuntArgs {
   includePatterns: string[];
   /** Files larger than this should be skipped by the agent. */
   maxFileSizeKb: number;
+  /** Cap on tool-use turns for the hunt session. */
+  maxTurns: number;
 }
 
 /**
@@ -134,7 +136,7 @@ export interface HuntArgs {
  */
 export function buildHuntPrompt(
   agent: Agent,
-  args: Omit<HuntArgs, "agent" | "rootDir">,
+  args: Pick<HuntArgs, "excludePatterns" | "includePatterns" | "maxFileSizeKb">,
 ): string {
   const excludeLines =
     args.excludePatterns.length > 0
@@ -177,33 +179,15 @@ applied to a route).
 Be efficient with tool calls. If a single Grep gives you the answer,
 don't burn turns reading every match.
 
-## Output format
+## Reporting
 
-After your investigation, respond with ONLY a JSON object of this
-exact shape:
-
-\`\`\`
-{
-  "findings": [
-    {
-      "title": string,
-      "vulnSlug": string,
-      "filePath": string,                  // the actual file you found it in
-      "lineRange": [number, number] | undefined,
-      "summary": string,
-      "details": string,
-      "poc": string,
-      "impact": string,
-      "references": string[],
-      "confidence": number                 // 0.0–1.0
-    }
-  ]
-}
-\`\`\`
-
-Do not include any prose before or after the JSON. Do not wrap it in
-markdown code fences. If you found nothing real, return
-\`{ "findings": [] }\`. Do NOT invent findings to satisfy expectations.`;
+Write your findings in whatever form your instructions ask for. Be
+specific: include file paths, line numbers, the matched code element,
+and an explanation of why it's unsafe. If you investigated something
+and it turned out to be safe or already patched, say so explicitly —
+that signal lets a downstream consumer distinguish real findings from
+analyzed-and-cleared items. Do NOT invent findings to satisfy
+expectations — false positives erode trust.`;
 }
 
 /**

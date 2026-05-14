@@ -170,6 +170,7 @@ describe("VercelDetector", () => {
         excludePatterns: [],
         includePatterns: [],
         maxFileSizeKb: 500,
+        maxTurns: 150,
       }),
     ).rejects.toThrow(/Hunt mode is not supported/);
   });

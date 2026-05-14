@@ -30,6 +30,8 @@ export interface ResolveOptions {
   model?: string;
   /** One-shot credentials supplied via CLI flag instead of saved config. */
   credentials?: CredentialOverrides;
+  /** Stream tool-use messages to stdout during hunt-mode runs. */
+  verbose?: boolean;
 }
 
 /**
@@ -89,7 +91,11 @@ function buildAnthropicDetector(
   // OAuth-only path: claude-agent-sdk for both modes. Direct API
   // calls with an OAuth token get rate-limited by Anthropic.
   if (oauthToken && !apiKey) {
-    return new ClaudeAgentDetector({ oauthToken, model: modelName });
+    return new ClaudeAgentDetector({
+      oauthToken,
+      model: modelName,
+      verbose: options.verbose,
+    });
   }
 
   // API-key path: hybrid Detector. Vercel SDK serves file-mode calls
@@ -99,7 +105,11 @@ function buildAnthropicDetector(
   if (apiKey) {
     const anthropic = createAnthropic({ apiKey });
     const fileDetector = new VercelDetector("anthropic-api", anthropic(modelName));
-    const huntDetector = new ClaudeAgentDetector({ apiKey, model: modelName });
+    const huntDetector = new ClaudeAgentDetector({
+      apiKey,
+      model: modelName,
+      verbose: options.verbose,
+    });
     return {
       name: "anthropic-api",
       detectFile: (args) => fileDetector.detectFile(args),

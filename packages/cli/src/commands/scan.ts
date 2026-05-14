@@ -40,6 +40,8 @@ interface ScanOpts {
   rescan?: boolean;
   /** Re-validate findings even when they already have a verdict on disk. */
   revalidateAll?: boolean;
+  /** Max tool-use turns for hunt-mode agents. File mode and validator are single-turn. */
+  maxTurns?: number;
 }
 
 /**
@@ -110,6 +112,7 @@ export async function runScan(
   const detector = resolveDetector(config, {
     provider: opts.provider,
     credentials,
+    verbose: opts.verbose,
   });
 
   // Load builtins + ~/.agentgg/agents/custom/. Same catalog `agents list`
@@ -268,6 +271,7 @@ export async function runScan(
           excludePatterns,
           includePatterns,
           maxFileSizeKb: opts.maxFileSize ?? 500,
+          maxTurns: opts.maxTurns ?? 150,
         });
         findings.push(...huntFindings);
         byAgent[agent.slug] = (byAgent[agent.slug] ?? 0) + huntFindings.length;
@@ -620,6 +624,12 @@ export function registerScanCommand(program: Command): void {
       "Scan only files changed between <commit> and HEAD (via `git diff --name-only`). Hunt-mode agents are skipped.",
     )
     .option("--concurrency <n>", "parallel file processing", (v) => parseInt(v, 10), 5)
+    .option(
+      "--max-turns <n>",
+      "Max tool-use turns for hunt-mode agents (default: 150). File-mode agents and the validator are single-turn and ignore this.",
+      (v) => parseInt(v, 10),
+      150,
+    )
     .option(
       "--exclude <pattern>",
       "extra glob to exclude (repeatable; additive to walker defaults)",

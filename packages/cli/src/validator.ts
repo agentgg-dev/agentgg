@@ -127,21 +127,14 @@ ${fileContent}
 ${scopeBlock}
 ## Your task
 
-Output a JSON object with this exact shape:
-
-\`\`\`
-{
-  "verdict": ${verdictOptions},
-  "reasoning": "max 4 sentences, cite a specific code element",
-  "confidence": 0.0-1.0
-}
-\`\`\`
+Return a verdict (${verdictOptions}), a short reasoning (max 4
+sentences, cite a specific code element), and your confidence.
 ${scopeVerdictNote}
-No prose before or after, no markdown fences. If you find that the
-detector's PoC wouldn't actually work (wrong endpoint shape, missing
-auth bypass step, etc.), that's strong evidence for false-positive.
-If the code legitimately matches what the detector described and the
-exploit chain is reachable from an untrusted input, that's confirmed.`;
+If you find that the detector's PoC wouldn't actually work (wrong
+endpoint shape, missing auth bypass step, etc.), that's strong
+evidence for false-positive. If the code legitimately matches what the
+detector described and the exploit chain is reachable from an untrusted
+input, that's confirmed.`;
 }
 
 /**
