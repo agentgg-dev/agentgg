@@ -1,0 +1,33 @@
+{
+  "name": "agentgg-monorepo",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "AI-powered SAST CLI with modular, community-installable agents",
+  "license": "LGPL-2.1-or-later",
+  "engines": {
+    "node": ">=20"
+  },
+  "packageManager": "pnpm@9.15.4",
+  "workspaces": ["packages/*"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/agentgg/agentgg"
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "agentgg": "tsx packages/cli/src/cli.ts",
+    "test": "vitest run",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write ."
+  },
+  "keywords": ["security", "sast", "vulnerability", "scanner", "ai", "llm", "static-analysis"],
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.13",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.1.0"
+  }
+}
