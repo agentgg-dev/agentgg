@@ -44,6 +44,8 @@ interface ScanOpts {
   maxTurns?: number;
   /** Max tool-use turns per validator call. */
   validateMaxTurns?: number;
+  /** Keep false-positive findings in the markdown report instead of filtering them out. */
+  includeFalsePositives?: boolean;
 }
 
 /**
@@ -530,6 +532,7 @@ export async function runScan(
     findings,
     filesScanned: touchedFiles.size,
     byAgent,
+    includeFalsePositives: opts.includeFalsePositives,
   });
 
   completeRun(outDir, runMeta.runId, "done", {
@@ -640,6 +643,10 @@ export function registerScanCommand(program: Command): void {
       "Max tool-use turns per validator call (default: 30). Bump if the validator hits the turn cap when --validate is on.",
       (v) => parseInt(v, 10),
       30,
+    )
+    .option(
+      "--include-false-positives",
+      "Write per-finding markdown reports for findings the validator marked false-positive (default: skip them). FP findings always stay in state/files/* regardless.",
     )
     .option(
       "--exclude <pattern>",

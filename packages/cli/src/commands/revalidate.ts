@@ -27,6 +27,8 @@ interface RevalidateOpts {
   root?: string;
   /** Max tool-use turns per validator call. */
   validateMaxTurns?: number;
+  /** Keep false-positive findings in the markdown report instead of filtering them out. */
+  includeFalsePositives?: boolean;
 }
 
 /**
@@ -217,6 +219,7 @@ export async function runRevalidate(
     findings: allFindings,
     filesScanned: records.length,
     byAgent,
+    includeFalsePositives: opts.includeFalsePositives,
   });
 
   const summary = Object.entries(verdicts)
@@ -264,6 +267,10 @@ export function registerRevalidateCommand(program: Command): void {
       "Max tool-use turns per validator call (default: 30). Bump if the validator hits the turn cap.",
       (v) => parseInt(v, 10),
       30,
+    )
+    .option(
+      "--include-false-positives",
+      "Keep false-positive findings in the markdown report (default: skip them). FP findings always stay in state/files/* regardless.",
     )
     .option(
       "--force",

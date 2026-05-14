@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { Finding } from "@agentgg/core";
 
@@ -12,6 +12,14 @@ export interface ScanReportInput {
   filesScanned: number;
   /** Per-agent findings count (slug → count). */
   byAgent: Record<string, number>;
+  /**
+   * When false (default), findings with `validation.verdict ===
+   * "false-positive"` are skipped when writing per-finding `.md`
+   * files. The summary still reports the FP count so the user can see
+   * how many the validator filtered out. When true, every finding
+   * gets a `.md` regardless of verdict.
+   */
+  includeFalsePositives?: boolean;
 }
 
 export interface ScanReportOutput {
@@ -28,10 +36,28 @@ export interface ScanReportOutput {
 export function writeMarkdownReport(input: ScanReportInput): ScanReportOutput {
   const outDir = resolve(input.outDir);
   const findingsDir = join(outDir, "findings");
+  // Clear any stale finding `.md` files from a prior run before
+  // re-rendering. Filenames are index-prefixed and the index ordering
+  // can differ between scan (detector emission order) and revalidate
+  // (alphabetical FileRecord order). Without this, a re-run would
+  // leave both the old and new files on disk, and a reader could open
+  // a stale one still showing "Validation: _not run_" alongside the
+  // fresh one with a verdict. `findings/` is fully generated — nothing
+  // user-authored lives here.
+  rmSync(findingsDir, { recursive: true, force: true });
   mkdirSync(findingsDir, { recursive: true });
 
+  // False-positives stay in the FileRecord state (audit trail + a
+  // future `revalidate --force` can re-evaluate them) but don't get
+  // their own `.md` here unless the caller opted in. The summary
+  // still counts them so the operator sees how many the validator
+  // filtered out.
+  const renderable = input.includeFalsePositives
+    ? input.findings
+    : input.findings.filter((f) => f.validation?.verdict !== "false-positive");
+
   const findingPaths: string[] = [];
-  input.findings.forEach((f, i) => {
+  renderable.forEach((f, i) => {
     const filename = findingFilename(f, i);
     const fullPath = join(findingsDir, filename);
     writeFileSync(fullPath, renderFindingMd(f), "utf8");
