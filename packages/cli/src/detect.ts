@@ -23,12 +23,13 @@ export const LlmFinding = z.object({
       "Short kebab-case label for the vulnerability class (e.g. 'sql-injection').",
     ),
   lineRange: z
-    .tuple([z.number().int().positive(), z.number().int().positive()])
-    .optional()
-    .describe("[startLine, endLine], 1-indexed. Omit if not applicable."),
+    .array(z.number().int().min(1))
+    .length(2)
+    .nullable()
+    .describe("[startLine, endLine], 1-indexed, exactly 2 elements. null if not applicable."),
   filePath: z
     .string()
-    .optional()
+    .nullable()
     .describe(
       "Path of the file the finding lives in, relative to the repo root. Required only in hunt mode where the agent picks files itself; ignored in file mode where the caller already knows the path.",
     ),
@@ -54,8 +55,7 @@ export const LlmFinding = z.object({
     ),
   references: z
     .array(z.string())
-    .default([])
-    .describe("CWE IDs, OWASP categories, or documentation links."),
+    .describe("CWE IDs, OWASP categories, or documentation links. Use [] if none."),
   confidence: z
     .number()
     .min(0)
@@ -240,8 +240,8 @@ export function hydrateFinding(
   // In hunt mode the LLM is responsible for `filePath` (it discovered
   // the file itself); in file mode the caller supplies it. Prefer the
   // LLM's value when present so the id stays stable across runs.
-  const filePath = raw.filePath && raw.filePath.trim() !== "" ? raw.filePath : fallbackFilePath;
-  const lineKey = raw.lineRange
+  const filePath = raw.filePath != null && raw.filePath.trim() !== "" ? raw.filePath : fallbackFilePath;
+  const lineKey = raw.lineRange != null
     ? `${raw.lineRange[0]}-${raw.lineRange[1]}`
     : "0";
   const id = createHash("sha256")
@@ -254,7 +254,7 @@ export function hydrateFinding(
     title: raw.title,
     vulnSlug: raw.vulnSlug,
     filePath,
-    lineRange: raw.lineRange,
+    lineRange: raw.lineRange != null ? (raw.lineRange as [number, number]) : undefined,
     summary: raw.summary,
     details: raw.details,
     poc: raw.poc,
