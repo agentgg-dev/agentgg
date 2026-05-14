@@ -1,5 +1,6 @@
 node_modules/
 dist/
+*.tsbuildinfo
 coverage/
 
 .env
@@ -21,3 +22,4 @@ Thumbs.db
 
 .cache/
 .turbo/
+.claude
