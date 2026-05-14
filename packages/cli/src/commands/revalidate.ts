@@ -13,6 +13,7 @@ import {
 import type { Command } from "commander";
 import { runConcurrent } from "../concurrent.js";
 import { type CredentialOverrides, resolveDetector } from "../llm.js";
+import { writeMarkdownReport } from "../reporters/md.js";
 
 interface RevalidateOpts {
   scope?: string;
@@ -20,11 +21,12 @@ interface RevalidateOpts {
   apiKey?: string;
   oauthToken?: string;
   baseUrl?: string;
-  concurrency?: number;
   force?: boolean;
   verbose?: boolean;
   /** Override the scanned root recorded in scan.json — rare. */
   root?: string;
+  /** Max tool-use turns per validator call. */
+  validateMaxTurns?: number;
 }
 
 /**
@@ -65,6 +67,8 @@ export async function runRevalidate(
   const detector = resolveDetector(config, {
     provider: opts.provider,
     credentials,
+    verbose: opts.verbose,
+    validateMaxTurns: opts.validateMaxTurns,
   });
 
   // Re-read --scope at revalidate time. Treat a missing path as fatal
@@ -106,13 +110,11 @@ export async function runRevalidate(
     return;
   }
 
-  const concurrency = Math.max(1, opts.concurrency ?? 5);
   console.log(`Revalidating ${tasks.length} finding(s) in ${outputDir}`);
   console.log(`  Root:        ${rootPath}`);
   console.log(`  Provider:    ${detector.name}`);
   if (scopeContent) console.log(`  Scope:       ${opts.scope}`);
   if (opts.force) console.log(`  Force:       re-classifying everything`);
-  console.log(`  Concurrency: ${concurrency}`);
   console.log("");
 
   const runMeta = createRunMeta({ type: "validate" });
@@ -125,7 +127,10 @@ export async function runRevalidate(
   // FileRecord on disk for no reason.
   const dirtyRecords = new Set<FileRecord>();
 
-  await runConcurrent(tasks, concurrency, async ({ record, finding }) => {
+  // Sequential — one finding at a time so each verdict lands
+  // before the next call starts. Validation is the per-report step;
+  // parallelism would only tangle progress and rate-limit pressure.
+  await runConcurrent(tasks, 1, async ({ record, finding }) => {
     const absPath = resolve(rootPath, finding.filePath);
     let content = fileCache.get(finding.filePath);
     if (content === undefined) {
@@ -195,6 +200,25 @@ export async function runRevalidate(
     totalDurationMs: completedAt.getTime() - startedAt.getTime(),
   });
 
+  // Re-render the per-finding markdown + summary so the on-disk
+  // reports reflect the new verdicts. Without this, `findings/*.md`
+  // keeps showing "Validation: _not run_" even though the underlying
+  // FileRecord has the verdict.
+  const allFindings = records.flatMap((r) => r.findings);
+  const byAgent: Record<string, number> = {};
+  for (const f of allFindings) {
+    byAgent[f.agentSlug] = (byAgent[f.agentSlug] ?? 0) + 1;
+  }
+  writeMarkdownReport({
+    outDir: outputDir,
+    root: rootPath,
+    startedAt,
+    completedAt,
+    findings: allFindings,
+    filesScanned: records.length,
+    byAgent,
+  });
+
   const summary = Object.entries(verdicts)
     .sort()
     .map(([v, n]) => `${v}=${n}`)
@@ -235,7 +259,12 @@ export function registerRevalidateCommand(program: Command): void {
       "One-shot Anthropic OAuth token (sk-ant-oat…). Not persisted.",
     )
     .option("--base-url <url>", "One-shot Ollama base URL (not persisted)")
-    .option("--concurrency <n>", "parallel validation calls", (v) => parseInt(v, 10), 5)
+    .option(
+      "--validate-max-turns <n>",
+      "Max tool-use turns per validator call (default: 30). Bump if the validator hits the turn cap.",
+      (v) => parseInt(v, 10),
+      30,
+    )
     .option(
       "--force",
       "re-validate findings that already have a verdict (default: skip them)",

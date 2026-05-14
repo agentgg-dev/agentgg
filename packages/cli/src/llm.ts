@@ -32,6 +32,8 @@ export interface ResolveOptions {
   credentials?: CredentialOverrides;
   /** Stream tool-use messages to stdout during hunt-mode runs. */
   verbose?: boolean;
+  /** Turn cap for each validator call. */
+  validateMaxTurns?: number;
 }
 
 /**
@@ -95,6 +97,7 @@ function buildAnthropicDetector(
       oauthToken,
       model: modelName,
       verbose: options.verbose,
+      validateMaxTurns: options.validateMaxTurns,
     });
   }
 
@@ -109,6 +112,7 @@ function buildAnthropicDetector(
       apiKey,
       model: modelName,
       verbose: options.verbose,
+      validateMaxTurns: options.validateMaxTurns,
     });
     return {
       name: "anthropic-api",

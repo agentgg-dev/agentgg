@@ -61,6 +61,7 @@ export class ClaudeAgentDetector implements Detector {
   private readonly oauthToken?: string;
   private readonly model: string;
   private readonly verbose: boolean;
+  private readonly validateMaxTurns: number;
 
   constructor(opts: {
     apiKey?: string;
@@ -68,6 +69,8 @@ export class ClaudeAgentDetector implements Detector {
     model: string;
     /** Stream tool-use messages (Glob/Grep/Read/etc.) to stdout as the agent runs. */
     verbose?: boolean;
+    /** Turn cap for the validator's single-finding call. Default 30. */
+    validateMaxTurns?: number;
   }) {
     if (!opts.apiKey && !opts.oauthToken) {
       throw new Error("ClaudeAgentDetector needs either apiKey or oauthToken");
@@ -76,6 +79,7 @@ export class ClaudeAgentDetector implements Detector {
     this.oauthToken = opts.oauthToken;
     this.model = opts.model;
     this.verbose = opts.verbose ?? false;
+    this.validateMaxTurns = opts.validateMaxTurns ?? 30;
     this.name = opts.oauthToken ? "anthropic-oauth" : "anthropic-api-via-cli";
   }
 
@@ -124,10 +128,16 @@ export class ClaudeAgentDetector implements Detector {
 
   async validateFinding(args: { finding: Finding; fileContent: string; scope?: string }) {
     const prompt = buildValidatePrompt(args);
+    // Single-turn in theory, but `permissionMode: "bypassPermissions"`
+    // lets the model call default tools (Grep/Read) regardless of our
+    // empty `allowedTools`. When the model decides to double-check the
+    // finding with a Grep, that tool call eats a turn — so we give the
+    // verifying turn → tool result → verdict path headroom via
+    // `--validate-max-turns` (default 5).
     const validated = await this.runStructured({
       prompt,
       allowedTools: [],
-      maxTurns: 1,
+      maxTurns: this.validateMaxTurns,
       schema: LlmValidation,
     });
     return asValidationField(validated);

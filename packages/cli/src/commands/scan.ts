@@ -42,6 +42,8 @@ interface ScanOpts {
   revalidateAll?: boolean;
   /** Max tool-use turns for hunt-mode agents. File mode and validator are single-turn. */
   maxTurns?: number;
+  /** Max tool-use turns per validator call. */
+  validateMaxTurns?: number;
 }
 
 /**
@@ -113,6 +115,7 @@ export async function runScan(
     provider: opts.provider,
     credentials,
     verbose: opts.verbose,
+    validateMaxTurns: opts.validateMaxTurns,
   });
 
   // Load builtins + ~/.agentgg/agents/custom/. Same catalog `agents list`
@@ -419,14 +422,16 @@ export async function runScan(
       : candidates.filter((f) => !f.validation);
     const carriedOver = candidates.length - validatable.length;
     if (validatable.length > 0 || carriedOver > 0) {
-      const concurrency = Math.max(1, opts.concurrency ?? 5);
       const scopeNote = scopeContent ? " with scope" : "";
       const carryNote = carriedOver > 0 ? ` (${carriedOver} cached)` : "";
       console.log(
-        `\nValidating ${validatable.length} finding(s)${scopeNote}${carryNote} (concurrency ${concurrency})`,
+        `\nValidating ${validatable.length} finding(s)${scopeNote}${carryNote} (one at a time)`,
       );
       const fileCache = new Map<string, string | null>();
-      await runConcurrent(validatable, concurrency, async (finding) => {
+      // Validation always runs sequentially — one finding at a time —
+      // so progress is legible and per-finding failures don't get
+      // tangled with parallel siblings.
+      await runConcurrent(validatable, 1, async (finding) => {
         let content = fileCache.get(finding.filePath);
         if (content === undefined) {
           try {
@@ -626,9 +631,15 @@ export function registerScanCommand(program: Command): void {
     .option("--concurrency <n>", "parallel file processing", (v) => parseInt(v, 10), 5)
     .option(
       "--max-turns <n>",
-      "Max tool-use turns for hunt-mode agents (default: 150). File-mode agents and the validator are single-turn and ignore this.",
+      "Max tool-use turns for hunt-mode agents (default: 150). File-mode agents ignore this.",
       (v) => parseInt(v, 10),
       150,
+    )
+    .option(
+      "--validate-max-turns <n>",
+      "Max tool-use turns per validator call (default: 30). Bump if the validator hits the turn cap when --validate is on.",
+      (v) => parseInt(v, 10),
+      30,
     )
     .option(
       "--exclude <pattern>",
