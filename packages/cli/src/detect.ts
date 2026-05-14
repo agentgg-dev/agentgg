@@ -22,6 +22,12 @@ export const LlmFinding = z.object({
     .describe(
       "Short kebab-case label for the vulnerability class (e.g. 'sql-injection').",
     ),
+  agentSlug: z
+    .string()
+    .nullable()
+    .describe(
+      "Slug of the walker agent whose detection brief surfaced this finding. Required when the investigation pooled multiple agents into one session (so we can attribute findings back). Null in single-agent investigations — the runtime stamps the calling agent's slug.",
+    ),
   lineRange: z
     .array(z.number().int().min(1))
     .length(2)
@@ -102,6 +108,16 @@ export interface Detector {
   hunt(args: HuntArgs): Promise<Finding[]>;
 
   /**
+   * Walker-mode per-file investigation. The walker has already
+   * enumerated this file as a candidate (matches `filePatterns`, has
+   * at least one `preFilter` hit). The model gets the file content,
+   * the line-level hits, and tool access to follow imports / chase
+   * callers. Same enforcement-by-SDK-schema as `detectFile` and
+   * `hunt`. Backends without tool support throw.
+   */
+  investigate(args: InvestigateArgs): Promise<Finding[]>;
+
+  /**
    * Validation phase — second-pass classifier that re-reads the source
    * code for one finding and decides confirmed / false-positive /
    * out-of-scope / uncertain. Same backend as detection by default;
@@ -126,6 +142,66 @@ export interface HuntArgs {
   /** Files larger than this should be skipped by the agent. */
   maxFileSizeKb: number;
   /** Cap on tool-use turns for the hunt session. */
+  maxTurns: number;
+}
+
+/**
+ * One scanner hit inside a candidate file — line number + which
+ * preFilter pattern matched. Surfaced to the LLM as anchor points so
+ * it doesn't have to rediscover what was suspicious.
+ */
+export interface InvestigateHit {
+  line: number;
+  label: string;
+  snippet: string;
+}
+
+/**
+ * One agent's hits in a candidate file. When multiple walker agents
+ * flag the same file, the runtime pools them into a single
+ * investigation so we don't pay N LLM calls on the same file (matches
+ * deepsec's file-scoped, matcher-pooled batching).
+ */
+export interface InvestigateAgentHits {
+  agentSlug: string;
+  hits: InvestigateHit[];
+}
+
+/**
+ * One candidate file in a walker batch. Files arrive here only after
+ * walker enumeration (`filePatterns`/`excludePatterns`) plus at least
+ * one `preFilter` hit from at least one walker agent.
+ */
+export interface InvestigateCandidate {
+  filePath: string;
+  content: string;
+  /**
+   * Hits grouped by agent slug. A single-agent investigation has one
+   * entry here; a multi-agent investigation has one per agent whose
+   * preFilter hit this file. Order is stable so the prompt and the
+   * model both see the same agent ordering.
+   */
+  hitsByAgent: InvestigateAgentHits[];
+}
+
+export interface InvestigateArgs {
+  /**
+   * Every agent contributing to this batch (in stable order). For a
+   * single-agent investigation this is `[agent]`; for a cross-agent
+   * pooled batch this is the union of agents whose preFilter caught
+   * any file in `candidates`. The investigator prompt includes each
+   * agent's detection brief.
+   */
+  agents: Agent[];
+  /** Absolute path to the target codebase (for tool cwd). */
+  rootDir: string;
+  /**
+   * Batched candidate files. The LLM sees the whole batch in one
+   * session and can cross-reference between them. Same shape as
+   * deepsec's `batch: FileRecord[]`.
+   */
+  candidates: InvestigateCandidate[];
+  /** Tool-use turn budget for this whole batched session. */
   maxTurns: number;
 }
 
@@ -188,6 +264,131 @@ and it turned out to be safe or already patched, say so explicitly —
 that signal lets a downstream consumer distinguish real findings from
 analyzed-and-cleared items. Do NOT invent findings to satisfy
 expectations — false positives erode trust.`;
+}
+
+/**
+ * Build the prompt for one walker-mode batched investigation. A
+ * batch contains N candidate files (each carrying hits from one OR
+ * more walker agents) that the LLM sees in a single session, the
+ * same shape deepsec sends to its investigator. When multiple agents
+ * flagged the same file, this is what merges them: one investigation
+ * looks at the file once, applying every agent's brief.
+ */
+export function buildInvestigatePrompt(
+  agents: ReadonlyArray<Agent>,
+  candidates: ReadonlyArray<InvestigateCandidate>,
+): string {
+  const fileBlocks = candidates
+    .map((c, i) => renderCandidateBlock(c, i + 1, candidates.length))
+    .join("\n\n---\n\n");
+
+  const briefs = agents
+    .map(
+      (a) => `### Brief: \`${a.slug}\`
+
+${a.prompt}`,
+    )
+    .join("\n\n---\n\n");
+
+  const multi = agents.length > 1;
+  const attributionRule = multi
+    ? `When multiple agents' briefs are listed above, every finding MUST set \`agentSlug\` to the slug of the brief whose detection criteria the finding satisfies. Findings without \`agentSlug\` in a multi-agent batch are dropped.`
+    : `Set \`agentSlug\` to \`null\` (or omit it) — the runtime stamps the single agent's slug.`;
+
+  return `${INVESTIGATOR_SCAFFOLDING}
+
+## Detection brief${multi ? "s" : ""}
+
+${briefs}
+
+---
+
+You are investigating a BATCH of ${candidates.length} candidate file${
+    candidates.length === 1 ? "" : "s"
+  } flagged by ${
+    multi ? `${agents.length} scanner agents` : "the agent's scanner"
+  }. You have Read / Glob / Grep available — your working directory
+is the repository root. Use the tools to chase imports, callers, and
+shared helpers across files in the batch (and outside it when
+judgment requires it), but do NOT re-discover the candidate set —
+the files below are already the targets.
+
+## Target files
+
+${fileBlocks}
+
+## Reporting
+
+Investigate each file in the batch. Apply every applicable detection
+brief to its corresponding hits. If a flagged candidate turns out to
+be safe or already patched, simply omit it from the findings — do
+NOT emit a low-confidence finding to "be thorough." For each real
+issue, every finding's \`filePath\` should be the file the bug lives
+in (one of the batch members, or a related file you uncovered while
+tracing — set \`filePath\` accordingly). Be specific: cite the
+exact line range and code element. Do NOT invent findings to satisfy
+expectations — false positives erode trust.
+
+${attributionRule}`;
+}
+
+/**
+ * Shared investigator scaffolding embedded into every walker prompt.
+ * Same intent as deepsec's shared investigator prelude: FP guidance,
+ * severity calibration, anti-fabrication rules. Per-detection
+ * specialization happens in the agents' brief bodies that follow.
+ */
+const INVESTIGATOR_SCAFFOLDING = `You are a security auditor investigating one or more candidate files
+flagged by scanner agents. Each agent below declares its detection
+brief — the bug class it cares about and how to recognize it.
+
+General rules:
+
+- Apply each brief to the hits the corresponding agent flagged. A
+  hit is a starting point, not a conclusion — confirm by reading the
+  code (use Read/Glob/Grep to chase imports/callers/configs).
+- A finding is only "confirmed" when you can identify the specific
+  unsafe code element AND articulate the attacker action that
+  triggers it.
+- When the code looks safe / already mitigated / out of scope, emit
+  NO finding for that hit. Empty findings array is the correct
+  answer for a clean file.
+- Set numeric \`confidence\` honestly: ~0.9 for confirmed, ~0.6 for
+  probable / chained, ~0.3 for uncertain. Don't anchor on the brief's
+  confidence guidance if your investigation contradicts it.`;
+
+function renderCandidateBlock(
+  c: InvestigateCandidate,
+  idx: number,
+  total: number,
+): string {
+  const lang = languageFromPath(c.filePath);
+  const hitsBlock = c.hitsByAgent
+    .map((group) => {
+      const visibleHits = group.hits.filter(
+        (h) => h.label !== "(no preFilter)",
+      );
+      if (visibleHits.length === 0) {
+        return `  - [${group.agentSlug}] (no specific scanner hits — review the whole file)`;
+      }
+      return visibleHits
+        .map(
+          (h) =>
+            `  - [${group.agentSlug}] L${h.line} [${h.label}]: ${h.snippet || "(line)"}`,
+        )
+        .join("\n");
+    })
+    .join("\n");
+
+  return `### Candidate ${idx} / ${total}: \`${c.filePath}\`
+
+\`\`\`${lang}
+${c.content}
+\`\`\`
+
+**Scanner pre-filter hits:**
+
+${hitsBlock}`;
 }
 
 /**

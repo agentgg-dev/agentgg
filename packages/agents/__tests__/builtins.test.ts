@@ -8,7 +8,7 @@ describe("BUILTIN_AGENTS", () => {
   });
 
   it("has the expected count", () => {
-    expect(BUILTIN_AGENTS).toHaveLength(5);
+    expect(BUILTIN_AGENTS).toHaveLength(6);
   });
 
   it("every builtin passes the Agent schema", () => {
@@ -60,7 +60,8 @@ describe("BUILTIN_AGENTS", () => {
     expect(slugs).toContain("sql-injection");
     expect(slugs).toContain("command-injection");
     expect(slugs).toContain("missing-access-control");
-    expect(slugs).toContain("openclaw-audit-allowlist-identity");
+    expect(slugs).toContain("openclaw-audit-allowlist-identity-hunter");
+    expect(slugs).toContain("openclaw-audit-allowlist-identity-walker");
   });
 });
 
@@ -95,11 +96,18 @@ describe("specific builtins", () => {
     expect(a.filePatterns).toEqual([]);
   });
 
-  it("openclaw-audit-allowlist-identity is hunt mode with GHSA references", () => {
-    const a = bySlug("openclaw-audit-allowlist-identity");
+  it("openclaw-audit-allowlist-identity-hunter is hunt mode with GHSA references", () => {
+    const a = bySlug("openclaw-audit-allowlist-identity-hunter");
     expect(a.mode).toBe("hunt");
     expect(a.filePatterns).toEqual([]);
     expect(a.references?.some((r) => r.startsWith("GHSA-"))).toBe(true);
+  });
+
+  it("openclaw-audit-allowlist-identity-walker is walker mode with preFilter + filePatterns", () => {
+    const a = bySlug("openclaw-audit-allowlist-identity-walker");
+    expect(a.mode).toBe("walker");
+    expect(a.filePatterns.length).toBeGreaterThan(0);
+    expect(a.preFilter.length).toBeGreaterThan(0);
   });
 
   it("no builtin carries a severity field (scoring is per-finding)", () => {

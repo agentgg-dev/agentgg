@@ -34,6 +34,10 @@ export interface ResolveOptions {
   verbose?: boolean;
   /** Turn cap for each validator call. */
   validateMaxTurns?: number;
+  /** SDK `effort` setting for all tool-using calls. */
+  effort?: "low" | "medium" | "high" | "max";
+  /** SDK `thinking` setting for all tool-using calls. */
+  thinking?: "off" | "adaptive" | "enabled";
 }
 
 /**
@@ -98,6 +102,8 @@ function buildAnthropicDetector(
       model: modelName,
       verbose: options.verbose,
       validateMaxTurns: options.validateMaxTurns,
+      effort: options.effort,
+      thinking: options.thinking,
     });
   }
 
@@ -113,11 +119,16 @@ function buildAnthropicDetector(
       model: modelName,
       verbose: options.verbose,
       validateMaxTurns: options.validateMaxTurns,
+      effort: options.effort,
+      thinking: options.thinking,
     });
     return {
       name: "anthropic-api",
       detectFile: (args) => fileDetector.detectFile(args),
       hunt: (args) => huntDetector.hunt(args),
+      // Walker mode needs tool access; route through the agent SDK
+      // just like hunt does.
+      investigate: (args) => huntDetector.investigate(args),
       validateFinding: (args) => fileDetector.validateFinding(args),
     };
   }

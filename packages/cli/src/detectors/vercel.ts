@@ -4,6 +4,7 @@ import {
   DetectionResult,
   type Detector,
   type HuntArgs,
+  type InvestigateArgs,
   buildDetectPrompt,
   hydrateFinding,
 } from "../detect.js";
@@ -66,6 +67,15 @@ export class VercelDetector implements Detector {
       `Hunt mode is not supported by the VercelDetector (provider: ${this.name}). ` +
         "Hunt-mode agents are routed through the Claude Agent SDK. " +
         "Use `--provider anthropic` (API key or OAuth) for hunt agents, " +
+        "or change the agent's mode to 'file'.",
+    );
+  }
+
+  async investigate(_args: InvestigateArgs): Promise<Finding[]> {
+    throw new Error(
+      `Walker mode is not supported by the VercelDetector (provider: ${this.name}). ` +
+        "Walker-mode per-file investigation needs tool access; route through " +
+        "the Claude Agent SDK by using `--provider anthropic` (API key or OAuth), " +
         "or change the agent's mode to 'file'.",
     );
   }

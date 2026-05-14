@@ -6,8 +6,10 @@ import {
   DetectionResult,
   type Detector,
   type HuntArgs,
+  type InvestigateArgs,
   buildDetectPrompt,
   buildHuntPrompt,
+  buildInvestigatePrompt,
   hydrateFinding,
 } from "../detect.js";
 import { LlmValidation, asValidationField, buildValidatePrompt } from "../validator.js";
@@ -62,6 +64,8 @@ export class ClaudeAgentDetector implements Detector {
   private readonly model: string;
   private readonly verbose: boolean;
   private readonly validateMaxTurns: number;
+  private readonly effort?: "low" | "medium" | "high" | "max";
+  private readonly thinking?: "off" | "adaptive" | "enabled";
 
   constructor(opts: {
     apiKey?: string;
@@ -71,6 +75,10 @@ export class ClaudeAgentDetector implements Detector {
     verbose?: boolean;
     /** Turn cap for the validator's single-finding call. Default 30. */
     validateMaxTurns?: number;
+    /** SDK `effort` passed on every tool-using call. */
+    effort?: "low" | "medium" | "high" | "max";
+    /** SDK `thinking` mode. `adaptive` matches Claude Code interactive + deepsec. */
+    thinking?: "off" | "adaptive" | "enabled";
   }) {
     if (!opts.apiKey && !opts.oauthToken) {
       throw new Error("ClaudeAgentDetector needs either apiKey or oauthToken");
@@ -80,6 +88,8 @@ export class ClaudeAgentDetector implements Detector {
     this.model = opts.model;
     this.verbose = opts.verbose ?? false;
     this.validateMaxTurns = opts.validateMaxTurns ?? 30;
+    this.effort = opts.effort;
+    this.thinking = opts.thinking;
     this.name = opts.oauthToken ? "anthropic-oauth" : "anthropic-api-via-cli";
   }
 
@@ -126,6 +136,49 @@ export class ClaudeAgentDetector implements Detector {
     );
   }
 
+  async investigate(args: InvestigateArgs): Promise<Finding[]> {
+    const { agents, rootDir, candidates, maxTurns } = args;
+    const prompt = buildInvestigatePrompt(agents, candidates);
+
+    // Walker-mode batched flow: the model sees N candidate files in
+    // one session — possibly with hits from multiple agents pooled
+    // per file — and can cross-reference between them, with tools
+    // to chase context outside the batch. Same SDK structured output
+    // guarantee as hunt — final output is schema-validated by the
+    // SDK, no fence parsing.
+    const result = await this.runStructured({
+      prompt,
+      allowedTools: ["Read", "Glob", "Grep"],
+      maxTurns,
+      cwd: rootDir,
+      schema: DetectionResult,
+    });
+
+    // Attribution rules:
+    // - Single-agent batch: every finding is stamped with that agent.
+    // - Multi-agent batch: the model is told to set `agentSlug` per
+    //   finding; we trust that tag. Findings without a recognized
+    //   agentSlug in a multi-agent batch are dropped (they're either
+    //   model-invented or unattributable).
+    const agentsBySlug = new Map(agents.map((a) => [a.slug, a]));
+    const fallbackFilePath = candidates[0]?.filePath ?? "(unknown)";
+    const findings: Finding[] = [];
+    for (const f of result.findings) {
+      const owningAgent = (() => {
+        if (agents.length === 1) return agents[0];
+        if (f.agentSlug && agentsBySlug.has(f.agentSlug)) {
+          return agentsBySlug.get(f.agentSlug)!;
+        }
+        return undefined;
+      })();
+      if (!owningAgent) continue;
+      findings.push(
+        hydrateFinding(f, owningAgent, f.filePath ?? fallbackFilePath),
+      );
+    }
+    return findings;
+  }
+
   async validateFinding(args: { finding: Finding; fileContent: string; scope?: string }) {
     const prompt = buildValidatePrompt(args);
     // Single-turn in theory, but `permissionMode: "bypassPermissions"`
@@ -169,6 +222,10 @@ export class ClaudeAgentDetector implements Detector {
         prompt: opts.prompt,
         options: {
           ...(opts.cwd ? { cwd: opts.cwd } : {}),
+          ...(this.effort ? { effort: this.effort } : {}),
+          ...(this.thinking && this.thinking !== "off"
+            ? { thinking: { type: this.thinking } }
+            : {}),
           allowedTools: opts.allowedTools,
           permissionMode: "bypassPermissions",
           maxTurns: opts.maxTurns,

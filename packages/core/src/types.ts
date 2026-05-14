@@ -23,8 +23,36 @@ export type NoiseTier = z.infer<typeof NoiseTier>;
  *   Good for cross-file logic (access-control flow, taint chains,
  *   CVE-style pattern hunts). One call per agent regardless of repo size.
  */
-export const AgentMode = z.enum(["file", "hunt"]);
+/**
+ * How an agent locates and inspects code:
+ *   - `file`   — single-turn, no tools, one LLM call per file matching
+ *                `filePatterns`. Cheapest. Used for surface-level
+ *                pattern detection that fits in one file's context.
+ *   - `hunt`   — agentic session with Read/Glob/Grep across the whole
+ *                repo. The agent discovers its own files. Most flexible,
+ *                most expensive, hardest to make deterministic.
+ *   - `walker` — deepsec-style. Walker enumerates files matching
+ *                `filePatterns` (cheap, deterministic), the agent's
+ *                `preFilter` regexes narrow further to "candidates"
+ *                with line hits, then each candidate gets its own
+ *                anchored agentic session with tools. Same depth as
+ *                hunt without burning turns on file discovery.
+ */
+export const AgentMode = z.enum(["file", "hunt", "walker"]);
 export type AgentMode = z.infer<typeof AgentMode>;
+
+/**
+ * One regex in a walker agent's `preFilter`. Files where any
+ * `preFilter` regex matches at least one line become "candidates" the
+ * LLM investigates. The optional `label` is shown to the model
+ * alongside the line number so it knows *why* the scanner flagged
+ * the line.
+ */
+export const AgentPreFilterPattern = z.object({
+  regex: z.string(),
+  label: z.string().optional(),
+});
+export type AgentPreFilterPattern = z.infer<typeof AgentPreFilterPattern>;
 
 export const ValidationVerdict = z.enum([
   "confirmed",
@@ -54,6 +82,38 @@ export const Agent = z.object({
   noiseTier: NoiseTier.default("normal"),
   /** Glob patterns the agent applies to. Empty = all files. */
   filePatterns: z.array(z.string()).default([]),
+  /**
+   * Glob patterns the agent should never touch. Authors use this to
+   * declare a permanent skip list (tests, fixtures, e2e, generated
+   * code) so CLI users don't need to remember `--exclude-tests` /
+   * `--exclude` flags. Combined additively with any CLI patterns at
+   * runtime. Minimatch dialect — same as `filePatterns`.
+   */
+  excludePatterns: z.array(z.string()).default([]),
+  /**
+   * Walker-mode only: regexes that narrow `filePatterns`-matching
+   * files down to "candidates" worth investigating. A file becomes a
+   * candidate when at least one regex matches at least one line. The
+   * matching line numbers and labels are passed to the LLM as scanner
+   * hits — the same shape deepsec's matchers produce. Ignored in
+   * `file` and `hunt` modes.
+   */
+  preFilter: z.array(AgentPreFilterPattern).default([]),
+  /**
+   * Walker-mode only: tool-use turn budget per batched investigation
+   * session. A batch can contain multiple candidate files; the model
+   * sees all of them at once and uses tools to chase context across
+   * them. Default 30. Same shape as deepsec's batch `maxTurns`.
+   */
+  maxTurnsPerBatch: z.number().int().min(1).default(30),
+  /**
+   * Walker-mode only: how many candidate files to pack into one
+   * investigation session. Larger batches give the model more
+   * cross-file context per call (and amortize the LLM round-trip
+   * cost) but reduce concurrency. Default 5 — sane middle ground
+   * for most agents.
+   */
+  maxFilesPerBatch: z.number().int().min(1).default(5),
   /** Optional language gate (e.g. ["typescript", "javascript"]). */
   languages: z.array(z.string()).default([]),
   /** Optional pre-filter regexes; if any match, the file is sent to the LLM. */

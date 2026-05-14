@@ -143,6 +143,8 @@ describe("VercelDetector", () => {
           references: ["CWE-89"],
           confidence: 0.9,
           lineRange: [12, 12],
+          filePath: null,
+          agentSlug: null,
         },
       ],
     });

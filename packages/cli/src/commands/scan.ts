@@ -16,6 +16,7 @@ import { loadAllAgents } from "../agent-catalog.js";
 import { runConcurrent } from "../concurrent.js";
 import { listChangedFiles } from "../diff.js";
 import { type CredentialOverrides, resolveDetector } from "../llm.js";
+import { evaluatePreFilter } from "../pre-filter.js";
 import { writeMarkdownReport } from "../reporters/md.js";
 import { resolveTemplates } from "../template.js";
 import { TEST_EXCLUDE_PATTERNS, type WalkConfig, walkForAgents } from "../walker.js";
@@ -44,6 +45,14 @@ interface ScanOpts {
   maxTurns?: number;
   /** Max tool-use turns per validator call. */
   validateMaxTurns?: number;
+  /** Walker mode: max tool-use turns per batched investigation. Overrides agent default. */
+  maxTurnsPerBatch?: number;
+  /** Walker mode: candidate files per investigation batch. Overrides agent default. */
+  maxFilesPerBatch?: number;
+  /** SDK reasoning effort. Maps to `effort` option. */
+  effort?: "low" | "medium" | "high" | "max";
+  /** SDK thinking mode. `adaptive` is what deepsec uses; `off` skips entirely. */
+  thinking?: "off" | "adaptive" | "enabled";
   /** Keep false-positive findings in the markdown report instead of filtering them out. */
   includeFalsePositives?: boolean;
 }
@@ -118,6 +127,8 @@ export async function runScan(
     credentials,
     verbose: opts.verbose,
     validateMaxTurns: opts.validateMaxTurns,
+    effort: opts.effort,
+    thinking: opts.thinking,
   });
 
   // Load builtins + ~/.agentgg/agents/custom/. Same catalog `agents list`
@@ -255,6 +266,7 @@ export async function runScan(
 
   const fileAgents = selectedAgents.filter((a) => a.mode === "file");
   const huntAgents = selectedAgents.filter((a) => a.mode === "hunt");
+  const walkerAgents = selectedAgents.filter((a) => a.mode === "walker");
 
   // -------- hunt-mode agents (run FIRST) --------
   // Hunt agents are the heavier pass — give them a head start so the
@@ -270,10 +282,17 @@ export async function runScan(
     for (const agent of huntAgents) {
       console.log(`  ${agent.slug}[hunt]: scanning whole repo (Read/Glob/Grep)`);
       try {
+        // Merge the agent's declared `excludePatterns` (from
+        // frontmatter) with the CLI's --exclude / --exclude-tests
+        // list, deduped. Either alone is honored; both compose
+        // additively.
+        const agentExcludes = Array.from(
+          new Set([...excludePatterns, ...(agent.excludePatterns ?? [])]),
+        );
         const huntFindings = await detector.hunt({
           agent,
           rootDir: root,
-          excludePatterns,
+          excludePatterns: agentExcludes,
           includePatterns,
           maxFileSizeKb: opts.maxFileSize ?? 500,
           maxTurns: opts.maxTurns ?? 150,
@@ -310,6 +329,165 @@ export async function runScan(
         logDetectionError(opts, `hunt:${agent.slug}`, err);
       }
     }
+  }
+
+  // -------- walker-mode agents (run AFTER hunts, BEFORE file mode) --------
+  // Deepsec-style: walker enumerates by filePatterns, each agent's
+  // preFilter regexes narrow to candidates, then matching candidates
+  // are POOLED ACROSS AGENTS by file. A file flagged by N agents is
+  // investigated ONCE in a session that carries all N agents'
+  // detection briefs + all N agents' hits, then findings are
+  // attributed back per-agent. Same cost shape as deepsec — same
+  // file is never paid for twice.
+  if (opts.diff && walkerAgents.length > 0) {
+    console.log(
+      `  Skipping ${walkerAgents.length} walker-mode agent(s) under --diff (${walkerAgents.map((a) => a.slug).join(", ")})`,
+    );
+  } else if (walkerAgents.length > 0) {
+    const walkerWork = walkForAgents(root, walkerAgents, walkCfg);
+
+    // file → { content, agentSlug → hits } — the cross-agent pool.
+    // Reading each file at most once even when many agents match.
+    type PooledFile = {
+      relPath: string;
+      content: string;
+      hitsByAgent: Map<string, { line: number; label: string; snippet: string }[]>;
+    };
+    const pool = new Map<string, PooledFile>();
+    const agentsBySlug = new Map(walkerAgents.map((a) => [a.slug, a]));
+
+    for (const { agent, files } of walkerWork) {
+      for (const relPath of files) {
+        let entry = pool.get(relPath);
+        if (!entry) {
+          let content: string;
+          try {
+            content = readFileSync(resolve(root, relPath), "utf8");
+          } catch {
+            continue;
+          }
+          entry = { relPath, content, hitsByAgent: new Map() };
+          pool.set(relPath, entry);
+        }
+        const hits = evaluatePreFilter(entry.content, agent.preFilter ?? []);
+        if (hits.length > 0) {
+          entry.hitsByAgent.set(agent.slug, hits);
+          touchedFiles.add(relPath);
+        }
+      }
+    }
+
+    // Drop files with no hits from any agent — they were walked but
+    // nothing flagged them. Files with at least one agent's hits
+    // become the candidates for batched investigation.
+    const candidates: PooledFile[] = [];
+    for (const entry of pool.values()) {
+      if (entry.hitsByAgent.size > 0) candidates.push(entry);
+    }
+
+    // Use the largest declared maxFilesPerBatch / maxTurnsPerBatch
+    // across participating agents as the batch sizing. CLI overrides
+    // either way. Agents with smaller declared budgets implicitly
+    // benefit from the larger value when pooled with others.
+    const concurrency = Math.max(1, opts.concurrency ?? 5);
+    const declaredBatchSize = Math.max(
+      ...walkerAgents.map((a) => a.maxFilesPerBatch ?? 5),
+    );
+    const batchSize = Math.max(
+      1,
+      opts.maxFilesPerBatch ?? declaredBatchSize,
+    );
+    const declaredMaxTurns = Math.max(
+      ...walkerAgents.map((a) => a.maxTurnsPerBatch ?? 30),
+    );
+    const maxTurnsPerBatch =
+      opts.maxTurnsPerBatch ?? declaredMaxTurns;
+
+    const batches: PooledFile[][] = [];
+    for (let i = 0; i < candidates.length; i += batchSize) {
+      batches.push(candidates.slice(i, i + batchSize));
+    }
+
+    const totalAgentHits = candidates.reduce(
+      (n, c) => n + c.hitsByAgent.size,
+      0,
+    );
+    console.log(
+      `  walker: ${walkerAgents.length} agent(s), ${candidates.length} candidate file(s), ${totalAgentHits} (file × agent) hit pair(s) → ${batches.length} batch(es) of up to ${batchSize} (concurrency ${concurrency})`,
+    );
+
+    await runConcurrent(batches, concurrency, async (batch) => {
+      // Union of agents that flagged any file in this batch — those
+      // are the briefs the investigator needs.
+      const agentSlugsInBatch = new Set<string>();
+      for (const c of batch) {
+        for (const slug of c.hitsByAgent.keys()) agentSlugsInBatch.add(slug);
+      }
+      const agentsInBatch = Array.from(agentSlugsInBatch)
+        .map((s) => agentsBySlug.get(s))
+        .filter((a): a is NonNullable<typeof a> => Boolean(a));
+
+      const labels = batch.map((c) => c.relPath).join(", ");
+      try {
+        const batchFindings = await detector.investigate({
+          agents: agentsInBatch,
+          rootDir: root,
+          candidates: batch.map((c) => ({
+            filePath: c.relPath,
+            content: c.content,
+            hitsByAgent: Array.from(c.hitsByAgent.entries()).map(
+              ([agentSlug, hits]) => ({ agentSlug, hits }),
+            ),
+          })),
+          maxTurns: maxTurnsPerBatch,
+        });
+        findings.push(...batchFindings);
+        for (const f of batchFindings) {
+          byAgent[f.agentSlug] = (byAgent[f.agentSlug] ?? 0) + 1;
+        }
+        if (opts.verbose || batchFindings.length > 0) {
+          console.log(
+            `    batch [${labels}]: ${batchFindings.length} finding(s) across ${agentsInBatch.length} agent(s)`,
+          );
+        }
+        // Persist per (file, agent) pair: each finding goes to its
+        // owning agent's record on its filePath. A finding whose
+        // filePath is outside the batch (model followed an import)
+        // still gets routed to the right FileRecord.
+        for (const f of batchFindings) {
+          if (!f.filePath || f.filePath === "(unknown)") continue;
+          const owningAgent = agentsBySlug.get(f.agentSlug);
+          if (!owningAgent) continue;
+          const inBatch = batch.find((c) => c.relPath === f.filePath);
+          let content: string;
+          if (inBatch) {
+            content = inBatch.content;
+          } else {
+            try {
+              content = readFileSync(resolve(root, f.filePath), "utf8");
+            } catch {
+              continue;
+            }
+          }
+          persistDetection(f.filePath, owningAgent, content, [f]);
+        }
+        // Stamp empty AnalysisRun for (batch member, agent) pairs
+        // that produced zero findings so status reports "analyzed".
+        for (const c of batch) {
+          for (const slug of c.hitsByAgent.keys()) {
+            const fHere = batchFindings.some(
+              (f) => f.filePath === c.relPath && f.agentSlug === slug,
+            );
+            if (fHere) continue;
+            const owningAgent = agentsBySlug.get(slug);
+            if (!owningAgent) continue;
+            persistDetection(c.relPath, owningAgent, c.content, []);
+          }
+        }
+      } catch (err) {
+        logDetectionError(opts, `walker:batch[${labels}]`, err);
+      }
+    });
   }
 
   // -------- file-mode agents (run AFTER hunts) --------
@@ -643,6 +821,24 @@ export function registerScanCommand(program: Command): void {
       "Max tool-use turns per validator call (default: 30). Bump if the validator hits the turn cap when --validate is on.",
       (v) => parseInt(v, 10),
       30,
+    )
+    .option(
+      "--max-turns-per-batch <n>",
+      "Walker mode: max tool-use turns per batched investigation. Overrides the agent's `maxTurnsPerBatch`. Default 30.",
+      (v) => parseInt(v, 10),
+    )
+    .option(
+      "--max-files-per-batch <n>",
+      "Walker mode: candidate files packed into one investigation batch. Overrides the agent's `maxFilesPerBatch`. Default 5. Different from --concurrency: batch size = files per LLM session; --concurrency = sessions in parallel.",
+      (v) => parseInt(v, 10),
+    )
+    .option(
+      "--effort <level>",
+      "SDK reasoning effort for tool-using calls (hunt / walker / validate). One of: low, medium, high, max. Default: SDK default (no override).",
+    )
+    .option(
+      "--thinking <mode>",
+      "SDK thinking mode for tool-using calls. One of: off, adaptive, enabled. `adaptive` matches Claude Code interactive and deepsec.",
     )
     .option(
       "--include-false-positives",

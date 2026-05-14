@@ -133,7 +133,18 @@ export function walkForAgents(
 
   return agents.map((agent) => ({
     agent,
-    files: allFiles.filter((f) => matchesAnyPattern(f, agent.filePatterns)),
+    // First positive-match by filePatterns (empty = all), then drop
+    // any file the agent declared in `excludePatterns`. Exclude
+    // semantics use `.some()` directly so empty list means "exclude
+    // nothing" — different from `matchesAnyPattern`'s "empty = all".
+    files: allFiles
+      .filter((f) => matchesAnyPattern(f, agent.filePatterns))
+      .filter(
+        (f) =>
+          !(agent.excludePatterns ?? []).some((p) =>
+            minimatch(f, p, { dot: false }),
+          ),
+      ),
   }));
 }
 
