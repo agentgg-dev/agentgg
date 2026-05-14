@@ -152,5 +152,5 @@ function buildOllamaDetector(
   }
   const modelName = options.model ?? config.ollama?.model ?? FALLBACK_MODELS.ollama;
   const ollama = createOllama({ baseURL: `${baseUrl}/api` });
-  return new VercelDetector("ollama", ollama(modelName));
+  return new VercelDetector("ollama", ollama(modelName, { structuredOutputs: true }));
 }

@@ -26,6 +26,7 @@ import { LlmValidation, asValidationField, buildValidatePrompt } from "../valida
  * the resolver routes hunt-mode invocations through `ClaudeAgentDetector`
  * (which uses the Claude Agent SDK regardless of credential type).
  */
+
 export class VercelDetector implements Detector {
   readonly name: string;
   private readonly model: LanguageModelV1;
@@ -45,6 +46,7 @@ export class VercelDetector implements Detector {
       const { object } = await generateObject({
         model: this.model,
         schema: DetectionResult,
+        mode: "json",
         prompt: buildDetectPrompt(agent, filePath, content),
       });
       return object.findings.map((f) => hydrateFinding(f, agent, filePath));
@@ -73,6 +75,7 @@ export class VercelDetector implements Detector {
       const { object } = await generateObject({
         model: this.model,
         schema: LlmValidation,
+        mode: "json",
         prompt: buildValidatePrompt(args),
       });
       return asValidationField(object);

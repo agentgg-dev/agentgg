@@ -213,17 +213,14 @@ File path: ${filePath}
 ${content}
 \`\`\`
 
-Report ONLY vulnerabilities that match the criteria above. If the file
-contains nothing matching, return an empty \`findings\` array. Do NOT
+Report ONLY vulnerabilities that match the criteria above. Do NOT
 invent findings to satisfy expectations — false positives erode trust.
-Be honest about your \`confidence\` value.
 
-Every finding must include all four narrative fields:
-- \`summary\`: one quotable sentence (issue + impact).
-- \`details\`: full analysis, pointing to the affected file path, line
-  numbers, and an excerpt of the offending code.
-- \`poc\`: concrete reproduction (HTTP request, payload, command sequence).
-- \`impact\`: vulnerability class, who is affected, what an attacker gets.`;
+Respond with ONLY a JSON object in this exact shape — no prose, no markdown fences:
+
+{"findings":[{"title":"Short title","vulnSlug":"vuln-class","lineRange":[1,10],"filePath":null,"summary":"One sentence.","details":"Full analysis.","poc":"Steps to reproduce.","impact":"Who is affected and what they get.","references":[],"confidence":0.9}]}
+
+If nothing matches, respond with exactly: {"findings":[]}`;
 }
 
 /**
