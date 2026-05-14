@@ -50,7 +50,7 @@ const ENV_ALLOWLIST = new Set<string>([
  *
  *   - Anthropic OAuth (`oauthToken`) — `mode: "file"` and `mode: "hunt"`.
  *   - Anthropic API key (`apiKey`) — `mode: "hunt"` only. (File mode
- *     for API-key users runs through the cheaper VercelDetector path
+ *     for API-key users runs through the cheaper MultiProviderDetector path
  *     by default; the resolver picks this detector for hunts instead.)
  *
  * File mode is a one-turn agent with no tools — same behavior as before.
@@ -100,10 +100,16 @@ export class ClaudeAgentDetector implements Detector {
   }): Promise<Finding[]> {
     const { agent, filePath, content } = args;
     const prompt = buildDetectPrompt(agent, filePath, content);
+    // Single-turn in theory (no tools needed — the file content is
+    // already in the prompt). But `permissionMode: "bypassPermissions"`
+    // lets the model call default tools regardless of our empty
+    // `allowedTools`; when it does, that one tool call eats the only
+    // turn and leaves no room to emit the structured verdict. Give
+    // headroom for the verifying turn → tool result → output path.
     const result = await this.runStructured({
       prompt,
       allowedTools: [],
-      maxTurns: 1,
+      maxTurns: 5,
       schema: DetectionResult,
     });
     return result.findings.map((f) => hydrateFinding(f, agent, filePath));

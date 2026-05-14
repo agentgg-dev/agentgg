@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Agent } from "@agentgg/core";
 import { MockLanguageModelV1 } from "ai/test";
 import { buildDetectPrompt, hydrateFinding } from "../src/detect.js";
-import { VercelDetector } from "../src/detectors/vercel.js";
+import { MultiProviderDetector } from "../src/detectors/multi-provider.js";
 
 function makeAgent(slug = "sql-injection"): Agent {
   return {
@@ -119,11 +119,11 @@ describe("hydrateFinding", () => {
   });
 });
 
-describe("VercelDetector", () => {
+describe("MultiProviderDetector", () => {
   const agent = makeAgent();
 
   it("has a backend name", () => {
-    const detector = new VercelDetector("anthropic-api", mockModelReturning({ findings: [] }));
+    const detector = new MultiProviderDetector("anthropic-api", mockModelReturning({ findings: [] }));
     expect(detector.name).toBe("anthropic-api");
   });
 
@@ -148,7 +148,7 @@ describe("VercelDetector", () => {
         },
       ],
     });
-    const detector = new VercelDetector("anthropic-api", model);
+    const detector = new MultiProviderDetector("anthropic-api", model);
     const findings = await detector.detectFile({
       agent,
       filePath: "src/login.ts",
@@ -163,8 +163,8 @@ describe("VercelDetector", () => {
     expect(findings[0].poc).toContain("curl");
   });
 
-  it("hunt() throws with a useful message — hunt mode is not supported by VercelDetector", async () => {
-    const detector = new VercelDetector("openai", mockModelReturning({ findings: [] }));
+  it("hunt() throws with a useful message — hunt mode is not supported by MultiProviderDetector", async () => {
+    const detector = new MultiProviderDetector("openai", mockModelReturning({ findings: [] }));
     await expect(
       detector.hunt({
         agent,
@@ -178,7 +178,7 @@ describe("VercelDetector", () => {
   });
 
   it("returns [] when the model reports no findings", async () => {
-    const detector = new VercelDetector("openai", mockModelReturning({ findings: [] }));
+    const detector = new MultiProviderDetector("openai", mockModelReturning({ findings: [] }));
     const findings = await detector.detectFile({
       agent,
       filePath: "src/safe.ts",

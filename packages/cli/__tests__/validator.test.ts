@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Finding } from "@agentgg/core";
 import { MockLanguageModelV1 } from "ai/test";
-import { VercelDetector } from "../src/detectors/vercel.js";
+import { MultiProviderDetector } from "../src/detectors/multi-provider.js";
 import {
   LlmValidation,
   asValidationField,
@@ -170,14 +170,14 @@ describe("asValidationField", () => {
   });
 });
 
-describe("VercelDetector.validateFinding", () => {
+describe("MultiProviderDetector.validateFinding", () => {
   it("returns the verdict + reasoning the model emitted", async () => {
     const model = mockModelReturning({
       verdict: "confirmed",
       reasoning: "Line 12 concatenates user input into the SQL string.",
       confidence: 0.95,
     });
-    const detector = new VercelDetector("anthropic-api", model);
+    const detector = new MultiProviderDetector("anthropic-api", model);
     const result = await detector.validateFinding({
       finding: makeFinding(),
       fileContent: "db.query('SELECT * FROM users WHERE id=' + req.params.id)",
@@ -192,7 +192,7 @@ describe("VercelDetector.validateFinding", () => {
       reasoning: "The query is parameterised; the detector misread it.",
       confidence: 0.85,
     });
-    const detector = new VercelDetector("anthropic-api", model);
+    const detector = new MultiProviderDetector("anthropic-api", model);
     const result = await detector.validateFinding({
       finding: makeFinding(),
       fileContent: "db.query('SELECT * FROM users WHERE id=?', [req.params.id])",
@@ -206,7 +206,7 @@ describe("VercelDetector.validateFinding", () => {
       reasoning: "examples/** is excluded by the supplied SECURITY.md.",
       confidence: 0.9,
     });
-    const detector = new VercelDetector("anthropic-api", model);
+    const detector = new MultiProviderDetector("anthropic-api", model);
     const result = await detector.validateFinding({
       finding: makeFinding({ filePath: "examples/demo.ts" }),
       fileContent: "x",
@@ -222,7 +222,7 @@ describe("VercelDetector.validateFinding", () => {
       reasoning: "x",
       confidence: 0.5,
     });
-    const detector = new VercelDetector("anthropic-api", model);
+    const detector = new MultiProviderDetector("anthropic-api", model);
     await expect(
       detector.validateFinding({
         finding: makeFinding(),

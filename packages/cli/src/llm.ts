@@ -3,7 +3,7 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOllama } from "ollama-ai-provider";
 import type { Detector } from "./detect.js";
-import { ClaudeAgentDetector, VercelDetector } from "./detectors/index.js";
+import { ClaudeAgentDetector, MultiProviderDetector } from "./detectors/index.js";
 
 const FALLBACK_MODELS = {
   anthropic: "claude-sonnet-4-6",
@@ -113,7 +113,7 @@ function buildAnthropicDetector(
   // upstream; we just provide both.
   if (apiKey) {
     const anthropic = createAnthropic({ apiKey });
-    const fileDetector = new VercelDetector("anthropic-api", anthropic(modelName));
+    const fileDetector = new MultiProviderDetector("anthropic-api", anthropic(modelName));
     const huntDetector = new ClaudeAgentDetector({
       apiKey,
       model: modelName,
@@ -148,7 +148,7 @@ function buildOpenAIDetector(
   }
   const modelName = options.model ?? config.openai?.model ?? FALLBACK_MODELS.openai;
   const openai = createOpenAI({ apiKey });
-  return new VercelDetector("openai", openai(modelName));
+  return new MultiProviderDetector("openai", openai(modelName));
 }
 
 function buildOllamaDetector(
@@ -163,5 +163,5 @@ function buildOllamaDetector(
   }
   const modelName = options.model ?? config.ollama?.model ?? FALLBACK_MODELS.ollama;
   const ollama = createOllama({ baseURL: `${baseUrl}/api` });
-  return new VercelDetector("ollama", ollama(modelName, { structuredOutputs: true }));
+  return new MultiProviderDetector("ollama", ollama(modelName, { structuredOutputs: true }));
 }

@@ -11,8 +11,8 @@ import {
 import { LlmValidation, asValidationField, buildValidatePrompt } from "../validator.js";
 
 /**
- * Detector backed by Vercel AI SDK's `generateObject`. Covers every
- * provider for which we have a `LanguageModelV1`:
+ * Multi-provider detector. Backed by the Vercel AI SDK's `generateObject`
+ * — works against any provider for which we have a `LanguageModelV1`:
  *
  * - Anthropic (API key, file mode)
  * - OpenAI / Codex (file mode)
@@ -28,7 +28,7 @@ import { LlmValidation, asValidationField, buildValidatePrompt } from "../valida
  * (which uses the Claude Agent SDK regardless of credential type).
  */
 
-export class VercelDetector implements Detector {
+export class MultiProviderDetector implements Detector {
   readonly name: string;
   private readonly model: LanguageModelV1;
 
@@ -54,9 +54,9 @@ export class VercelDetector implements Detector {
     } catch (err) {
       if (process.env.AGENTGG_DEBUG) {
         const util = await import("node:util");
-        console.error("---- VercelDetector raw error ----");
+        console.error("---- MultiProviderDetector raw error ----");
         console.error(util.inspect(err, { depth: 5, colors: false }));
-        console.error("-----------------------------------");
+        console.error("-----------------------------------------");
       }
       throw err;
     }
@@ -64,7 +64,7 @@ export class VercelDetector implements Detector {
 
   async hunt(_args: HuntArgs): Promise<Finding[]> {
     throw new Error(
-      `Hunt mode is not supported by the VercelDetector (provider: ${this.name}). ` +
+      `Hunt mode is not supported by the MultiProviderDetector (provider: ${this.name}). ` +
         "Hunt-mode agents are routed through the Claude Agent SDK. " +
         "Use `--provider anthropic` (API key or OAuth) for hunt agents, " +
         "or change the agent's mode to 'file'.",
@@ -73,7 +73,7 @@ export class VercelDetector implements Detector {
 
   async investigate(_args: InvestigateArgs): Promise<Finding[]> {
     throw new Error(
-      `Walker mode is not supported by the VercelDetector (provider: ${this.name}). ` +
+      `Walker mode is not supported by the MultiProviderDetector (provider: ${this.name}). ` +
         "Walker-mode per-file investigation needs tool access; route through " +
         "the Claude Agent SDK by using `--provider anthropic` (API key or OAuth), " +
         "or change the agent's mode to 'file'.",
@@ -92,9 +92,9 @@ export class VercelDetector implements Detector {
     } catch (err) {
       if (process.env.AGENTGG_DEBUG) {
         const util = await import("node:util");
-        console.error("---- VercelDetector validate error ----");
+        console.error("---- MultiProviderDetector validate error ----");
         console.error(util.inspect(err, { depth: 5, colors: false }));
-        console.error("---------------------------------------");
+        console.error("----------------------------------------------");
       }
       throw err;
     }

@@ -1,2 +1,2 @@
-export { VercelDetector } from "./vercel.js";
+export { MultiProviderDetector } from "./multi-provider.js";
 export { ClaudeAgentDetector } from "./claude-agent.js";
