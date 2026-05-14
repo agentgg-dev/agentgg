@@ -7,9 +7,11 @@ mode: hunt
 noiseTier: normal
 filePatterns: []
 references:
-  - GHSA-8c59-hr4w-qg69
-  - GHSA-mj5r-hh7j-4gxf
   - GHSA-c29c-2q9c-pc86
+  - GHSA-8c59-hr4w-qg69
+  - GHSA-cw4q-gqg5-g38h
+  - GHSA-7hxm-f538-3xp6
+  - GHSA-7w4v-g4m6-j88v
 ---
 
 You are auditing channel extensions in `extensions/` for one specific
