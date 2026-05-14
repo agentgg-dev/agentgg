@@ -100,15 +100,13 @@ export class ClaudeAgentDetector implements Detector {
   }): Promise<Finding[]> {
     const { agent, filePath, content } = args;
     const prompt = buildDetectPrompt(agent, filePath, content);
-    // Single-turn in theory (no tools needed — the file content is
-    // already in the prompt). But `permissionMode: "bypassPermissions"`
-    // lets the model call default tools regardless of our empty
-    // `allowedTools`; when it does, that one tool call eats the only
-    // turn and leaves no room to emit the structured verdict. Give
-    // headroom for the verifying turn → tool result → output path.
+    // Single-turn: no tools needed — the file content is already in the
+    // prompt. `tools: []` removes all built-in tools from the model's
+    // context, so it can't burn turns on speculative tool calls.
+    // maxTurns kept at 5 as a safety margin pending separate revert.
     const result = await this.runStructured({
       prompt,
-      allowedTools: [],
+      tools: [],
       maxTurns: 5,
       schema: DetectionResult,
     });
@@ -131,7 +129,7 @@ export class ClaudeAgentDetector implements Detector {
     // `msg.structured_output` and is Zod-validated defensively.
     const result = await this.runStructured({
       prompt,
-      allowedTools: ["Read", "Glob", "Grep"],
+      tools: ["Read", "Glob", "Grep"],
       maxTurns,
       cwd: rootDir,
       schema: DetectionResult,
@@ -154,7 +152,7 @@ export class ClaudeAgentDetector implements Detector {
     // SDK, no fence parsing.
     const result = await this.runStructured({
       prompt,
-      allowedTools: ["Read", "Glob", "Grep"],
+      tools: ["Read", "Glob", "Grep"],
       maxTurns,
       cwd: rootDir,
       schema: DetectionResult,
@@ -187,15 +185,13 @@ export class ClaudeAgentDetector implements Detector {
 
   async validateFinding(args: { finding: Finding; fileContent: string; scope?: string }) {
     const prompt = buildValidatePrompt(args);
-    // Single-turn in theory, but `permissionMode: "bypassPermissions"`
-    // lets the model call default tools (Grep/Read) regardless of our
-    // empty `allowedTools`. When the model decides to double-check the
-    // finding with a Grep, that tool call eats a turn — so we give the
-    // verifying turn → tool result → verdict path headroom via
-    // `--validate-max-turns` (default 5).
+    // Single-turn: `tools: []` removes all built-in tools from the
+    // model's context, so the validator can't burn turns on speculative
+    // Grep/Read calls. validateMaxTurns kept as-is pending separate
+    // revert of the workaround budget.
     const validated = await this.runStructured({
       prompt,
-      allowedTools: [],
+      tools: [],
       maxTurns: this.validateMaxTurns,
       schema: LlmValidation,
     });
@@ -215,7 +211,14 @@ export class ClaudeAgentDetector implements Detector {
    */
   private async runStructured<T extends z.ZodTypeAny>(opts: {
     prompt: string;
-    allowedTools: string[];
+    /**
+     * Built-in tools the model is permitted to call. `[]` removes all
+     * tools from its context (true single-turn behavior). A non-empty
+     * list whitelists exactly those tool names. Maps to the SDK's
+     * `tools` option — NOT `allowedTools`, which is auto-approval, not
+     * restriction.
+     */
+    tools: string[];
     maxTurns: number;
     cwd?: string;
     schema: T;
@@ -232,7 +235,7 @@ export class ClaudeAgentDetector implements Detector {
           ...(this.thinking && this.thinking !== "off"
             ? { thinking: { type: this.thinking } }
             : {}),
-          allowedTools: opts.allowedTools,
+          tools: opts.tools,
           permissionMode: "bypassPermissions",
           maxTurns: opts.maxTurns,
           model: this.model,

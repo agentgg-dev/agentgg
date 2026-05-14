@@ -113,7 +113,10 @@ function buildAnthropicDetector(
   // upstream; we just provide both.
   if (apiKey) {
     const anthropic = createAnthropic({ apiKey });
-    const fileDetector = new MultiProviderDetector("anthropic-api", anthropic(modelName));
+    const fileDetector = new MultiProviderDetector("anthropic-api", anthropic(modelName), {
+      effort: options.effort,
+      thinking: options.thinking,
+    });
     const huntDetector = new ClaudeAgentDetector({
       apiKey,
       model: modelName,
@@ -148,7 +151,10 @@ function buildOpenAIDetector(
   }
   const modelName = options.model ?? config.openai?.model ?? FALLBACK_MODELS.openai;
   const openai = createOpenAI({ apiKey });
-  return new MultiProviderDetector("openai", openai(modelName));
+  return new MultiProviderDetector("openai", openai(modelName), {
+    effort: options.effort,
+    thinking: options.thinking,
+  });
 }
 
 function buildOllamaDetector(
@@ -163,5 +169,8 @@ function buildOllamaDetector(
   }
   const modelName = options.model ?? config.ollama?.model ?? FALLBACK_MODELS.ollama;
   const ollama = createOllama({ baseURL: `${baseUrl}/api` });
-  return new MultiProviderDetector("ollama", ollama(modelName, { structuredOutputs: true }));
+  return new MultiProviderDetector("ollama", ollama(modelName, { structuredOutputs: true }), {
+    effort: options.effort,
+    thinking: options.thinking,
+  });
 }

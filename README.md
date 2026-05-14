@@ -72,33 +72,37 @@ The same schema applies whether the agent lives in:
 - **User-installed** (`~/.agentgg/agents/custom/`) — `agentgg agents add ./my-agent.md`
 - **Per-scan** — pass a `.md` file, directory, or `.txt` list to `-t/--template`
 
-## Two execution modes
+## Three execution modes
 
 Each agent declares its own `mode`. The framework dispatches accordingly.
 
-**`mode: file`** — one LLM call per (agent, matching file). Cheap, predictable:
+**`mode: file`** — one LLM call per (agent, matching file). No tools. Cheap, predictable:
 
 - `sql-injection`, `command-injection`, `hardcoded-secrets`, …
+
+**`mode: walker`** — anchored agentic investigation. The walker enumerates files matching the agent's `filePatterns`, the agent's `preFilter` regexes narrow to "candidates" with line hits, then each batch of candidates gets one tool-enabled session. Same shape as deepsec's scan→process pipeline collapsed into one pass:
+
+- `openclaw-audit-allowlist-identity-walker` — anchored allowlist-bypass investigation
 
 **`mode: hunt`** — one tool-enabled session per agent across the whole repo. The agent uses Read/Glob/Grep to discover its own files. Good for cross-file logic and CVE-pattern hunts:
 
 - `missing-access-control` — IDOR / auth-middleware coverage across handlers
-- `openclaw-audit-allowlist-identity` — project-specific mutable-identity allowlist bypass
+- `openclaw-audit-allowlist-identity-hunter` — project-specific mutable-identity allowlist bypass
 
-Both modes run side-by-side in one scan. Hunt agents always run first (heaviest), file agents after.
+All three modes run side-by-side in one scan. Hunt agents run first (heaviest), then walker, then file agents.
 
 ## Providers
 
 `agentgg init` writes credentials to `~/.agentgg/config.json`. Scan state is per-output-dir and has nothing to do with this file.
 
-| Provider | Credential | File mode | Hunt mode |
-|---|---|---|---|
-| **Anthropic** | API key (`sk-ant-api...`) | Vercel AI SDK | Claude Agent SDK |
-| **Anthropic** | OAuth (`sk-ant-oat...`, Claude Pro/Max) | Claude Agent SDK | Claude Agent SDK |
-| **OpenAI** | API key | Vercel AI SDK | not yet |
-| **Ollama** | local URL | Vercel AI SDK | not yet |
+| Provider | Credential | File mode | Walker mode | Hunt mode |
+|---|---|---|---|---|
+| **Anthropic** | API key (`sk-ant-api...`) | Vercel AI SDK | Claude Agent SDK | Claude Agent SDK |
+| **Anthropic** | OAuth (`sk-ant-oat...`, Claude Pro/Max) | Claude Agent SDK | Claude Agent SDK | Claude Agent SDK |
+| **OpenAI** | API key | Vercel AI SDK | not yet | not yet |
+| **Ollama** | local URL | Vercel AI SDK | not yet | not yet |
 
-Hunt mode currently requires Anthropic (the Claude Agent SDK spawns the `claude` CLI for tool-using sessions). OpenAI / Ollama support file mode today.
+**Walker and hunt currently require Anthropic.** Both need tool-using sessions, which only the Claude Agent SDK path implements today; the Vercel AI SDK path (used for OpenAI / Ollama / Anthropic-API-key file mode) doesn't yet support tool orchestration with structured output. OpenAI and Ollama can only run file-mode agents until that lands.
 
 ---
 
@@ -261,7 +265,6 @@ Override the default glob exclusions / restrict to specific paths:
 ```bash
 agentgg scan ./src --exclude "**/migrations/**" --exclude "vendor/**" -o ./out
 agentgg scan ./src --only "src/api/**/*.ts" --only "src/handlers/**/*.ts" -o ./out
-agentgg scan ./src --exclude-tests -o ./out          # shortcut: skip test files
 agentgg scan ./src --max-file-size 200 -o ./out      # skip files larger than 200 KB
 ```
 
@@ -373,7 +376,6 @@ Run `agentgg <command> --help` for the full flag list on any subcommand.
 --concurrency <n>               parallel files per agent (default 5)
 --exclude <pattern>             glob to exclude (repeatable; additive)
 --only <pattern>                restrict scan to matching globs (repeatable)
---exclude-tests                 skip common test paths
 --max-file-size <kb>            skip files larger than this (default 500)
 --provider <name>               anthropic | openai | ollama (overrides config default)
 --api-key <key>                 one-shot API key (not persisted)

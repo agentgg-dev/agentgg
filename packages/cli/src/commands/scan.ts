@@ -19,7 +19,7 @@ import { type CredentialOverrides, resolveDetector } from "../llm.js";
 import { evaluatePreFilter } from "../pre-filter.js";
 import { writeMarkdownReport } from "../reporters/md.js";
 import { resolveTemplates } from "../template.js";
-import { TEST_EXCLUDE_PATTERNS, type WalkConfig, walkForAgents } from "../walker.js";
+import { type WalkConfig, walkForAgents } from "../walker.js";
 
 interface ScanOpts {
   scope?: string;
@@ -35,18 +35,17 @@ interface ScanOpts {
   verbose?: boolean;
   exclude?: string[];
   only?: string[];
-  excludeTests?: boolean;
   maxFileSize?: number; // KB
   /** Re-analyze files even when a prior FileRecord covers them with the same contentHash. */
   rescan?: boolean;
   /** Re-validate findings even when they already have a verdict on disk. */
   revalidateAll?: boolean;
-  /** Max tool-use turns for hunt-mode agents. File mode and validator are single-turn. */
+  /**
+   * Max tool-use turns per LLM session. When set, applies uniformly across
+   * every mode (file/walker/hunt) and the validator. When unset, each context
+   * uses its own internal default (file=5, walker=30, hunt=150, validator=30).
+   */
   maxTurns?: number;
-  /** Max tool-use turns per validator call. */
-  validateMaxTurns?: number;
-  /** Walker mode: max tool-use turns per batched investigation. Overrides agent default. */
-  maxTurnsPerBatch?: number;
   /** Walker mode: candidate files per investigation batch. Overrides agent default. */
   maxFilesPerBatch?: number;
   /** SDK reasoning effort. Maps to `effort` option. */
@@ -126,7 +125,7 @@ export async function runScan(
     provider: opts.provider,
     credentials,
     verbose: opts.verbose,
-    validateMaxTurns: opts.validateMaxTurns,
+    validateMaxTurns: opts.maxTurns ?? 30,
     effort: opts.effort,
     thinking: opts.thinking,
   });
@@ -154,10 +153,7 @@ export async function runScan(
     ? new Set(listChangedFiles(opts.diff, root))
     : undefined;
 
-  const excludePatterns = [
-    ...(opts.exclude ?? []),
-    ...(opts.excludeTests ? TEST_EXCLUDE_PATTERNS : []),
-  ];
+  const excludePatterns = [...(opts.exclude ?? [])];
   const includePatterns = opts.only ?? [];
   const maxFileSizeBytes = (opts.maxFileSize ?? 500) * 1024;
 
@@ -283,9 +279,8 @@ export async function runScan(
       console.log(`  ${agent.slug}[hunt]: scanning whole repo (Read/Glob/Grep)`);
       try {
         // Merge the agent's declared `excludePatterns` (from
-        // frontmatter) with the CLI's --exclude / --exclude-tests
-        // list, deduped. Either alone is honored; both compose
-        // additively.
+        // frontmatter) with the CLI's --exclude list, deduped.
+        // Either alone is honored; both compose additively.
         const agentExcludes = Array.from(
           new Set([...excludePatterns, ...(agent.excludePatterns ?? [])]),
         );
@@ -386,9 +381,10 @@ export async function runScan(
     }
 
     // Use the largest declared maxFilesPerBatch / maxTurnsPerBatch
-    // across participating agents as the batch sizing. CLI overrides
-    // either way. Agents with smaller declared budgets implicitly
-    // benefit from the larger value when pooled with others.
+    // across participating agents as the batch sizing. The unified
+    // --max-turns CLI flag overrides per-batch turns when set; agents
+    // with smaller declared budgets implicitly benefit from the larger
+    // value when pooled with others.
     const concurrency = Math.max(1, opts.concurrency ?? 5);
     const declaredBatchSize = Math.max(
       ...walkerAgents.map((a) => a.maxFilesPerBatch ?? 5),
@@ -400,8 +396,7 @@ export async function runScan(
     const declaredMaxTurns = Math.max(
       ...walkerAgents.map((a) => a.maxTurnsPerBatch ?? 30),
     );
-    const maxTurnsPerBatch =
-      opts.maxTurnsPerBatch ?? declaredMaxTurns;
+    const maxTurnsPerBatch = opts.maxTurns ?? declaredMaxTurns;
 
     const batches: PooledFile[][] = [];
     for (let i = 0; i < candidates.length; i += batchSize) {
@@ -812,19 +807,7 @@ export function registerScanCommand(program: Command): void {
     .option("--concurrency <n>", "parallel file processing", (v) => parseInt(v, 10), 5)
     .option(
       "--max-turns <n>",
-      "Max tool-use turns for hunt-mode agents (default: 150). File-mode agents ignore this.",
-      (v) => parseInt(v, 10),
-      150,
-    )
-    .option(
-      "--validate-max-turns <n>",
-      "Max tool-use turns per validator call (default: 30). Bump if the validator hits the turn cap when --validate is on.",
-      (v) => parseInt(v, 10),
-      30,
-    )
-    .option(
-      "--max-turns-per-batch <n>",
-      "Walker mode: max tool-use turns per batched investigation. Overrides the agent's `maxTurnsPerBatch`. Default 30.",
+      "Max tool-use turns per LLM session. Overrides all per-mode defaults: file=5, walker=30, hunt=150, validator=30. When set, applies uniformly across every mode in this run.",
       (v) => parseInt(v, 10),
     )
     .option(
@@ -855,10 +838,6 @@ export function registerScanCommand(program: Command): void {
       "restrict scan to files matching at least one of these globs (repeatable)",
       collect,
       [] as string[],
-    )
-    .option(
-      "--exclude-tests",
-      "skip common test paths (**/*.test.*, **/__tests__/**, **/fixtures/**, etc.)",
     )
     .option(
       "--max-file-size <kb>",

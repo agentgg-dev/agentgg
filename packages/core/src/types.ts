@@ -85,9 +85,9 @@ export const Agent = z.object({
   /**
    * Glob patterns the agent should never touch. Authors use this to
    * declare a permanent skip list (tests, fixtures, e2e, generated
-   * code) so CLI users don't need to remember `--exclude-tests` /
-   * `--exclude` flags. Combined additively with any CLI patterns at
-   * runtime. Minimatch dialect — same as `filePatterns`.
+   * code) so CLI users don't need to remember `--exclude` flags.
+   * Combined additively with any CLI patterns at runtime. Minimatch
+   * dialect — same as `filePatterns`.
    */
   excludePatterns: z.array(z.string()).default([]),
   /**

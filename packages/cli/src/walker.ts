@@ -85,20 +85,6 @@ const SKIP_EXTENSIONS = new Set([
   ".wasm",
 ]);
 
-/** Convenience set of test/fixture globs applied when `--exclude-tests` is on. */
-export const TEST_EXCLUDE_PATTERNS = [
-  "**/*.test.*",
-  "**/*.spec.*",
-  "**/__tests__/**",
-  "**/__mocks__/**",
-  "**/test/**",
-  "**/tests/**",
-  "**/spec/**",
-  "**/e2e/**",
-  "**/fixtures/**",
-  "**/__fixtures__/**",
-];
-
 export interface WalkConfig {
   /** Globs to exclude after the default-ignore pass. Repeatable via CLI. */
   excludePatterns?: string[];
