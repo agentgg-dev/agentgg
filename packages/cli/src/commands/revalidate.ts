@@ -21,6 +21,7 @@ interface RevalidateOpts {
   apiKey?: string;
   oauthToken?: string;
   baseUrl?: string;
+  model?: string;
   force?: boolean;
   verbose?: boolean;
   /** Override the scanned root recorded in scan.json — rare. */
@@ -68,6 +69,7 @@ export async function runRevalidate(
   };
   const detector = resolveDetector(config, {
     provider: opts.provider,
+    model: opts.model,
     credentials,
     verbose: opts.verbose,
     validateMaxTurns: opts.validateMaxTurns,
@@ -262,6 +264,7 @@ export function registerRevalidateCommand(program: Command): void {
       "One-shot Anthropic OAuth token (sk-ant-oat…). Not persisted.",
     )
     .option("--base-url <url>", "One-shot Ollama base URL (not persisted)")
+    .option("--model <name>", "One-shot model override for the selected provider (not persisted)")
     .option(
       "--validate-max-turns <n>",
       "Max tool-use turns per validator call (default: 30). Bump if the validator hits the turn cap.",

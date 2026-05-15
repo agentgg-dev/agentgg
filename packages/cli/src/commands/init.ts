@@ -15,6 +15,56 @@ export const DEFAULT_MODELS = {
 
 const DEFAULT_OLLAMA_URL = "http://localhost:11434";
 
+// ------- live model-list fetchers -------
+
+const ANTHROPIC_CURATED = [
+  "claude-opus-4-7",
+  "claude-opus-4-6",
+  "claude-sonnet-4-6",
+  "claude-opus-4-5",
+  "claude-sonnet-4-5",
+  "claude-haiku-4-5-20251001",
+];
+const OPENAI_CURATED = ["gpt-5", "gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o1", "o3"];
+
+async function fetchOllamaModels(baseUrl: string): Promise<string[]> {
+  try {
+    const res = await fetch(`${baseUrl}/api/tags`);
+    if (!res.ok) return [];
+    const data = (await res.json()) as { models?: Array<{ name: string }> };
+    return (data.models ?? []).map((m) => m.name).sort();
+  } catch {
+    return [];
+  }
+}
+
+async function collectModel(provider: Provider, initInput: InitInput): Promise<string> {
+  const defaultModel = DEFAULT_MODELS[provider];
+  let models: string[];
+
+  if (provider === "ollama") {
+    models = await fetchOllamaModels(initInput.ollamaUrl ?? DEFAULT_OLLAMA_URL);
+    if (models.length === 0) {
+      // Ollama not running or no models pulled yet — free-text fallback
+      return input({ message: "Default model:", default: defaultModel });
+    }
+  } else if (provider === "anthropic") {
+    models = ANTHROPIC_CURATED;
+  } else {
+    models = OPENAI_CURATED;
+  }
+
+  const choices = [
+    ...models.map((m) => ({ name: m, value: m })),
+    { name: "Other (enter manually)", value: "__custom__" },
+  ];
+  const selected = await select<string>({ message: "Default model:", choices });
+  if (selected === "__custom__") {
+    return input({ message: "Model name:", default: defaultModel });
+  }
+  return selected;
+}
+
 /** OAuth token prefix used by Claude Code. Distinct from regular sk-ant-api keys. */
 export function isAnthropicOauthToken(s: string): boolean {
   return s.trim().startsWith("sk-ant-oat");
@@ -189,7 +239,11 @@ export async function runInit(
           }));
   }
 
-  if (opts.model) initInput.model = opts.model;
+  if (opts.model) {
+    initInput.model = opts.model;
+  } else if (!nonInteractive) {
+    initInput.model = await collectModel(provider, initInput);
+  }
 
   const fresh = buildUserConfig(initInput);
   const merged = mergeUserConfig(fresh, existing);

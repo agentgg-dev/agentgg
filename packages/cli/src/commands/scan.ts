@@ -31,6 +31,7 @@ interface ScanOpts {
   apiKey?: string;
   oauthToken?: string;
   baseUrl?: string;
+  model?: string;
   concurrency?: number;
   diff?: string;
   template?: string[];
@@ -125,6 +126,7 @@ export async function runScan(
 
   const detector = resolveDetector(config, {
     provider: opts.provider,
+    model: opts.model,
     credentials,
     verbose: opts.verbose,
     validateMaxTurns: opts.maxTurns ?? 30,
@@ -825,6 +827,7 @@ export function registerScanCommand(program: Command): void {
       "One-shot Anthropic OAuth token (sk-ant-oat…). Not persisted.",
     )
     .option("--base-url <url>", "One-shot Ollama base URL (not persisted)")
+    .option("--model <name>", "One-shot model override for the selected provider (not persisted)")
     .option(
       "-t, --template <value>",
       "Restrict the scan to specific agents. A value can be: a slug (`sql-injection`), a path to a `.md` agent file, a directory of `.md` files, or a `.txt` file listing slugs/paths one per line (# for comments). Multiple values can be comma- or whitespace-separated within one `-t`, or `-t` may be repeated.",
