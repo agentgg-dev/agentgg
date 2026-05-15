@@ -17,6 +17,7 @@
   "dependencies": {
     "@agentgg/agents": "*",
     "@agentgg/core": "*",
+    "adm-zip": "^0.5.16",
     "@ai-sdk/anthropic": "^1.0.0",
     "@ai-sdk/openai": "^1.0.0",
     "@anthropic-ai/claude-agent-sdk": "0.2.119",

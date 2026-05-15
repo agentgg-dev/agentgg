@@ -75,6 +75,16 @@ export function getAgentsDir(env: NodeJS.ProcessEnv = process.env): string {
   return join(getDataDir(env), "agents");
 }
 
+/** Path to the official agents directory: `<dataDir>/agentgg-agents/` — populated by `agentgg agents update`. */
+export function getOfficialAgentsDir(env: NodeJS.ProcessEnv = process.env): string {
+  return join(getDataDir(env), "agentgg-agents");
+}
+
+/** Path to the version marker: `<dataDir>/agentgg-agents/.version.json`. */
+export function getOfficialAgentsVersionPath(env: NodeJS.ProcessEnv = process.env): string {
+  return join(getOfficialAgentsDir(env), ".version.json");
+}
+
 // ---------------------------------------------------------------------------
 // Per-scan state — lives inside each scan's --output dir
 // ---------------------------------------------------------------------------

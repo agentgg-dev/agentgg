@@ -9,7 +9,9 @@
     "node": ">=20"
   },
   "packageManager": "pnpm@9.15.4",
-  "workspaces": ["packages/*"],
+  "workspaces": [
+    "packages/*"
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/agentgg/agentgg"
@@ -22,9 +24,18 @@
     "lint:fix": "biome check --write .",
     "format": "biome format --write ."
   },
-  "keywords": ["security", "sast", "vulnerability", "scanner", "ai", "llm", "static-analysis"],
+  "keywords": [
+    "security",
+    "sast",
+    "vulnerability",
+    "scanner",
+    "ai",
+    "llm",
+    "static-analysis"
+  ],
   "devDependencies": {
     "@biomejs/biome": "^2.4.13",
+    "@types/adm-zip": "^0.5.8",
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",

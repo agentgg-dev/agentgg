@@ -29,6 +29,7 @@ import { type Agent, loadAgentFile, loadAgentsFromDir } from "@agentgg/core";
 export function resolveTemplates(
   inputs: string[],
   availableAgents: ReadonlyArray<Agent>,
+  officialAgentsDir?: string,
 ): Agent[] {
   const tokens = expandTokens(inputs);
   if (tokens.length === 0) return [];
@@ -42,7 +43,7 @@ export function resolveTemplates(
   for (const token of tokens) {
     if (looksLikeFilesystemPath(token)) {
       try {
-        const found = loadFromPath(token);
+        const found = loadFromPath(token, officialAgentsDir);
         for (const agent of found) {
           if (!seen.has(agent.slug)) seen.set(agent.slug, agent);
         }
@@ -133,8 +134,16 @@ function looksLikeFilesystemPath(s: string): boolean {
   return false;
 }
 
-function loadFromPath(p: string): Agent[] {
-  const abs = resolve(p);
+function loadFromPath(p: string, officialAgentsDir?: string): Agent[] {
+  let abs = resolve(p);
+  // If the path doesn't exist locally, try resolving it relative to the
+  // official agents directory — lets users write `-t basic/injection/`
+  // instead of the full ~/.agentgg/agentgg-agents/basic/injection/ path,
+  // mirroring how nuclei resolves `-t cves/` against ~/nuclei-templates/.
+  if (!existsSync(abs) && officialAgentsDir) {
+    const candidate = resolve(officialAgentsDir, p);
+    if (existsSync(candidate)) abs = candidate;
+  }
   if (!existsSync(abs)) throw new Error(`No such file or directory`);
   const st = statSync(abs);
   if (st.isDirectory()) {

@@ -1,9 +1,10 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import type { Agent, FileRecord, Finding } from "@agentgg/core";
 import {
   completeRun,
   createRunMeta,
+  getOfficialAgentsDir,
   hashContent,
   loadUserConfig,
   readFileRecord,
@@ -13,6 +14,7 @@ import {
 } from "@agentgg/core";
 import type { Command } from "commander";
 import { loadAllAgents } from "../agent-catalog.js";
+import { installOfficialAgents } from "../agents-install.js";
 import { runConcurrent } from "../concurrent.js";
 import { listChangedFiles } from "../diff.js";
 import { type CredentialOverrides, resolveDetector } from "../llm.js";
@@ -130,18 +132,47 @@ export async function runScan(
     thinking: opts.thinking,
   });
 
-  // Load builtins + ~/.agentgg/agents/custom/. Same catalog `agents list`
-  // shows. Surface custom-dir parse errors as warnings so a broken file
-  // doesn't silently disappear.
+  // Auto-install official agents on first scan — mirrors how nuclei
+  // auto-downloads templates when ~/nuclei-templates/ doesn't exist yet.
+  if (!existsSync(getOfficialAgentsDir(env))) {
+    process.stdout.write(
+      "[INF] agentgg-agents are not installed, installing...\n",
+    );
+    try {
+      const { version, count } = await installOfficialAgents(env);
+      process.stdout.write(
+        `[INF] Successfully installed agentgg-agents at ~/.agentgg/agentgg-agents (${count} agents, ${version})\n`,
+      );
+    } catch (err) {
+      process.stderr.write(
+        `[WRN] Could not auto-install agents: ${(err as Error).message}\n`,
+      );
+      process.stderr.write(
+        "[WRN] Run `agentgg agents update` to install, or provide agents via -t flag.\n",
+      );
+    }
+  }
+
+  // Load official + custom agents. Same catalog `agents list` shows.
+  // Surface parse errors as warnings so a broken file doesn't block a scan.
   const catalog = loadAllAgents(env);
   for (const e of catalog.errors) console.warn(`warning: ${e}`);
 
-  // `--template` / `-t` filters the catalog. Each value is either a
-  // slug (looked up in the catalog) or a path to a `.md` file / dir
-  // (loaded directly).
+  const officialAgentsDir = getOfficialAgentsDir(env);
+
+  // `--template` / `-t` filters the catalog. Each value is a slug,
+  // a path to a .md file/dir, or a subdirectory name relative to the
+  // official agents dir (e.g. "basic/injection/" or "default/").
+  // When no -t is given, default to the official default/ folder so
+  // users don't accidentally run all 100+ agents on first scan.
   const templateInputs = opts.template ?? [];
+  const defaultDir = join(officialAgentsDir, "default");
   const selectedAgents: Agent[] =
-    templateInputs.length > 0 ? resolveTemplates(templateInputs, catalog.agents) : catalog.agents;
+    templateInputs.length > 0
+      ? resolveTemplates(templateInputs, catalog.agents, officialAgentsDir)
+      : existsSync(defaultDir)
+        ? resolveTemplates([defaultDir], catalog.agents, officialAgentsDir)
+        : catalog.agents;
   if (selectedAgents.length === 0) {
     throw new Error("No agents selected — nothing to scan.");
   }

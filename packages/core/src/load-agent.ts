@@ -109,9 +109,9 @@ export interface LoadAgentsDirResult {
 }
 
 /**
- * Walk a directory non-recursively, parse every `.md` file as an agent,
+ * Walk a directory recursively, parse every `.md` file as an agent,
  * and return the result. `package.json`, READMEs, and other non-.md
- * files are ignored.
+ * files are ignored. Subdirectories are walked depth-first.
  *
  * Two modes:
  *   - default: throw on the first parse failure
@@ -125,39 +125,52 @@ export function loadAgentsFromDir(
   const { kind = "custom", pack, collectErrors = false } = options;
   const absDir = resolve(dirPath);
 
-  let entries: string[];
-  try {
-    entries = readdirSync(absDir);
-  } catch (err) {
-    throw new AgentParseError(
-      `Failed to read agents directory: ${(err as Error).message}`,
-      { filePath: absDir, cause: err },
-    );
-  }
-
   const agents: Agent[] = [];
   const errors: AgentParseError[] = [];
 
-  for (const name of entries) {
-    if (extname(name).toLowerCase() !== ".md") continue;
-    // Skip README.md / SECURITY.md / CHANGELOG.md etc. — they're not agents.
-    if (isReservedDoc(name)) continue;
-    const abs = join(absDir, name);
+  function walk(dir: string): void {
+    let entries: string[];
     try {
-      if (!statSync(abs).isFile()) continue;
-    } catch {
-      continue;
-    }
-    try {
-      agents.push(loadAgentFile(abs, kind, pack));
+      entries = readdirSync(dir);
     } catch (err) {
-      if (collectErrors && err instanceof AgentParseError) {
-        errors.push(err);
+      throw new AgentParseError(
+        `Failed to read agents directory: ${(err as Error).message}`,
+        { filePath: dir, cause: err },
+      );
+    }
+
+    for (const name of entries) {
+      const abs = join(dir, name);
+      let st;
+      try {
+        st = statSync(abs);
+      } catch {
         continue;
       }
-      throw err;
+
+      if (st.isDirectory()) {
+        walk(abs);
+        continue;
+      }
+
+      if (extname(name).toLowerCase() !== ".md") continue;
+      // Skip README.md / SECURITY.md / CHANGELOG.md etc. — they're not agents.
+      if (isReservedDoc(name)) continue;
+      if (!st.isFile()) continue;
+
+      try {
+        agents.push(loadAgentFile(abs, kind, pack));
+      } catch (err) {
+        if (collectErrors && err instanceof AgentParseError) {
+          errors.push(err);
+          continue;
+        }
+        throw err;
+      }
     }
   }
+
+  walk(absDir);
   return { agents, errors };
 }
 

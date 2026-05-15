@@ -1,8 +1,8 @@
 import type { Agent } from "@agentgg/core";
 import type { Command } from "commander";
 import { loadAllAgents } from "../agent-catalog.js";
+import { getInstalledVersion, installOfficialAgents } from "../agents-install.js";
 import { addAgents, removeAgent } from "../agents-fs.js";
-import { stub } from "../stub.js";
 
 export function formatAgentsTable(agents: ReadonlyArray<Agent>): string {
   if (agents.length === 0) return "No agents installed.";
@@ -129,6 +129,26 @@ export function registerAgentsCommand(program: Command): void {
 
   agents
     .command("update")
-    .description("pull latest from the official agent repo (not yet wired)")
-    .action((opts: Record<string, unknown>) => stub("agents update", opts));
+    .description("pull latest agents from agentgg-dev/agentgg-agents")
+    .option("--force", "re-download even if already on the latest version")
+    .action(async (opts: { force?: boolean }) => {
+      const installed = getInstalledVersion();
+      if (installed) {
+        process.stdout.write(
+          `[INF] Current version: ${installed.version} (installed ${installed.installedAt})\n`,
+        );
+      }
+      process.stdout.write("[INF] Checking for updates...\n");
+      try {
+        const { version, count } = await installOfficialAgents(process.env, {
+          force: opts.force,
+        });
+        process.stdout.write(
+          `[INF] Successfully installed agentgg-agents at ~/.agentgg/agentgg-agents (${count} agents, ${version})\n`,
+        );
+      } catch (err) {
+        console.error(`[ERR] Update failed: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
 }
