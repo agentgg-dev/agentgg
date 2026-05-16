@@ -19,6 +19,16 @@ interface VersionInfo {
   installedAt: string;
 }
 
+function countAgentFiles(dir: string): number {
+  let n = 0;
+  for (const f of readdirSync(dir)) {
+    const abs = join(dir, f);
+    if (statSync(abs).isDirectory()) n += countAgentFiles(abs);
+    else if (f.endsWith(".md")) n++;
+  }
+  return n;
+}
+
 export function getInstalledVersion(
   env: NodeJS.ProcessEnv = process.env,
 ): VersionInfo | null {
@@ -63,12 +73,14 @@ export async function installOfficialAgents(
   const release = await fetchLatestRelease();
   const version = release?.tag ?? "main";
 
-  // No-op if already on the current version
-  if (!opts.force) {
+  // No-op if already on the current released version. The "main" fallback
+  // (used when the repo has no releases yet) is a mutable branch, so it must
+  // always re-fetch — comparing the literal string "main" to itself would
+  // pin the install forever.
+  if (!opts.force && version !== "main") {
     const installed = getInstalledVersion(env);
     if (installed?.version === version && existsSync(officialDir)) {
-      const count = readdirSync(officialDir).filter((f) => f.endsWith(".md")).length;
-      return { version, count };
+      return { version, count: countAgentFiles(officialDir) };
     }
   }
 
