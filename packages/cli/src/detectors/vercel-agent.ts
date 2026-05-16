@@ -119,7 +119,9 @@ export class VercelAgentDetector implements Detector {
           providerOptions: this.providerOptionsArg(),
         }),
       );
-      return object.findings.map((f) => hydrateFinding(f, agent, filePath));
+      // In file mode the caller provides the real path — ignore whatever
+      // the model put in `filePath` (models often emit placeholders here).
+      return object.findings.map((f) => hydrateFinding({ ...f, filePath: null }, agent, filePath));
     } catch (err) {
       debugLog("VercelAgentDetector.detectFile", err);
       throw err;
@@ -424,11 +426,11 @@ function jsonOutputInstruction(multiAgent: boolean): string {
 
 After your investigation, output ALL findings as a single JSON object matching EXACTLY this shape — no prose, no markdown fences, no trailing text:
 
-{"findings":[{"title":"Short title","vulnSlug":"vuln-class","agentSlug":null,"lineRange":[1,10],"filePath":"relative/path/to/file.ts","summary":"One sentence.","details":"Markdown analysis with file paths and line numbers.","poc":"Reproduction steps.","impact":"Who is affected and what they get.","references":[],"confidence":0.9}]}
+{"findings":[{"title":"Short title","vulnSlug":"vuln-class","agentSlug":null,"lineRange":[1,10],"filePath":"src/routes/users.ts","summary":"One sentence.","details":"Markdown analysis with file paths and line numbers.","poc":"Reproduction steps.","impact":"Who is affected and what they get.","references":[],"confidence":0.9}]}
 
-${agentSlugNote}
+IMPORTANT: Every \`filePath\` must be a real file path you actually read or located with tools during this session. Do NOT copy the example path above — replace it with the actual path from your investigation. If no findings, output exactly: {"findings":[]}
 
-If nothing matches, output exactly: {"findings":[]}`;
+${agentSlugNote}`;
 }
 
 function extractJSON(text: string): unknown {

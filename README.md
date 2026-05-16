@@ -99,16 +99,22 @@ All three modes run side-by-side in one scan. Hunt agents run first (heaviest), 
 |---|---|---|---|---|
 | **Anthropic** | API key (`sk-ant-api...`) | Vercel AI SDK | Claude Agent SDK | Claude Agent SDK |
 | **Anthropic** | OAuth (`sk-ant-oat...`, Claude Pro/Max) | Claude Agent SDK | Claude Agent SDK | Claude Agent SDK |
-| **OpenAI** | API key | Vercel AI SDK | not yet | not yet |
-| **Ollama** | local URL | Vercel AI SDK | not yet | not yet |
+| **OpenAI** | API key | Vercel AI SDK | Vercel AI SDK | Vercel AI SDK |
+| **Ollama** | local URL | Vercel AI SDK | Vercel AI SDK | Vercel AI SDK |
 
-**Walker and hunt currently require Anthropic.** Both need tool-using sessions, which only the Claude Agent SDK path implements today; the Vercel AI SDK path (used for OpenAI / Ollama / Anthropic-API-key file mode) doesn't yet support tool orchestration with structured output. OpenAI and Ollama can only run file-mode agents until that lands.
+All four provider paths support all three agent modes. Hunt and walker use the Vercel AI SDK's `generateText` with Read/Glob/Grep tools for OpenAI and Ollama; Anthropic routes those modes through the Claude Agent SDK. Model quality matters most for hunt and walker — Claude is the most reliable at multi-step tool use and structured output; OpenAI and Ollama models work but may produce occasional hallucinated paths or incomplete investigations.
 
 ---
 
 ## Examples
 
 ### Pick which agents to run
+
+Run the default agent set (`~/.agentgg/agentgg-agents/default/`):
+
+```bash
+agentgg scan ./src -o ./out
+```
 
 A single slug:
 

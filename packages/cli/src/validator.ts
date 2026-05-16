@@ -28,11 +28,9 @@ export const LlmValidation = z.object({
       "Short prose (max 4 sentences) explaining your verdict. Cite the specific code element that made you decide.",
     ),
   confidence: z
-    .number()
-    .min(0)
-    .max(1)
+    .preprocess((v) => (typeof v === "number" && v > 1 ? v / 100 : v), z.number().min(0).max(1))
     .describe(
-      "0 = guess, 1 = certain. Honest calibration; uncertain verdicts should have low confidence.",
+      "Decimal 0.0–1.0. NOT a percentage. Write 0.3 not 30. 0.0 = guess, 1.0 = certain. Uncertain verdicts should have low confidence.",
     ),
 });
 export type LlmValidation = z.infer<typeof LlmValidation>;
@@ -105,7 +103,7 @@ validator (calling a real bug FP) are worse than uncertain verdicts.
 **Vuln class:** ${finding.vulnSlug}
 **Reported by agent:** ${finding.agentSlug}
 **File:** ${finding.filePath} (${lineHint})
-**Detector confidence:** ${(finding.confidence * 100).toFixed(0)}%
+**Detector confidence:** ${finding.confidence.toFixed(2)} (0.0–1.0 scale)
 
 ### Summary
 ${finding.summary}
