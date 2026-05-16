@@ -114,11 +114,12 @@ export class ClaudeAgentDetector implements Detector {
   }
 
   async hunt(args: HuntArgs): Promise<Finding[]> {
-    const { agent, rootDir, excludePatterns, includePatterns, maxFileSizeKb, maxTurns } = args;
+    const { agent, rootDir, excludePatterns, includePatterns, maxFileSizeKb, maxTurns, diff } = args;
     const prompt = buildHuntPrompt(agent, {
       excludePatterns,
       includePatterns,
       maxFileSizeKb,
+      diff,
     });
 
     // Single agentic run with SDK-enforced structured output. The

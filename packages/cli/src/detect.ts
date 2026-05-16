@@ -141,6 +141,12 @@ export interface HuntArgs {
   maxFileSizeKb: number;
   /** Cap on tool-use turns for the hunt session. */
   maxTurns: number;
+  /**
+   * When set, the agent is told to focus its review on this commit's
+   * patch. Tools stay unrestricted so the agent can chase callers,
+   * imports, and related files outside the diff for context.
+   */
+  diff?: { commit: string; patch: string };
 }
 
 /**
@@ -210,7 +216,7 @@ export interface InvestigateArgs {
  */
 export function buildHuntPrompt(
   agent: Agent,
-  args: Pick<HuntArgs, "excludePatterns" | "includePatterns" | "maxFileSizeKb">,
+  args: Pick<HuntArgs, "excludePatterns" | "includePatterns" | "maxFileSizeKb" | "diff">,
 ): string {
   const excludeLines =
     args.excludePatterns.length > 0
@@ -221,7 +227,38 @@ export function buildHuntPrompt(
       ? args.includePatterns.map((p) => `  - ${p}`).join("\n")
       : "  (no restrictions — scan the whole repo)";
 
-  return `${agent.prompt}
+  // When --diff is set, narrow the hunter's attention to the commit
+  // under review without restricting its tools. The block goes first
+  // so it's the most prominent thing after the agent's own brief.
+  // `args.diff.patch` is the full `git show <commit>` output —
+  // metadata, author's commit message, and the patch — so the hunter
+  // sees both what changed and the author's stated intent.
+  const diffBlock = args.diff
+    ? `
+
+---
+
+## Review focus: commit \`${args.diff.commit}\`
+
+A specific commit is under review. Below is its full \`git show\`
+output — author / date / message / patch. Focus your investigation
+on the changes in this commit: that's the surface area we're asking
+about. Read the commit message carefully — the author's stated
+intent often tells you what threat model to apply.
+
+Your Read / Glob / Grep tools are NOT restricted to the changed
+files: use them freely to pull in surrounding context (callers,
+imports, related config, related routes) whenever understanding the
+change requires it. But don't go hunt unrelated bugs elsewhere in
+the repo — only findings that arise from or relate to this commit
+are in scope.
+
+\`\`\`
+${args.diff.patch}
+\`\`\``
+    : "";
+
+  return `${agent.prompt}${diffBlock}
 
 ---
 
@@ -246,11 +283,11 @@ dist / build / .git / vendor / venv.
 
 ## Strategy
 
-Don't read every file. Use Grep to find candidate locations across
-the codebase; use Glob to enumerate file shapes. Then Read only the
-candidates and their imports. Trace logic flow across files when the
-finding requires it (e.g. checking that a middleware is actually
-applied to a route).
+${
+  args.diff
+    ? `The diff above is your starting point. Read the changed files in full to see the change in context, then use Grep/Glob to find callers, related logic, and anything else you need to judge whether the change introduces or fixes the vulnerability you hunt.`
+    : `Don't read every file. Use Grep to find candidate locations across the codebase; use Glob to enumerate file shapes. Then Read only the candidates and their imports. Trace logic flow across files when the finding requires it (e.g. checking that a middleware is actually applied to a route).`
+}
 
 Be efficient with tool calls. If a single Grep gives you the answer,
 don't burn turns reading every match.

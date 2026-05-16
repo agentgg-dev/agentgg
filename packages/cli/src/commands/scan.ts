@@ -17,7 +17,7 @@ import { loadAllAgents } from "../agent-catalog.js";
 import { installOfficialAgents } from "../agents-install.js";
 import { runConcurrent } from "../concurrent.js";
 import { diagnoseScanError } from "../diagnostics.js";
-import { listChangedFiles } from "../diff.js";
+import { listChangedFiles, loadCommitPatch } from "../diff.js";
 import { type CredentialOverrides, resolveDetector } from "../llm.js";
 import { evaluatePreFilter } from "../pre-filter.js";
 import { writeMarkdownReport } from "../reporters/md.js";
@@ -68,8 +68,19 @@ interface ScanOpts {
  *     (agent, file).
  *
  *   - `mode: "hunt"` → run one tool-enabled LLM session per agent across
- *     the whole repo. Hunt-mode agents are skipped when `--diff` is set
- *     — diff scans are PR-shape, not whole-repo audits.
+ *     the whole repo. Under `--diff <commit>`, the agent is handed
+ *     `git show <commit>` (message + patch) and told to focus its
+ *     investigation on that commit; tools stay unrestricted so it can
+ *     chase callers / imports / related files outward for context.
+ *
+ *   - `mode: "walker"` → enumerate by `filePatterns`, narrow with
+ *     `preFilter` regexes, then pool matching files across agents into
+ *     batched LLM sessions. Under `--diff <commit>`, the candidate file
+ *     list is intersected with the files touched in that commit so only
+ *     those files are investigated.
+ *
+ * `--diff <commit>` always means "review just this commit" — its own
+ * patch (parent → commit), independent of the working tree state.
  */
 export async function runScan(
   rootArg: string,
@@ -180,11 +191,18 @@ export async function runScan(
     throw new Error("No agents selected — nothing to scan.");
   }
 
-  // `--diff` enumerates changed files via `git diff --name-only <commit>`.
-  // Used to intersect the walker's output for file-mode agents.
-  // Hunt-mode agents are skipped when diff is set.
+  // `--diff <commit>` scopes the scan to a single commit's own changes
+  // (parent → commit), independent of working tree state.
+  //  - file & walker modes: intersect their candidate list with the
+  //    files touched in the commit (`git diff-tree --name-only`).
+  //  - hunt mode: `git show <commit>` (message + patch) is injected
+  //    into the hunter's prompt as a focus hint; tools stay
+  //    unrestricted so it can chase context outward.
   const diffFiles: Set<string> | undefined = opts.diff
     ? new Set(listChangedFiles(opts.diff, root))
+    : undefined;
+  const diffPatch: string | undefined = opts.diff
+    ? loadCommitPatch(opts.diff, root)
     : undefined;
 
   const excludePatterns = [...(opts.exclude ?? [])];
@@ -224,7 +242,7 @@ export async function runScan(
   }
   if (opts.diff) {
     console.log(
-      `Diff mode: ${diffFiles?.size ?? 0} changed file(s) since ${opts.diff} (hunt-mode agents skipped)`,
+      `Diff mode: reviewing commit ${opts.diff} (${diffFiles?.size ?? 0} file(s) changed)`,
     );
   }
   if (opts.validate) {
@@ -302,73 +320,76 @@ export async function runScan(
   // Hunt agents are the heavier pass — give them a head start so the
   // total wall-clock time is dominated by file-mode work that runs
   // after, not waiting on a long-running hunt to finish.
-  // Skip entirely under --diff: hunt agents inspect the whole repo by
-  // design; running them on a PR-shape diff scan would be wasteful.
-  if (opts.diff && huntAgents.length > 0) {
+  // Under --diff, the hunter still runs but receives the commit patch
+  // in its prompt as a focus hint; tools stay unrestricted so it can
+  // chase context outward beyond the diff.
+  for (const agent of huntAgents) {
     console.log(
-      `  Skipping ${huntAgents.length} hunt-mode agent(s) under --diff (${huntAgents.map((a) => a.slug).join(", ")})`,
+      opts.diff
+        ? `  ${agent.slug}[hunt]: reviewing commit ${opts.diff} (Read/Glob/Grep)`
+        : `  ${agent.slug}[hunt]: scanning whole repo (Read/Glob/Grep)`,
     );
-  } else {
-    for (const agent of huntAgents) {
-      console.log(`  ${agent.slug}[hunt]: scanning whole repo (Read/Glob/Grep)`);
-      try {
-        // Merge the agent's declared `excludePatterns` (from
-        // frontmatter) with the CLI's --exclude list, deduped.
-        // Either alone is honored; both compose additively.
-        const agentExcludes = Array.from(
-          new Set([...excludePatterns, ...(agent.excludePatterns ?? [])]),
-        );
-        const huntFindings = await detector.hunt({
-          agent,
-          rootDir: root,
-          excludePatterns: agentExcludes,
-          includePatterns,
-          maxFileSizeKb: opts.maxFileSize ?? 500,
-          maxTurns: opts.maxTurns ?? 150,
-        });
-        // Drop findings where the model invented a path that doesn't exist on
-        // disk — common with smaller models that copy the example filePath from
-        // the output-format instruction instead of using a real path.
-        const validHuntFindings = huntFindings.filter((f) => {
-          if (!f.filePath || f.filePath === "(unknown)") return true;
-          if (existsSync(resolve(root, f.filePath))) return true;
-          if (opts.verbose) {
-            console.log(`    ${agent.slug}: dropping finding with non-existent path: ${f.filePath}`);
-          }
-          return false;
-        });
-        findings.push(...validHuntFindings);
-        byAgent[agent.slug] = (byAgent[agent.slug] ?? 0) + validHuntFindings.length;
-        for (const f of validHuntFindings) touchedFiles.add(f.filePath);
-        const droppedCount = huntFindings.length - validHuntFindings.length;
-        console.log(
-          `    ${agent.slug}: ${validHuntFindings.length} finding(s) across ${
-            new Set(validHuntFindings.map((f) => f.filePath)).size
-          } file(s)${droppedCount > 0 ? ` (${droppedCount} dropped: path not found in repo)` : ""}`,
-        );
+    try {
+      // Merge the agent's declared `excludePatterns` (from
+      // frontmatter) with the CLI's --exclude list, deduped.
+      // Either alone is honored; both compose additively.
+      const agentExcludes = Array.from(
+        new Set([...excludePatterns, ...(agent.excludePatterns ?? [])]),
+      );
+      const huntFindings = await detector.hunt({
+        agent,
+        rootDir: root,
+        excludePatterns: agentExcludes,
+        includePatterns,
+        maxFileSizeKb: opts.maxFileSize ?? 500,
+        maxTurns: opts.maxTurns ?? 150,
+        diff:
+          opts.diff && diffPatch !== undefined
+            ? { commit: opts.diff, patch: diffPatch }
+            : undefined,
+      });
+      // Drop findings where the model invented a path that doesn't exist on
+      // disk — common with smaller models that copy the example filePath from
+      // the output-format instruction instead of using a real path.
+      const validHuntFindings = huntFindings.filter((f) => {
+        if (!f.filePath || f.filePath === "(unknown)") return true;
+        if (existsSync(resolve(root, f.filePath))) return true;
+        if (opts.verbose) {
+          console.log(`    ${agent.slug}: dropping finding with non-existent path: ${f.filePath}`);
+        }
+        return false;
+      });
+      findings.push(...validHuntFindings);
+      byAgent[agent.slug] = (byAgent[agent.slug] ?? 0) + validHuntFindings.length;
+      for (const f of validHuntFindings) touchedFiles.add(f.filePath);
+      const droppedCount = huntFindings.length - validHuntFindings.length;
+      console.log(
+        `    ${agent.slug}: ${validHuntFindings.length} finding(s) across ${
+          new Set(validHuntFindings.map((f) => f.filePath)).size
+        } file(s)${droppedCount > 0 ? ` (${droppedCount} dropped: path not found in repo)` : ""}`,
+      );
 
-        // Persist hunt findings per-file. We need each file's content to
-        // stamp a contentHash on the FileRecord; skip files that won't
-        // read (e.g. the model invented a path, or the file is binary).
-        const byFile = new Map<string, Finding[]>();
-        for (const f of validHuntFindings) {
-          if (!f.filePath || f.filePath === "(unknown)") continue;
-          const list = byFile.get(f.filePath) ?? [];
-          list.push(f);
-          byFile.set(f.filePath, list);
-        }
-        for (const [relPath, group] of byFile) {
-          let content: string;
-          try {
-            content = readFileSync(resolve(root, relPath), "utf8");
-          } catch {
-            continue;
-          }
-          persistDetection(relPath, agent, content, group);
-        }
-      } catch (err) {
-        logDetectionError(opts, `hunt:${agent.slug}`, err);
+      // Persist hunt findings per-file. We need each file's content to
+      // stamp a contentHash on the FileRecord; skip files that won't
+      // read (e.g. the model invented a path, or the file is binary).
+      const byFile = new Map<string, Finding[]>();
+      for (const f of validHuntFindings) {
+        if (!f.filePath || f.filePath === "(unknown)") continue;
+        const list = byFile.get(f.filePath) ?? [];
+        list.push(f);
+        byFile.set(f.filePath, list);
       }
+      for (const [relPath, group] of byFile) {
+        let content: string;
+        try {
+          content = readFileSync(resolve(root, relPath), "utf8");
+        } catch {
+          continue;
+        }
+        persistDetection(relPath, agent, content, group);
+      }
+    } catch (err) {
+      logDetectionError(opts, `hunt:${agent.slug}`, err);
     }
   }
 
@@ -380,11 +401,9 @@ export async function runScan(
   // detection briefs + all N agents' hits, then findings are
   // attributed back per-agent. Same cost shape as deepsec — same
   // file is never paid for twice.
-  if (opts.diff && walkerAgents.length > 0) {
-    console.log(
-      `  Skipping ${walkerAgents.length} walker-mode agent(s) under --diff (${walkerAgents.map((a) => a.slug).join(", ")})`,
-    );
-  } else if (walkerAgents.length > 0) {
+  // Under --diff, each agent's file list is intersected with the diff
+  // before pooling so unchanged files never enter the candidate set.
+  if (walkerAgents.length > 0) {
     const walkerWork = walkForAgents(root, walkerAgents, walkCfg);
 
     // file → { content, agentSlug → hits } — the cross-agent pool.
@@ -398,7 +417,10 @@ export async function runScan(
     const agentsBySlug = new Map(walkerAgents.map((a) => [a.slug, a]));
 
     for (const { agent, files } of walkerWork) {
-      for (const relPath of files) {
+      const scopedFiles = diffFiles
+        ? files.filter((f) => diffFiles.has(f))
+        : files;
+      for (const relPath of scopedFiles) {
         let entry = pool.get(relPath);
         if (!entry) {
           let content: string;
@@ -864,7 +886,7 @@ export function registerScanCommand(program: Command): void {
     )
     .option(
       "--diff <commit>",
-      "Scan only files changed between <commit> and HEAD (via `git diff --name-only`). Hunt-mode agents are skipped.",
+      "Restrict the scan to a single commit's own changes (parent → commit), independent of the working tree. File- and walker-mode agents only see files touched in <commit>; hunt-mode agents receive `git show <commit>` (message + patch) in their prompt as a focus hint, with tools unrestricted so they can chase context outward.",
     )
     .option("--concurrency <n>", "parallel file processing", (v) => parseInt(v, 10), 5)
     .option(

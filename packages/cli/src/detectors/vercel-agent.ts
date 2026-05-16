@@ -129,8 +129,8 @@ export class VercelAgentDetector implements Detector {
   }
 
   async hunt(args: HuntArgs): Promise<Finding[]> {
-    const { agent, rootDir, excludePatterns, includePatterns, maxFileSizeKb, maxTurns } = args;
-    const basePrompt = buildHuntPrompt(agent, { excludePatterns, includePatterns, maxFileSizeKb });
+    const { agent, rootDir, excludePatterns, includePatterns, maxFileSizeKb, maxTurns, diff } = args;
+    const basePrompt = buildHuntPrompt(agent, { excludePatterns, includePatterns, maxFileSizeKb, diff });
     const prompt = `${basePrompt}\n\n${jsonOutputInstruction(false)}`;
 
     try {
