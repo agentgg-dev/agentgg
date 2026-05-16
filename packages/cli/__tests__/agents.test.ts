@@ -27,27 +27,16 @@ describe("formatAgentsTable", () => {
   it("renders a header row plus one body row per agent", () => {
     const out = formatAgentsTable([makeAgent("foo")]);
     expect(out).toContain("SLUG");
+    expect(out).toContain("CATEGORY");
     expect(out).toContain("NOISE");
-    expect(out).toContain("SOURCE");
     expect(out).toContain("DESCRIPTION");
     expect(out).toContain("foo");
   });
 
-  it("no longer renders a SEVERITY column (scoring is per-finding)", () => {
+  it("does not render SEVERITY or SOURCE columns", () => {
     const out = formatAgentsTable([makeAgent("foo")]);
     expect(out).not.toContain("SEVERITY");
-  });
-
-  it("defaults source to 'builtin' when source is unset", () => {
-    const out = formatAgentsTable([makeAgent("foo")]);
-    expect(out).toContain("builtin");
-  });
-
-  it("uses the agent's source.kind when present", () => {
-    const a = makeAgent("foo", {
-      source: { kind: "community", path: "/x/y" },
-    });
-    expect(formatAgentsTable([a])).toContain("community");
+    expect(out).not.toContain("SOURCE");
   });
 
   it("truncates long descriptions to keep rows readable", () => {

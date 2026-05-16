@@ -19,12 +19,17 @@ interface VersionInfo {
   installedAt: string;
 }
 
-function countAgentFiles(dir: string): number {
+/**
+ * Count agent files on disk. Only files in a category subdirectory count
+ * — top-level `.md` files (README.md etc.) ship in the same install but
+ * aren't agents.
+ */
+function countAgentFiles(dir: string, depth = 0): number {
   let n = 0;
   for (const f of readdirSync(dir)) {
     const abs = join(dir, f);
-    if (statSync(abs).isDirectory()) n += countAgentFiles(abs);
-    else if (f.endsWith(".md")) n++;
+    if (statSync(abs).isDirectory()) n += countAgentFiles(abs, depth + 1);
+    else if (depth > 0 && f.endsWith(".md")) n++;
   }
   return n;
 }
@@ -134,7 +139,9 @@ export async function installOfficialAgents(
     const destPath = join(officialDir, relative);
     mkdirSync(dirname(destPath), { recursive: true });
     writeFileSync(destPath, entry.getData());
-    count++;
+    // Only count files in a category subdir as agents. Top-level files
+    // like README.md ship in the same zip but aren't agents.
+    if (relative.includes("/")) count++;
   }
 
   writeFileSync(

@@ -1,35 +1,54 @@
-import type { Agent } from "@agentgg/core";
+import { relative, sep } from "node:path";
+import { type Agent, getOfficialAgentsDir } from "@agentgg/core";
 import type { Command } from "commander";
 import { loadAllAgents } from "../agent-catalog.js";
+import { addAgents, getCustomAgentsDir, removeAgent } from "../agents-fs.js";
 import { getInstalledVersion, installOfficialAgents } from "../agents-install.js";
-import { addAgents, removeAgent } from "../agents-fs.js";
 
-export function formatAgentsTable(agents: ReadonlyArray<Agent>): string {
+const SUMMARY_THRESHOLD = 30;
+
+export function getCategory(agent: Agent, env: NodeJS.ProcessEnv = process.env): string {
+  const fullPath = agent.source?.path;
+  if (!fullPath) return "-";
+  const officialDir = getOfficialAgentsDir(env);
+  const customDir = getCustomAgentsDir(env);
+  let rel: string | null = null;
+  if (fullPath.startsWith(officialDir)) rel = relative(officialDir, fullPath);
+  else if (fullPath.startsWith(customDir)) rel = relative(customDir, fullPath);
+  if (rel === null) return "-";
+  const parts = rel.split(sep).filter(Boolean);
+  return parts.length >= 2 ? parts[parts.length - 2] : "(root)";
+}
+
+export function formatAgentsTable(
+  agents: ReadonlyArray<Agent>,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
   if (agents.length === 0) return "No agents installed.";
 
   const rows = agents.map((a) => ({
     slug: a.slug,
+    category: getCategory(a, env),
     mode: a.mode,
     noise: a.noiseTier,
-    source: a.source?.kind ?? "builtin",
     description: truncate(a.description, 56),
   }));
 
   const widths = {
     slug: Math.max(4, ...rows.map((r) => r.slug.length)),
+    category: Math.max(8, ...rows.map((r) => r.category.length)),
     mode: Math.max(4, ...rows.map((r) => r.mode.length)),
     noise: Math.max(5, ...rows.map((r) => r.noise.length)),
-    source: Math.max(6, ...rows.map((r) => r.source.length)),
   };
 
   const header =
     pad("SLUG", widths.slug) +
     "  " +
+    pad("CATEGORY", widths.category) +
+    "  " +
     pad("MODE", widths.mode) +
     "  " +
     pad("NOISE", widths.noise) +
-    "  " +
-    pad("SOURCE", widths.source) +
     "  DESCRIPTION";
 
   const body = rows
@@ -37,11 +56,11 @@ export function formatAgentsTable(agents: ReadonlyArray<Agent>): string {
       (r) =>
         pad(r.slug, widths.slug) +
         "  " +
+        pad(r.category, widths.category) +
+        "  " +
         pad(r.mode, widths.mode) +
         "  " +
         pad(r.noise, widths.noise) +
-        "  " +
-        pad(r.source, widths.source) +
         "  " +
         r.description,
     )
@@ -49,6 +68,45 @@ export function formatAgentsTable(agents: ReadonlyArray<Agent>): string {
 
   const footer = `\n${agents.length} agent${agents.length === 1 ? "" : "s"}`;
   return `${header}\n${body}${footer}`;
+}
+
+export function formatCategorySummary(
+  agents: ReadonlyArray<Agent>,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  const counts = new Map<string, number>();
+  for (const a of agents) {
+    const cat = getCategory(a, env);
+    counts.set(cat, (counts.get(cat) ?? 0) + 1);
+  }
+  const sorted = [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  const nameWidth = Math.max(8, ...sorted.map(([n]) => n.length));
+  const body = sorted
+    .map(
+      ([name, n]) =>
+        "  " + pad(name, nameWidth) + "  " + n + " agent" + (n === 1 ? "" : "s"),
+    )
+    .join("\n");
+  return (
+    "CATEGORY\n" +
+    body +
+    `\n\n${agents.length} agents total. ` +
+    "Use --category <name>, --mode, or --noise to filter. " +
+    "Use --all to dump everything."
+  );
+}
+
+function parseList(s: string | undefined): string[] | null {
+  if (!s) return null;
+  const parts = s
+    .split(",")
+    .map((p) => p.trim())
+    .filter(Boolean);
+  return parts.length === 0 ? null : parts;
+}
+
+function matches(values: string[] | null, target: string): boolean {
+  return values === null || values.includes(target);
 }
 
 function pad(s: string, width: number): string {
@@ -66,17 +124,58 @@ export function registerAgentsCommand(program: Command): void {
     .command("list")
     .description("list installed agents (builtins + user-installed)")
     .option("--json", "emit raw JSON instead of a table")
-    .action((opts: { json?: boolean }) => {
-      const { agents: all, errors } = loadAllAgents();
-      for (const err of errors) {
-        console.warn(`warning: ${err}`);
-      }
-      if (opts.json) {
-        console.log(JSON.stringify(all, null, 2));
-        return;
-      }
-      console.log(formatAgentsTable(all));
-    });
+    .option("--all", "show full table even when no filters are applied")
+    .option(
+      "--category <names>",
+      "filter by category, comma-separated (e.g. auth,injection)",
+    )
+    .option(
+      "--mode <modes>",
+      "filter by mode, comma-separated (file, hunt, walker)",
+    )
+    .option(
+      "--noise <tiers>",
+      "filter by noise tier, comma-separated (precise, normal, loud)",
+    )
+    .action(
+      (opts: {
+        json?: boolean;
+        all?: boolean;
+        category?: string;
+        mode?: string;
+        noise?: string;
+      }) => {
+        const { agents: all, errors } = loadAllAgents();
+        for (const err of errors) {
+          console.warn(`warning: ${err}`);
+        }
+
+        const categories = parseList(opts.category);
+        const modes = parseList(opts.mode);
+        const noises = parseList(opts.noise);
+        const hasFilters =
+          categories !== null || modes !== null || noises !== null;
+
+        const filtered = all.filter(
+          (a) =>
+            matches(categories, getCategory(a)) &&
+            matches(modes, a.mode) &&
+            matches(noises, a.noiseTier),
+        );
+
+        if (opts.json) {
+          console.log(JSON.stringify(filtered, null, 2));
+          return;
+        }
+
+        if (!hasFilters && !opts.all && filtered.length > SUMMARY_THRESHOLD) {
+          console.log(formatCategorySummary(filtered));
+          return;
+        }
+
+        console.log(formatAgentsTable(filtered));
+      },
+    );
 
   agents
     .command("info <slug>")
