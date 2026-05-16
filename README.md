@@ -18,9 +18,21 @@ From source:
 git clone https://github.com/agentgg/agentgg
 cd agentgg
 npm install --legacy-peer-deps
-npm run build
-npm link --workspace agentgg   # makes `agentgg` available globally
+npm run build                     # tsc-builds the CLI and core packages
+npm run build:bundle -w agentgg   # tsc + prebundles the viewer into the CLI dist
+npm link --workspace agentgg      # makes `agentgg` available globally
 ```
+
+`npm run build` is the fast inner-loop build (~1s). `npm run build:bundle`
+additionally runs `next build` on the viewer and copies the standalone
+output into `packages/cli/dist/viewer/` — that's what npm-install users
+get out of the published tarball, and it's the same code path `agentgg
+view` and `agentgg scan --serve` take when the bundle is present.
+
+You can skip `build:bundle` entirely while iterating on the CLI — the
+viewer commands will fall back to spawning the Next.js dev server on the
+fly. Re-run `build:bundle` when you change viewer source and want the
+production path to pick it up.
 
 ## Quick start
 
@@ -28,6 +40,10 @@ npm link --workspace agentgg   # makes `agentgg` available globally
 agentgg init                                # one-time: pick a provider, paste a key
 agentgg scan ./src --validate -o ./out      # scan, validate findings, write a report
 agentgg status ./out                        # what got found / validated / when
+agentgg view ./out                          # browse findings in a local web UI
+agentgg view ./out 8080                     # …on a custom port
+agentgg scan ./src --serve -o ./out         # scan, then boot the UI when done
+agentgg scan ./src --serve 8080 -o ./out    # …on a custom port
 ```
 
 Findings land in `./out/`:

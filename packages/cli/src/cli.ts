@@ -21,6 +21,7 @@ import { registerInitCommand } from "./commands/init.js";
 import { registerRevalidateCommand } from "./commands/revalidate.js";
 import { registerScanCommand } from "./commands/scan.js";
 import { registerStatusCommand } from "./commands/status.js";
+import { registerViewCommand } from "./commands/view.js";
 import { VERSION } from "./version.js";
 
 const program = new Command();
@@ -35,6 +36,7 @@ registerInitCommand(program);
 registerScanCommand(program);
 registerStatusCommand(program);
 registerRevalidateCommand(program);
+registerViewCommand(program);
 registerAgentsCommand(program);
 registerConfigCommand(program);
 

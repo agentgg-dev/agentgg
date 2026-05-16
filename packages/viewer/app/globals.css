@@ -1,0 +1,107 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 80px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+}
+
+html, body {
+  background: #0a1018;
+  color: #e6edf3;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  overflow-x: clip;
+}
+
+::selection {
+  background: rgba(255, 140, 66, 0.35);
+  color: #fff;
+}
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: #0a1018; }
+::-webkit-scrollbar-thumb { background: #1f2d3f; border-radius: 6px; }
+::-webkit-scrollbar-thumb:hover { background: #2a3a4f; }
+
+.text-gradient-amber {
+  background: linear-gradient(135deg, #ff8c42 0%, #ffaa6b 50%, #ff8c42 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.text-gradient-cyan {
+  background: linear-gradient(135deg, #4cc9f0 0%, #7adcf5 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.glow-amber {
+  box-shadow: 0 0 40px -10px rgba(255, 140, 66, 0.4);
+}
+.glow-cyan {
+  box-shadow: 0 0 40px -10px rgba(76, 201, 240, 0.4);
+}
+
+.code-block {
+  font-family: var(--font-mono), ui-monospace, monospace;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+/* Findings detail prose — keeps the markdown bodies legible without
+   pulling in @tailwindcss/typography. */
+.prose-finding {
+  font-size: 14px;
+  line-height: 1.7;
+  color: #c5d1de;
+}
+.prose-finding p { margin: 0 0 0.9em; }
+.prose-finding ul, .prose-finding ol { margin: 0.6em 0 0.9em 1.2em; }
+.prose-finding li { margin: 0.2em 0; }
+.prose-finding code {
+  background: #141f2e;
+  border: 1px solid #1f2d3f;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 12.5px;
+  color: #ffaa6b;
+}
+.prose-finding pre {
+  background: #0a1018;
+  border: 1px solid #1f2d3f;
+  border-radius: 8px;
+  padding: 14px 16px;
+  overflow-x: auto;
+  margin: 0.6em 0 1em;
+}
+.prose-finding pre code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: #c5d1de;
+  font-size: 13px;
+}
+.prose-finding h1, .prose-finding h2, .prose-finding h3 {
+  color: #e6edf3;
+  font-weight: 600;
+  margin: 1.4em 0 0.5em;
+}
+.prose-finding h3 { font-size: 15px; }
+.prose-finding a { color: #4cc9f0; text-decoration: underline; text-underline-offset: 2px; }
+.prose-finding a:hover { color: #7adcf5; }
+.prose-finding strong { color: #e6edf3; font-weight: 600; }

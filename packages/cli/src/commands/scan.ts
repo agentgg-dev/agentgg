@@ -22,6 +22,8 @@ import { type CredentialOverrides, resolveDetector } from "../llm.js";
 import { evaluatePreFilter } from "../pre-filter.js";
 import { writeMarkdownReport } from "../reporters/md.js";
 import { resolveTemplates } from "../template.js";
+import { DEFAULT_VIEWER_PORT, openBrowser, startViewer } from "../viewer-server.js";
+import { printReady } from "./view.js";
 import { type WalkConfig, walkForAgents } from "../walker.js";
 
 interface ScanOpts {
@@ -58,6 +60,17 @@ interface ScanOpts {
   thinking?: "off" | "adaptive" | "enabled";
   /** Keep false-positive findings in the markdown report instead of filtering them out. */
   includeFalsePositives?: boolean;
+  /**
+   * Boot the local viewer (Next.js) after the scan finishes and keep
+   * it running until Ctrl+C. Accepts an optional port; without one,
+   * uses the default 3737 (auto-incrementing if busy).
+   *   `--serve`           → default port
+   *   `--serve 8080`      → port 8080
+   *
+   * Commander resolves the value to a string when supplied, boolean
+   * `true` when the bare flag is passed.
+   */
+  serve?: boolean | string;
 }
 
 /**
@@ -788,6 +801,29 @@ export async function runScan(
   );
   console.log(`  Summary: ${report.summaryPath}`);
   console.log(`  Findings dir: ${outDir}\\findings`);
+
+  if (opts.serve) {
+    const port = parsePortOpt(opts.serve);
+    console.log("\nBooting local viewer…");
+    const handle = await startViewer({
+      outputDir: outDir,
+      port,
+      verbose: opts.verbose,
+    });
+    printReady(handle.url, outDir);
+    openBrowser(handle.url);
+    // Block until Ctrl+C — same pattern as `agentgg view`.
+    await new Promise<void>((res) => {
+      const shutdown = async () => {
+        process.stdout.write("\nStopping viewer…\n");
+        await handle.stop();
+        res();
+      };
+      process.once("SIGINT", shutdown);
+      process.once("SIGTERM", shutdown);
+      handle.child.once("exit", () => res());
+    });
+  }
 }
 
 function logDetectionError(opts: ScanOpts, label: string, err: unknown): void {
@@ -912,6 +948,10 @@ export function registerScanCommand(program: Command): void {
       "Write per-finding markdown reports for findings the validator marked false-positive (default: skip them). FP findings always stay in state/files/* regardless.",
     )
     .option(
+      "--serve [port]",
+      `After the scan completes, boot a local web UI for the findings and keep it running until Ctrl+C. Optional port (default ${DEFAULT_VIEWER_PORT}; auto-increments if busy). Same UI as \`agentgg view\`.`,
+    )
+    .option(
       "--exclude <pattern>",
       "extra glob to exclude (repeatable; additive to walker defaults)",
       collect,
@@ -942,4 +982,21 @@ export function registerScanCommand(program: Command): void {
 
 function collect(value: string, prev: string[]): string[] {
   return prev.concat([value]);
+}
+
+/**
+ * Resolve the `--serve [port]` option. Commander passes the boolean
+ * `true` when the bare flag was used and the string value otherwise.
+ * Returns undefined for the default-port case so `startViewer` picks
+ * 3737 (and auto-increments).
+ */
+function parsePortOpt(value: boolean | string | undefined): number | undefined {
+  if (typeof value !== "string") return undefined;
+  const n = parseInt(value, 10);
+  if (!Number.isFinite(n) || n < 1 || n > 65535) {
+    throw new Error(
+      `--serve: invalid port "${value}" (expected an integer between 1 and 65535)`,
+    );
+  }
+  return n;
 }

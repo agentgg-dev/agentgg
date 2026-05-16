@@ -8,11 +8,13 @@
     "agentgg": "./dist/cli.js"
   },
   "main": "./dist/cli.js",
-  "files": ["dist", "README.md", "LICENSE", "NOTICE"],
+  "files": ["dist", "scripts", "README.md", "LICENSE", "NOTICE"],
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "build:bundle": "tsc -p tsconfig.json && node scripts/bundle-viewer.mjs",
     "clean": "rimraf dist",
-    "dev": "tsx src/cli.ts"
+    "dev": "tsx src/cli.ts",
+    "prepublishOnly": "npm run build:bundle"
   },
   "dependencies": {
     "@agentgg/agents": "*",
