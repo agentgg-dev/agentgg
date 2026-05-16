@@ -16,6 +16,7 @@ import type { Command } from "commander";
 import { loadAllAgents } from "../agent-catalog.js";
 import { installOfficialAgents } from "../agents-install.js";
 import { runConcurrent } from "../concurrent.js";
+import { diagnoseScanError } from "../diagnostics.js";
 import { listChangedFiles } from "../diff.js";
 import { type CredentialOverrides, resolveDetector } from "../llm.js";
 import { evaluatePreFilter } from "../pre-filter.js";
@@ -775,6 +776,22 @@ function logDetectionError(opts: ScanOpts, label: string, err: unknown): void {
     url?: string;
   };
   const msg = e.message || String(err);
+
+  const diagnostic = diagnoseScanError(err);
+  if (diagnostic) {
+    console.error(`    ${label}: ${diagnostic.format()}`);
+    if (opts.verbose && e.stack) {
+      console.error(
+        e.stack
+          .split("\n")
+          .slice(0, 8)
+          .map((l) => `      ${l}`)
+          .join("\n"),
+      );
+    }
+    return;
+  }
+
   console.error(`    ${label}: detection failed — ${msg}`);
   if (e.statusCode) console.error(`      HTTP ${e.statusCode} ${e.url ?? ""}`);
   if (e.responseBody) {

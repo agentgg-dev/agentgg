@@ -172,12 +172,18 @@ function buildOllamaDetector(
   }
   const modelName = options.model ?? config.ollama?.model ?? FALLBACK_MODELS.ollama;
   const ollama = createOllama({ baseURL: `${baseUrl}/api` });
+  // Ollama's default num_ctx is 2048, which the hunt loop (prompt + tool
+  // results) blows past easily — when that happens models like qwen2.5:14b
+  // lose track of the chat template, leak <|im_start|> tokens, and return
+  // a malformed response with done:false. Bump it to a workable size for
+  // both tool-calling and file-mode reads.
+  const numCtx = 16384;
   // Ollama needs `structuredOutputs: true` for generateObject (file mode).
   // Tool-calling sessions use a plain model instance — structuredOutputs
   // conflicts with Ollama's tool-call protocol and causes the model to emit
   // the example JSON template verbatim instead of reasoning about tool results.
-  const structuredModel = ollama(modelName, { structuredOutputs: true });
-  const toolModel = ollama(modelName);
+  const structuredModel = ollama(modelName, { structuredOutputs: true, numCtx });
+  const toolModel = ollama(modelName, { numCtx });
   const baseOpts = { effort: options.effort, thinking: options.thinking };
   const fileDetector = new MultiProviderDetector("ollama", structuredModel, baseOpts);
   const agentDetector = new VercelAgentDetector("ollama", toolModel, {
