@@ -165,16 +165,16 @@ export async function runScan(
 
   // `--template` / `-t` filters the catalog. Each value is a slug,
   // a path to a .md file/dir, or a subdirectory name relative to the
-  // official agents dir (e.g. "basic/injection/" or "default/").
-  // When no -t is given, default to the official default/ folder so
-  // users don't accidentally run all 100+ agents on first scan.
+  // official agents dir (e.g. "base/injection/" or "lite/").
+  // When no -t is given, default to the official base/ folder — the
+  // full vulnerability library.
   const templateInputs = opts.template ?? [];
-  const defaultDir = join(officialAgentsDir, "default");
+  const baseDir = join(officialAgentsDir, "base");
   const selectedAgents: Agent[] =
     templateInputs.length > 0
       ? resolveTemplates(templateInputs, catalog.agents, officialAgentsDir)
-      : existsSync(defaultDir)
-        ? resolveTemplates([defaultDir], catalog.agents, officialAgentsDir)
+      : existsSync(baseDir)
+        ? resolveTemplates([baseDir], catalog.agents, officialAgentsDir)
         : catalog.agents;
   if (selectedAgents.length === 0) {
     throw new Error("No agents selected — nothing to scan.");
