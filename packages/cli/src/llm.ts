@@ -3,12 +3,12 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOllama } from "ollama-ai-provider";
 import type { Detector } from "./detect.js";
-import { ClaudeAgentDetector, MultiProviderDetector } from "./detectors/index.js";
+import { ClaudeAgentDetector, MultiProviderDetector, VercelAgentDetector } from "./detectors/index.js";
 
 const FALLBACK_MODELS = {
   anthropic: "claude-sonnet-4-6",
   openai: "gpt-5",
-  ollama: "llama3.1",
+  ollama: "qwen2.5",
 } as const;
 
 /**
@@ -151,9 +151,12 @@ function buildOpenAIDetector(
   }
   const modelName = options.model ?? config.openai?.model ?? FALLBACK_MODELS.openai;
   const openai = createOpenAI({ apiKey });
-  return new MultiProviderDetector("openai", openai(modelName), {
+  // VercelAgentDetector handles all modes: file (generateObject) +
+  // hunt/walker (generateText with Read/Glob/Grep tool loop).
+  return new VercelAgentDetector("openai", openai(modelName), {
     effort: options.effort,
     thinking: options.thinking,
+    verbose: options.verbose,
   });
 }
 
@@ -169,8 +172,24 @@ function buildOllamaDetector(
   }
   const modelName = options.model ?? config.ollama?.model ?? FALLBACK_MODELS.ollama;
   const ollama = createOllama({ baseURL: `${baseUrl}/api` });
-  return new MultiProviderDetector("ollama", ollama(modelName, { structuredOutputs: true }), {
-    effort: options.effort,
-    thinking: options.thinking,
+  // Ollama needs `structuredOutputs: true` for generateObject (file mode).
+  // Tool-calling sessions use a plain model instance — structuredOutputs
+  // conflicts with Ollama's tool-call protocol and causes the model to emit
+  // the example JSON template verbatim instead of reasoning about tool results.
+  const structuredModel = ollama(modelName, { structuredOutputs: true });
+  const toolModel = ollama(modelName);
+  const baseOpts = { effort: options.effort, thinking: options.thinking };
+  const fileDetector = new MultiProviderDetector("ollama", structuredModel, baseOpts);
+  const agentDetector = new VercelAgentDetector("ollama", toolModel, {
+    ...baseOpts,
+    verbose: options.verbose,
+    structuredModel: structuredModel,
   });
+  return {
+    name: "ollama",
+    detectFile: (args) => fileDetector.detectFile(args),
+    hunt: (args) => agentDetector.hunt(args),
+    investigate: (args) => agentDetector.investigate(args),
+    validateFinding: (args) => fileDetector.validateFinding(args),
+  };
 }
