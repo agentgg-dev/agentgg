@@ -25,6 +25,13 @@ export const metadata: Metadata = {
   title: 'agentgg · scan report',
   description: 'Local report viewer for agentgg scan results.',
   robots: { index: false, follow: false },
+  icons: {
+    icon: [
+      { url: '/favicon-32.png', sizes: '32x32', type: 'image/png' },
+      { url: '/favicon-64.png', sizes: '64x64', type: 'image/png' },
+    ],
+    shortcut: '/favicon-32.png',
+  },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

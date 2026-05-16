@@ -1,5 +1,6 @@
+import Image from 'next/image';
 import Link from 'next/link';
-import { FileSearch, FolderOpen } from 'lucide-react';
+import { FolderOpen } from 'lucide-react';
 
 type Props = {
   rootPath?: string;
@@ -10,9 +11,14 @@ export default function Nav({ rootPath }: Props) {
     <header className="sticky top-0 z-50 backdrop-blur-xl bg-bg/70 border-b border-bg-border">
       <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
         <Link href="/" className="flex items-center gap-2.5 group">
-          <span className="inline-flex items-center justify-center w-8 h-8 rounded-md bg-bg-panel border border-bg-border">
-            <FileSearch className="w-4 h-4 text-amber" />
-          </span>
+          <Image
+            src="/logo-mini.png"
+            alt="agentgg"
+            width={32}
+            height={32}
+            priority
+            className="rounded-md"
+          />
           <span className="font-mono text-[15px] tracking-tight">
             <span className="text-cyan">agent</span>
             <span className="text-amber">gg</span>
