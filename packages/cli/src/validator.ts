@@ -145,3 +145,74 @@ export function asValidationField(v: LlmValidation): {
 } {
   return { verdict: v.verdict, reasoning: v.reasoning };
 }
+
+/**
+ * Build the prompt for `--scope-validate`. Same schema (`LlmValidation`)
+ * as the full validator so detectors can reuse their structured-output
+ * path, but the prompt:
+ *
+ *   - withholds file content entirely
+ *   - requires a scope document
+ *   - constrains the model to `out-of-scope` or `uncertain`
+ *     (`confirmed` / `false-positive` need the code, which scope-only
+ *     mode deliberately skips)
+ *
+ * Used as a cheap pre-filter to knock out scope-disqualified findings
+ * before paying the full validator cost.
+ */
+export function buildScopeValidatePrompt(args: {
+  finding: Finding;
+  scope: string;
+}): string {
+  const { finding, scope } = args;
+  const lineHint = finding.lineRange
+    ? `lines ${finding.lineRange[0]}–${finding.lineRange[1]}`
+    : "unspecified lines";
+
+  return `You are classifying a security finding against a scope document.
+You will NOT see the source code — your only job is to decide whether
+the documented scope explicitly excludes this finding.
+
+## The finding
+
+**Title:** ${finding.title}
+**Vuln class:** ${finding.vulnSlug}
+**Reported by agent:** ${finding.agentSlug}
+**File:** ${finding.filePath} (${lineHint})
+
+### Summary
+${finding.summary}
+
+### Details
+${finding.details}
+
+### Impact
+${finding.impact}
+
+## Scope rules
+
+The document below describes what's in-scope for this engagement
+(usually a SECURITY.md). If the finding's file path, vulnerability
+class, or affected component is explicitly excluded by this scope,
+return \`out-of-scope\` and quote the matching rule. Otherwise return
+\`uncertain\` — that signals the scope did not disqualify the finding
+(full validation against the source is still needed to confirm or
+dismiss it).
+
+\`\`\`
+${scope}
+\`\`\`
+
+## Your task
+
+Return one of:
+- \`out-of-scope\` — scope explicitly excludes this finding's path,
+  vulnerability class, or affected component. Quote the matching rule.
+- \`uncertain\` — scope does not clearly exclude this finding.
+
+You MUST NOT return \`confirmed\` or \`false-positive\` — those
+verdicts require reading the source code, which has not been provided.
+
+Reasoning: at most 4 sentences. Quote the specific scope rule that
+drove your decision.`;
+}

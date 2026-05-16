@@ -16,7 +16,21 @@ import { type CredentialOverrides, resolveDetector } from "../llm.js";
 import { writeMarkdownReport } from "../reporters/md.js";
 
 interface RevalidateOpts {
+  /**
+   * Path to a SECURITY.md-style scope document. Two meanings, matching
+   * `scan`:
+   *   - with --validate: threaded into full validation; `out-of-scope`
+   *     joins the usual confirmed/false-positive/uncertain verdicts.
+   *   - WITHOUT --validate: triggers scope-only validation — the model
+   *     never re-reads source; only `out-of-scope` is persisted.
+   */
   scope?: string;
+  /**
+   * Force full validation (re-reads source). Without this, `--scope`
+   * alone runs scope-only; absence of both runs full validation with
+   * no scope context (revalidate's default).
+   */
+  validate?: boolean;
   provider?: string;
   apiKey?: string;
   oauthToken?: string;
@@ -89,6 +103,12 @@ export async function runRevalidate(
     }
   }
 
+  // `--scope` without `--validate` selects the cheap scope-only path.
+  // `--validate` (with or without `--scope`) selects full re-reading
+  // validation. Absence of both is the historical revalidate default
+  // (full validation, no scope context).
+  const scopeOnlyValidate = !opts.validate && !!scopeContent;
+
   const records = loadAllFileRecords(outputDir);
   if (records.length === 0) {
     console.log(`No FileRecords in ${outputDir}/state/files/.`);
@@ -118,6 +138,11 @@ export async function runRevalidate(
   console.log(`  Root:        ${rootPath}`);
   console.log(`  Provider:    ${detector.name}`);
   if (scopeContent) console.log(`  Scope:       ${opts.scope}`);
+  if (scopeOnlyValidate) {
+    console.log(`  Mode:        scope-only (file content not read; only out-of-scope verdicts persisted)`);
+  } else {
+    console.log(`  Mode:        full${scopeContent ? " (with scope context)" : ""}`);
+  }
   if (opts.force) console.log(`  Force:       re-classifying everything`);
   console.log("");
 
@@ -135,6 +160,38 @@ export async function runRevalidate(
   // before the next call starts. Validation is the per-report step;
   // parallelism would only tangle progress and rate-limit pressure.
   await runConcurrent(tasks, 1, async ({ record, finding }) => {
+    // Scope-only branch: never read the file, only ask the LLM to
+    // classify against the scope document, and only persist when the
+    // verdict is `out-of-scope`. In-scope/uncertain results are logged
+    // but the finding's validation field is left untouched so a
+    // follow-up full `revalidate` can still assess technical merit.
+    if (scopeOnlyValidate) {
+      try {
+        const result = await detector.validateFindingByScope({
+          finding,
+          scope: scopeContent!,
+        });
+        verdicts[result.verdict] = (verdicts[result.verdict] ?? 0) + 1;
+        if (result.verdict === "out-of-scope") {
+          finding.validation = {
+            verdict: result.verdict,
+            reasoning: result.reasoning,
+          };
+          dirtyRecords.add(record);
+        }
+        if (opts.verbose) {
+          const note =
+            result.verdict === "out-of-scope" ? "marked out-of-scope" : "kept (scope did not disqualify)";
+          console.log(`  ${finding.filePath} (${finding.id}): ${result.verdict} — ${note}`);
+        }
+      } catch (err) {
+        console.error(
+          `  scope-validate:${finding.id} failed — ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      return;
+    }
+
     const absPath = resolve(rootPath, finding.filePath);
     let content = fileCache.get(finding.filePath);
     if (content === undefined) {
@@ -245,7 +302,11 @@ export function registerRevalidateCommand(program: Command): void {
     )
     .option(
       "--scope <path>",
-      "path to a SECURITY.md-style scope file. When set, the validator can return `out-of-scope`.",
+      "path to a SECURITY.md-style scope file. With --validate, scope rules are threaded into the full classifier (verdicts include `out-of-scope`). WITHOUT --validate, triggers scope-only validation: the model never re-reads the source and only persists `out-of-scope` verdicts (cheap pre-filter).",
+    )
+    .option(
+      "--validate",
+      "force full validation (re-reads source) even when --scope is set. Without this, `--scope` alone selects the cheap scope-only path; absence of both runs full validation with no scope context.",
     )
     .option(
       "--root <path>",

@@ -127,6 +127,19 @@ export interface Detector {
     /** Optional scope document; threaded into the validator prompt verbatim. */
     scope?: string;
   }): Promise<{ verdict: "confirmed" | "false-positive" | "out-of-scope" | "uncertain"; reasoning: string }>;
+
+  /**
+   * Scope-only validation — cheaper alternative to `validateFinding`
+   * that skips re-reading the source file. The model only sees the
+   * finding's metadata + the scope document and is constrained (via
+   * the prompt) to return `out-of-scope` or `uncertain`. Used by
+   * `revalidate --scope-validate` as a cheap pre-filter to dismiss
+   * scope-disqualified findings before paying the full validator cost.
+   */
+  validateFindingByScope(args: {
+    finding: Finding;
+    scope: string;
+  }): Promise<{ verdict: "confirmed" | "false-positive" | "out-of-scope" | "uncertain"; reasoning: string }>;
 }
 
 export interface HuntArgs {

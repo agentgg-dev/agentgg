@@ -12,7 +12,12 @@ import {
   buildInvestigatePrompt,
   hydrateFinding,
 } from "../detect.js";
-import { LlmValidation, asValidationField, buildValidatePrompt } from "../validator.js";
+import {
+  LlmValidation,
+  asValidationField,
+  buildScopeValidatePrompt,
+  buildValidatePrompt,
+} from "../validator.js";
 
 const ENV_ALLOWLIST = new Set<string>([
   "PATH",
@@ -190,6 +195,17 @@ export class ClaudeAgentDetector implements Detector {
     // model's context, so the validator can't burn turns on speculative
     // Grep/Read calls. validateMaxTurns kept as-is pending separate
     // revert of the workaround budget.
+    const validated = await this.runStructured({
+      prompt,
+      tools: [],
+      maxTurns: this.validateMaxTurns,
+      schema: LlmValidation,
+    });
+    return asValidationField(validated);
+  }
+
+  async validateFindingByScope(args: { finding: Finding; scope: string }) {
+    const prompt = buildScopeValidatePrompt(args);
     const validated = await this.runStructured({
       prompt,
       tools: [],

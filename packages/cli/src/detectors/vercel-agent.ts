@@ -15,7 +15,12 @@ import {
   buildInvestigatePrompt,
   hydrateFinding,
 } from "../detect.js";
-import { LlmValidation, asValidationField, buildValidatePrompt } from "../validator.js";
+import {
+  LlmValidation,
+  asValidationField,
+  buildScopeValidatePrompt,
+  buildValidatePrompt,
+} from "../validator.js";
 
 export type Effort = "low" | "medium" | "high" | "max";
 export type Thinking = "off" | "adaptive" | "enabled";
@@ -203,6 +208,24 @@ export class VercelAgentDetector implements Detector {
       return asValidationField(object);
     } catch (err) {
       debugLog("VercelAgentDetector.validateFinding", err);
+      throw err;
+    }
+  }
+
+  async validateFindingByScope(args: { finding: Finding; scope: string }) {
+    try {
+      const { object } = await withTpmRetry(() =>
+        generateObject({
+          model: this.model,
+          schema: LlmValidation,
+          mode: "json",
+          prompt: buildScopeValidatePrompt(args),
+          providerOptions: this.providerOptionsArg(),
+        }),
+      );
+      return asValidationField(object);
+    } catch (err) {
+      debugLog("VercelAgentDetector.validateFindingByScope", err);
       throw err;
     }
   }

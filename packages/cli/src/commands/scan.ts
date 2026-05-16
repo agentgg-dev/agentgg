@@ -27,6 +27,15 @@ import { printReady } from "./view.js";
 import { type WalkConfig, walkForAgents } from "../walker.js";
 
 interface ScanOpts {
+  /**
+   * Path to a SECURITY.md-style scope document. Two meanings:
+   *   - with --validate: scope context is threaded into full validation
+   *     so the model can return `out-of-scope` alongside the usual
+   *     confirmed / false-positive / uncertain verdicts.
+   *   - WITHOUT --validate: triggers scope-only validation. The model
+   *     never sees the source, only the finding metadata + this scope
+   *     doc, and only `out-of-scope` verdicts are persisted. Cheap.
+   */
   scope?: string;
   output?: string;
   validate?: boolean;
@@ -237,6 +246,12 @@ export async function runScan(
     }
   }
 
+  // `--scope` without `--validate` triggers scope-only validation:
+  // a cheap, file-read-free pre-filter that classifies each finding
+  // against the scope document alone. `--validate` with or without
+  // `--scope` runs the full source-reading classifier.
+  const scopeOnlyValidate = !opts.validate && !!scopeContent;
+
   const walkCfg: WalkConfig = {
     excludePatterns,
     includePatterns,
@@ -259,7 +274,9 @@ export async function runScan(
     );
   }
   if (opts.validate) {
-    console.log(`Validation: enabled${scopeContent ? ` (scope: ${opts.scope})` : ""}`);
+    console.log(`Validation: full${scopeContent ? ` (scope: ${opts.scope})` : ""}`);
+  } else if (scopeOnlyValidate) {
+    console.log(`Validation: scope-only (scope: ${opts.scope}; only out-of-scope verdicts persisted)`);
   }
   if (excludePatterns.length > 0) {
     console.log(`Excluding: ${excludePatterns.join(", ")}`);
@@ -664,10 +681,15 @@ export async function runScan(
   }
 
   // -------- validation phase --------
-  // Opt-in second-pass classifier per finding. Off by default — it
-  // doubles LLM cost. Re-reads the source (and the --scope document if
-  // supplied) and asks the model to confirm / dismiss / mark out-of-scope.
-  if (opts.validate && findings.length > 0) {
+  // Two opt-in modes:
+  //   - `--validate`: full classifier — re-reads source, with --scope
+  //     context if provided. Doubles LLM cost.
+  //   - `--scope` alone (no --validate): scope-only classifier — never
+  //     re-reads source, only emits `out-of-scope` verdicts. Cheap
+  //     pre-filter; in-scope/uncertain leave the finding's validation
+  //     field untouched so a follow-up `revalidate` can do full
+  //     classification.
+  if ((opts.validate || scopeOnlyValidate) && findings.length > 0) {
     const candidates = findings.filter(
       (f) => f.filePath && f.filePath !== "(unknown)",
     );
@@ -680,14 +702,44 @@ export async function runScan(
     if (validatable.length > 0 || carriedOver > 0) {
       const scopeNote = scopeContent ? " with scope" : "";
       const carryNote = carriedOver > 0 ? ` (${carriedOver} cached)` : "";
+      const modeNote = scopeOnlyValidate ? " — scope-only mode" : "";
       console.log(
-        `\nValidating ${validatable.length} finding(s)${scopeNote}${carryNote} (one at a time)`,
+        `\nValidating ${validatable.length} finding(s)${scopeNote}${carryNote}${modeNote} (one at a time)`,
       );
       const fileCache = new Map<string, string | null>();
       // Validation always runs sequentially — one finding at a time —
       // so progress is legible and per-finding failures don't get
       // tangled with parallel siblings.
       await runConcurrent(validatable, 1, async (finding) => {
+        // Scope-only branch: never read the file, only ask the LLM to
+        // classify against --scope, and only persist `out-of-scope`.
+        // Findings the scope doesn't disqualify are left untouched so a
+        // follow-up `revalidate` (full mode) can still assess them.
+        if (scopeOnlyValidate) {
+          try {
+            const result = await detector.validateFindingByScope({
+              finding,
+              scope: scopeContent!,
+            });
+            if (result.verdict === "out-of-scope") {
+              finding.validation = {
+                verdict: result.verdict,
+                reasoning: result.reasoning,
+              };
+            }
+            if (opts.verbose) {
+              const note =
+                result.verdict === "out-of-scope"
+                  ? "marked out-of-scope"
+                  : "kept (scope did not disqualify)";
+              console.log(`    ${finding.filePath}: ${result.verdict} — ${note}`);
+            }
+          } catch (err) {
+            logDetectionError(opts, `scope-validate:${finding.id}`, err);
+          }
+          return;
+        }
+
         let content = fileCache.get(finding.filePath);
         if (content === undefined) {
           try {
@@ -881,7 +933,7 @@ export function registerScanCommand(program: Command): void {
     .argument("<path>", "path to the codebase to scan")
     .option(
       "--scope <path>",
-      "path to a SECURITY.md-style scope file. When set, the validator can return `out-of-scope` and cites the matching rule.",
+      "path to a SECURITY.md-style scope file. With --validate, scope rules are threaded into the full classifier (verdicts include `out-of-scope`). WITHOUT --validate, triggers scope-only validation: the model never re-reads the source and only persists `out-of-scope` verdicts (cheap pre-filter).",
     )
     .option(
       "-o, --output <path>",
@@ -890,7 +942,7 @@ export function registerScanCommand(program: Command): void {
     )
     .option(
       "--validate",
-      "run a second-pass LLM validation phase per finding (slower; reduces false positives)",
+      "run a full second-pass LLM validation phase per finding (slower; reduces false positives). Combine with --scope to thread scope rules into the classifier.",
     )
     .option(
       "--rescan",

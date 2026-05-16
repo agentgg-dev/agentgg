@@ -8,7 +8,12 @@ import {
   buildDetectPrompt,
   hydrateFinding,
 } from "../detect.js";
-import { LlmValidation, asValidationField, buildValidatePrompt } from "../validator.js";
+import {
+  LlmValidation,
+  asValidationField,
+  buildScopeValidatePrompt,
+  buildValidatePrompt,
+} from "../validator.js";
 
 /**
  * Multi-provider detector. Backed by the Vercel AI SDK's `generateObject`
@@ -148,6 +153,27 @@ export class MultiProviderDetector implements Detector {
         console.error("---- MultiProviderDetector validate error ----");
         console.error(util.inspect(err, { depth: 5, colors: false }));
         console.error("----------------------------------------------");
+      }
+      throw err;
+    }
+  }
+
+  async validateFindingByScope(args: { finding: Finding; scope: string }) {
+    try {
+      const { object } = await generateObject({
+        model: this.model,
+        schema: LlmValidation,
+        mode: "json",
+        prompt: buildScopeValidatePrompt(args),
+        providerOptions: this.providerOptionsArg(),
+      });
+      return asValidationField(object);
+    } catch (err) {
+      if (process.env.AGENTGG_DEBUG) {
+        const util = await import("node:util");
+        console.error("---- MultiProviderDetector scope-validate error ----");
+        console.error(util.inspect(err, { depth: 5, colors: false }));
+        console.error("-----------------------------------------------------");
       }
       throw err;
     }

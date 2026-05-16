@@ -133,6 +133,7 @@ function buildAnthropicDetector(
       // just like hunt does.
       investigate: (args) => huntDetector.investigate(args),
       validateFinding: (args) => fileDetector.validateFinding(args),
+      validateFindingByScope: (args) => fileDetector.validateFindingByScope(args),
     };
   }
 
@@ -197,5 +198,6 @@ function buildOllamaDetector(
     hunt: (args) => agentDetector.hunt(args),
     investigate: (args) => agentDetector.investigate(args),
     validateFinding: (args) => fileDetector.validateFinding(args),
+    validateFindingByScope: (args) => fileDetector.validateFindingByScope(args),
   };
 }
