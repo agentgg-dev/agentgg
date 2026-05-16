@@ -63,10 +63,8 @@ export const LlmFinding = z.object({
     .array(z.string())
     .describe("CWE IDs, OWASP categories, or documentation links. Use [] if none."),
   confidence: z
-    .number()
-    .min(0)
-    .max(1)
-    .describe("0 = guess, 1 = certain. Be honest — calibration matters."),
+    .preprocess((v) => (typeof v === "number" && v > 1 ? v / 100 : v), z.number().min(0).max(1))
+    .describe("Decimal 0.0–1.0. NOT a percentage. Write 0.9 not 90. 0.0 = guess, 1.0 = certain."),
 });
 export type LlmFinding = z.infer<typeof LlmFinding>;
 
@@ -228,7 +226,9 @@ export function buildHuntPrompt(
 ---
 
 You have these tools available: Read, Glob, Grep. Your working
-directory is the target repository's root.
+directory is the target repository's root. These tools let you
+examine files INSIDE the target codebase — they are not subjects
+of your investigation, they are how you conduct it.
 
 ## Scope rules
 
@@ -420,6 +420,8 @@ invent findings to satisfy expectations — false positives erode trust.
 Respond with ONLY a JSON object in this exact shape — no prose, no markdown fences:
 
 {"findings":[{"title":"Short title","vulnSlug":"vuln-class","lineRange":[1,10],"filePath":null,"summary":"One sentence.","details":"Full analysis.","poc":"Steps to reproduce.","impact":"Who is affected and what they get.","references":[],"confidence":0.9}]}
+
+IMPORTANT: \`filePath\` MUST be \`null\` — the file path is already known to the caller.
 
 If nothing matches, respond with exactly: {"findings":[]}`;
 }

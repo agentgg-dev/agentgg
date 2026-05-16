@@ -10,10 +10,32 @@ import {
 export const DEFAULT_MODELS = {
   anthropic: "claude-sonnet-4-6",
   openai: "gpt-5",
-  ollama: "llama3.1",
+  ollama: "qwen2.5",
 } as const;
 
 const DEFAULT_OLLAMA_URL = "http://localhost:11434";
+
+// Models known to reliably handle tool-calling for hunt/walker mode.
+// General rule: ≥14B parameters. Below that, instruction following is
+// too inconsistent for multi-step agentic investigation — use file
+// mode only with smaller models.
+const OLLAMA_HUNT_CAPABLE = [
+  "qwen2.5:14b", "qwen2.5:32b", "qwen2.5:72b",
+  "qwen2.5-coder:14b", "qwen2.5-coder:32b",
+  "llama3.1:70b", "llama3.3:70b",
+  "deepseek-r1:14b", "deepseek-r1:32b", "deepseek-r1:70b", "deepseek-r1:671b",
+  "gemma3:12b", "gemma3:27b",
+  "phi4",
+  "mistral-large",
+  "command-r-plus",
+];
+
+function isHuntCapable(model: string): boolean {
+  const lower = model.toLowerCase();
+  return OLLAMA_HUNT_CAPABLE.some(
+    (cap) => lower === cap || lower.startsWith(`${cap}:`) || lower.startsWith(`${cap}-`),
+  );
+}
 
 // ------- live model-list fetchers -------
 
@@ -40,20 +62,36 @@ async function fetchOllamaModels(baseUrl: string): Promise<string[]> {
 
 async function collectModel(provider: Provider, initInput: InitInput): Promise<string> {
   const defaultModel = DEFAULT_MODELS[provider];
-  let models: string[];
 
   if (provider === "ollama") {
-    models = await fetchOllamaModels(initInput.ollamaUrl ?? DEFAULT_OLLAMA_URL);
-    if (models.length === 0) {
+    const installed = await fetchOllamaModels(initInput.ollamaUrl ?? DEFAULT_OLLAMA_URL);
+    if (installed.length === 0) {
       // Ollama not running or no models pulled yet — free-text fallback
       return input({ message: "Default model:", default: defaultModel });
     }
-  } else if (provider === "anthropic") {
-    models = ANTHROPIC_CURATED;
-  } else {
-    models = OPENAI_CURATED;
+    console.log(
+      "\nNote: hunt and walker agents need strong tool-calling and instruction\n" +
+      "following. Models ≥14B are recommended (qwen2.5:32b, llama3.1:70b,\n" +
+      "deepseek-r1:14b…). Smaller models are reliable for file-mode only.\n",
+    );
+    const capable = installed.filter(isHuntCapable);
+    const rest = installed.filter((m) => !isHuntCapable(m));
+    const choices = [
+      ...capable.map((m) => ({ name: `${m}  ← recommended (all modes)`, value: m })),
+      ...rest.map((m) => ({
+        name: capable.length > 0 ? `${m}  (file mode only)` : `${m}  ⚠ file mode only`,
+        value: m,
+      })),
+      { name: "Other (enter manually)", value: "__custom__" },
+    ];
+    const selected = await select<string>({ message: "Default model:", choices });
+    if (selected === "__custom__") {
+      return input({ message: "Model name:", default: defaultModel });
+    }
+    return selected;
   }
 
+  const models = provider === "anthropic" ? ANTHROPIC_CURATED : OPENAI_CURATED;
   const choices = [
     ...models.map((m) => ({ name: m, value: m })),
     { name: "Other (enter manually)", value: "__custom__" },

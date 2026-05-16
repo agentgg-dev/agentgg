@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import type { Agent, FileRecord, Finding } from "@agentgg/core";
 import {
   completeRun,
@@ -16,6 +16,7 @@ import type { Command } from "commander";
 import { loadAllAgents } from "../agent-catalog.js";
 import { installOfficialAgents } from "../agents-install.js";
 import { runConcurrent } from "../concurrent.js";
+import { diagnoseScanError } from "../diagnostics.js";
 import { listChangedFiles } from "../diff.js";
 import { type CredentialOverrides, resolveDetector } from "../llm.js";
 import { evaluatePreFilter } from "../pre-filter.js";
@@ -325,20 +326,32 @@ export async function runScan(
           maxFileSizeKb: opts.maxFileSize ?? 500,
           maxTurns: opts.maxTurns ?? 150,
         });
-        findings.push(...huntFindings);
-        byAgent[agent.slug] = (byAgent[agent.slug] ?? 0) + huntFindings.length;
-        for (const f of huntFindings) touchedFiles.add(f.filePath);
+        // Drop findings where the model invented a path that doesn't exist on
+        // disk — common with smaller models that copy the example filePath from
+        // the output-format instruction instead of using a real path.
+        const validHuntFindings = huntFindings.filter((f) => {
+          if (!f.filePath || f.filePath === "(unknown)") return true;
+          if (existsSync(resolve(root, f.filePath))) return true;
+          if (opts.verbose) {
+            console.log(`    ${agent.slug}: dropping finding with non-existent path: ${f.filePath}`);
+          }
+          return false;
+        });
+        findings.push(...validHuntFindings);
+        byAgent[agent.slug] = (byAgent[agent.slug] ?? 0) + validHuntFindings.length;
+        for (const f of validHuntFindings) touchedFiles.add(f.filePath);
+        const droppedCount = huntFindings.length - validHuntFindings.length;
         console.log(
-          `    ${agent.slug}: ${huntFindings.length} finding(s) across ${
-            new Set(huntFindings.map((f) => f.filePath)).size
-          } file(s)`,
+          `    ${agent.slug}: ${validHuntFindings.length} finding(s) across ${
+            new Set(validHuntFindings.map((f) => f.filePath)).size
+          } file(s)${droppedCount > 0 ? ` (${droppedCount} dropped: path not found in repo)` : ""}`,
         );
 
         // Persist hunt findings per-file. We need each file's content to
         // stamp a contentHash on the FileRecord; skip files that won't
         // read (e.g. the model invented a path, or the file is binary).
         const byFile = new Map<string, Finding[]>();
-        for (const f of huntFindings) {
+        for (const f of validHuntFindings) {
           if (!f.filePath || f.filePath === "(unknown)") continue;
           const list = byFile.get(f.filePath) ?? [];
           list.push(f);
@@ -650,9 +663,7 @@ export async function runScan(
           fileCache.set(finding.filePath, content);
         }
         if (content === null) {
-          if (opts.verbose) {
-            console.log(`    skip ${finding.filePath}: file not readable`);
-          }
+          console.log(`    skip ${finding.id}: file not readable (${finding.filePath})`);
           return;
         }
         try {
@@ -679,6 +690,7 @@ export async function runScan(
       for (const f of validatable) {
         if (!f.validation) continue;
         const normalized = f.filePath.replace(/\\/g, "/");
+        if (isAbsolute(normalized)) continue;
         const list = byFile.get(normalized) ?? [];
         list.push(f);
         byFile.set(normalized, list);
@@ -764,6 +776,22 @@ function logDetectionError(opts: ScanOpts, label: string, err: unknown): void {
     url?: string;
   };
   const msg = e.message || String(err);
+
+  const diagnostic = diagnoseScanError(err);
+  if (diagnostic) {
+    console.error(`    ${label}: ${diagnostic.format()}`);
+    if (opts.verbose && e.stack) {
+      console.error(
+        e.stack
+          .split("\n")
+          .slice(0, 8)
+          .map((l) => `      ${l}`)
+          .join("\n"),
+      );
+    }
+    return;
+  }
+
   console.error(`    ${label}: detection failed — ${msg}`);
   if (e.statusCode) console.error(`      HTTP ${e.statusCode} ${e.url ?? ""}`);
   if (e.responseBody) {

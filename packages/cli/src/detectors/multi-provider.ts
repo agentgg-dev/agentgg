@@ -100,7 +100,9 @@ export class MultiProviderDetector implements Detector {
         prompt: buildDetectPrompt(agent, filePath, content),
         providerOptions: this.providerOptionsArg(),
       });
-      return object.findings.map((f) => hydrateFinding(f, agent, filePath));
+      // In file mode the caller provides the real path — ignore whatever
+      // the model put in `filePath` (models often emit placeholders here).
+      return object.findings.map((f) => hydrateFinding({ ...f, filePath: null }, agent, filePath));
     } catch (err) {
       if (process.env.AGENTGG_DEBUG) {
         const util = await import("node:util");
