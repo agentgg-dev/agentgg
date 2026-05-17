@@ -19,3 +19,4 @@ export * from "./paths.js";
 export * from "./persistence.js";
 export * from "./user-config.js";
 export * from "./load-agent.js";
+export * from "./cvss.js";

@@ -1,4 +1,4 @@
-import type { Agent, Finding } from "@agentgg/core";
+import type { Agent, CvssScore, Finding } from "@agentgg/core";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
@@ -12,6 +12,7 @@ import {
   buildInvestigatePrompt,
   hydrateFinding,
 } from "../detect.js";
+import { LlmScore, asCvssScore, buildScorePrompt } from "../scoring.js";
 import {
   LlmValidation,
   asValidationField,
@@ -211,6 +212,19 @@ export class ClaudeAgentDetector implements Detector {
       schema: LlmValidation,
     });
     return asValidationField(validated);
+  }
+
+  async scoreFinding(args: { finding: Finding; fileContent: string }): Promise<CvssScore> {
+    // Single-turn, no tools — same constraint as validation: the
+    // prompt already carries the full file content, so the model
+    // shouldn't burn turns on speculative reads.
+    const llmScore = await this.runStructured({
+      prompt: buildScorePrompt(args),
+      tools: [],
+      maxTurns: this.validateMaxTurns,
+      schema: LlmScore,
+    });
+    return asCvssScore(llmScore);
   }
 
   /**

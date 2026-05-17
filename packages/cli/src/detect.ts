@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { extname } from "node:path";
-import type { Agent, Finding } from "@agentgg/core";
+import type { Agent, CvssScore, Finding } from "@agentgg/core";
 import { z } from "zod";
 
 /**
@@ -140,6 +140,19 @@ export interface Detector {
     finding: Finding;
     scope: string;
   }): Promise<{ verdict: "confirmed" | "false-positive" | "out-of-scope" | "uncertain"; reasoning: string }>;
+
+  /**
+   * Scoring phase — pick the 8 CVSS 3.1 base metrics for one finding.
+   * The LLM only chooses metric values; the vector string, the numeric
+   * base score, and the severity bucket are computed deterministically
+   * in `scoring.asCvssScore`. Same prompting shape as validation
+   * (finding + file content), so the model can ground its metric
+   * choices in the actual code rather than the detector's prose.
+   */
+  scoreFinding(args: {
+    finding: Finding;
+    fileContent: string;
+  }): Promise<CvssScore>;
 }
 
 export interface HuntArgs {
