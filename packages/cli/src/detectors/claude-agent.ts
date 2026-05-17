@@ -278,6 +278,7 @@ export class ClaudeAgentDetector implements Detector {
     for (const block of message.content) {
       const b = block as { type?: string; name?: string; input?: Record<string, unknown> };
       if (b.type !== "tool_use" || !b.name) continue;
+      if (b.name === "StructuredOutput") continue;
       const arg = formatToolArg(b.name, b.input ?? {});
       console.log(arg ? `    ${b.name} ${arg}` : `    ${b.name}`);
     }
