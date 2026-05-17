@@ -4,6 +4,7 @@ import Nav from './components/Nav';
 import StatCard from './components/StatCard';
 import { loadViewerState } from './lib/state';
 import FindingsTable from './components/FindingsTable';
+import AgentBadgeList from './components/AgentBadgeList';
 
 export const dynamic = 'force-dynamic';
 
@@ -120,21 +121,12 @@ export default function DashboardPage() {
                   </span>
                 </div>
               </div>
-              <div className="flex flex-wrap gap-1.5 max-w-full md:max-w-[55%]">
-                {counts.surfacesByAgent.slice(0, 8).map((a) => (
-                  <span
-                    key={a.slug}
-                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono border border-bg-border bg-bg/40 text-ink-muted"
-                  >
-                    <span className="text-cyan">{a.slug}</span>
-                    <span className="text-ink-dim">×{a.count}</span>
-                  </span>
-                ))}
-                {counts.surfacesByAgent.length > 8 && (
-                  <span className="text-xs text-ink-dim">
-                    +{counts.surfacesByAgent.length - 8} more
-                  </span>
-                )}
+              <div className="flex flex-wrap items-center gap-1.5 max-w-full md:max-w-[55%]">
+                <AgentBadgeList
+                  agents={counts.surfacesByAgent}
+                  initialLimit={8}
+                  color="cyan"
+                />
               </div>
             </div>
           </Link>
@@ -159,24 +151,15 @@ export default function DashboardPage() {
             <div className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-[0.18em] text-ink-dim mb-2">
               <ShieldCheck className="w-3 h-3" /> Agents that fired
             </div>
-            <div className="flex flex-wrap gap-1.5">
+            <div className="flex flex-wrap items-center gap-1.5">
               {counts.findingsByAgent.length === 0 ? (
                 <span className="text-xs text-ink-muted">No findings yet.</span>
               ) : (
-                counts.findingsByAgent.slice(0, 6).map((a) => (
-                  <span
-                    key={a.slug}
-                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono border border-bg-border bg-bg/40 text-ink-muted"
-                  >
-                    <span className="text-amber">{a.slug}</span>
-                    <span className="text-ink-dim">×{a.count}</span>
-                  </span>
-                ))
-              )}
-              {counts.findingsByAgent.length > 6 && (
-                <span className="text-xs text-ink-dim">
-                  +{counts.findingsByAgent.length - 6} more
-                </span>
+                <AgentBadgeList
+                  agents={counts.findingsByAgent}
+                  initialLimit={6}
+                  color="amber"
+                />
               )}
             </div>
           </div>

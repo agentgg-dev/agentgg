@@ -112,7 +112,7 @@ export default function SurfacesTable({ surfaces, agents }: Props) {
         {filtered.map((s) => (
           <li
             key={s.id}
-            className="grid grid-cols-1 md:grid-cols-[80px_1fr_1fr_180px_1fr] gap-3 px-4 py-3 hover:bg-bg-panel/40 transition-colors text-sm"
+            className="grid grid-cols-1 md:grid-cols-[80px_1fr_1fr_180px_1fr] gap-3 px-4 py-3 hover:bg-bg-panel/40 transition-colors text-sm items-start"
           >
             <span className="font-mono text-xs text-amber inline-flex items-center">
               {s.method ?? <span className="text-ink-dim">—</span>}
@@ -123,16 +123,19 @@ export default function SurfacesTable({ surfaces, agents }: Props) {
             <span className="font-mono text-xs text-ink-muted truncate" title={s.handler ?? ''}>
               {s.handler ?? <span className="text-ink-dim">—</span>}
             </span>
-            <span className="text-xs">
+            <span className="text-xs min-w-0">
               {s.authInScope.length === 0 ? (
                 <span className="inline-flex items-center gap-1 text-amber-glow">
                   <ShieldOff className="w-3 h-3" />
                   none observed
                 </span>
               ) : (
-                <span className="inline-flex items-center gap-1 text-terminal-green">
-                  <ShieldCheck className="w-3 h-3" />
-                  <span className="font-mono truncate" title={s.authInScope.join(', ')}>
+                <span className="flex items-start gap-1 text-terminal-green min-w-0">
+                  <ShieldCheck className="w-3 h-3 mt-0.5 shrink-0" />
+                  <span
+                    className="font-mono break-all min-w-0 leading-snug"
+                    title={s.authInScope.join(', ')}
+                  >
                     {s.authInScope.join(', ')}
                   </span>
                 </span>
