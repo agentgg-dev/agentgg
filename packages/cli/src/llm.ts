@@ -4,6 +4,7 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { createOllama } from "ollama-ai-provider";
 import type { Detector } from "./detect.js";
 import { ClaudeAgentDetector, MultiProviderDetector, VercelAgentDetector } from "./detectors/index.js";
+import { TpmBucket, createThrottledFetch } from "./tpm-bucket.js";
 
 const FALLBACK_MODELS = {
   anthropic: "claude-sonnet-4-6",
@@ -151,7 +152,16 @@ function buildOpenAIDetector(
     );
   }
   const modelName = options.model ?? config.openai?.model ?? FALLBACK_MODELS.openai;
-  const openai = createOpenAI({ apiKey });
+  // Shared TPM bucket so concurrent workers (file-mode --concurrency,
+  // parallel walker batches, hunt tool-loop steps) cooperate on one
+  // rolling 60-second token budget instead of independently slamming
+  // the cap and triggering 429s. Override via AGENTGG_OPENAI_TPM —
+  // default 30000 matches OpenAI Tier 1 for gpt-4o. Set 0 to disable.
+  const tpmLimit = Number.parseInt(process.env.AGENTGG_OPENAI_TPM ?? "30000", 10);
+  const openai =
+    tpmLimit > 0
+      ? createOpenAI({ apiKey, fetch: createThrottledFetch(new TpmBucket(tpmLimit)) })
+      : createOpenAI({ apiKey });
   // VercelAgentDetector handles all modes: file (generateObject) +
   // hunt/walker (generateText with Read/Glob/Grep tool loop).
   return new VercelAgentDetector("openai", openai(modelName), {
