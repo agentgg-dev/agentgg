@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
-import type { Agent, FileRecord, Finding } from "@agentgg/core";
+import type { Agent, FileRecord, Finding, Surface } from "@agentgg/core";
 import {
   completeRun,
   createRunMeta,
@@ -290,19 +290,19 @@ export async function runScan(
   console.log("");
 
   const findings: Finding[] = [];
+  const surfaces: Surface[] = [];
   const byAgent: Record<string, number> = {};
+  const surfacesByAgent: Record<string, number> = {};
   const touchedFiles = new Set<string>();
 
-  // Persist findings for one (file, agent) pair into the per-project
-  // FileRecord. Called from both the file-mode loop and the hunt
-  // post-processing step. Merges by finding id so re-runs of the same
-  // agent on the same file replace (not duplicate) prior findings.
-  function persistDetection(
-    relPath: string,
-    agent: Agent,
-    fileContent: string,
-    newFindings: Finding[],
-  ): void {
+  // Initialise or load the FileRecord for one relative path. Shared
+  // by persistDetection and persistSurfaces so both helpers see the
+  // same on-disk state when a single file is touched by both a vuln
+  // agent and a recon agent in the same walker batch.
+  function loadOrCreateRecord(relPath: string, fileContent: string): {
+    record: FileRecord;
+    normalized: string;
+  } {
     const normalized = relPath.replace(/\\/g, "/");
     let record: FileRecord | null;
     try {
@@ -316,11 +316,26 @@ export async function runScan(
         contentHash: hashContent(fileContent),
         candidates: [],
         findings: [],
+        surfaces: [],
         analysisHistory: [],
         scope: { outOfScope: false },
         status: "pending",
       };
     }
+    return { record, normalized };
+  }
+
+  // Persist findings for one (file, agent) pair into the per-project
+  // FileRecord. Called from both the file-mode loop and the hunt
+  // post-processing step. Merges by finding id so re-runs of the same
+  // agent on the same file replace (not duplicate) prior findings.
+  function persistDetection(
+    relPath: string,
+    agent: Agent,
+    fileContent: string,
+    newFindings: Finding[],
+  ): void {
+    const { record, normalized } = loadOrCreateRecord(relPath, fileContent);
     const byId = new Map(record.findings.map((f) => [f.id, f]));
     for (const f of newFindings) byId.set(f.id, f);
     record.findings = [...byId.values()];
@@ -332,6 +347,44 @@ export async function runScan(
       provider: detector.name,
       agentSlugs: [agent.slug],
       findingCount: newFindings.length,
+    });
+    record.status = "analyzed";
+    try {
+      writeFileRecord(outDir, record);
+    } catch (err) {
+      if (opts.verbose) {
+        console.error(
+          `    persist failed for ${normalized}: ${(err as Error).message}`,
+        );
+      }
+    }
+  }
+
+  // Mirror of persistDetection for recon agents (agent.outputType ===
+  // "surface"). Surfaces live in `FileRecord.surfaces` so the validation
+  // pipeline (which iterates `record.findings`) ignores them cleanly.
+  // The AnalysisRun entry's `findingCount` is reused to mean "artifacts
+  // persisted" — we don't add a separate surfaceCount field because
+  // (a) the AnalysisRun schema is in core and (b) the count is
+  // bookkeeping for the operator, not load-bearing for any logic.
+  function persistSurfaces(
+    relPath: string,
+    agent: Agent,
+    fileContent: string,
+    newSurfaces: Surface[],
+  ): void {
+    const { record, normalized } = loadOrCreateRecord(relPath, fileContent);
+    const byId = new Map((record.surfaces ?? []).map((s) => [s.id, s]));
+    for (const s of newSurfaces) byId.set(s.id, s);
+    record.surfaces = [...byId.values()];
+    record.analysisHistory.push({
+      runId: runMeta.runId,
+      phase: "detect",
+      ranAt: new Date().toISOString(),
+      durationMs: 0,
+      provider: detector.name,
+      agentSlugs: [agent.slug],
+      findingCount: newSurfaces.length,
     });
     record.status = "analyzed";
     try {
@@ -525,25 +578,32 @@ export async function runScan(
 
       const labels = batch.map((c) => c.relPath).join(", ");
       try {
-        const batchFindings = await detector.investigate({
-          agents: agentsInBatch,
-          rootDir: root,
-          candidates: batch.map((c) => ({
-            filePath: c.relPath,
-            content: c.content,
-            hitsByAgent: Array.from(c.hitsByAgent.entries()).map(
-              ([agentSlug, hits]) => ({ agentSlug, hits }),
-            ),
-          })),
-          maxTurns: maxTurnsPerBatch,
-        });
+        const { findings: batchFindings, surfaces: batchSurfaces } =
+          await detector.investigate({
+            agents: agentsInBatch,
+            rootDir: root,
+            candidates: batch.map((c) => ({
+              filePath: c.relPath,
+              content: c.content,
+              hitsByAgent: Array.from(c.hitsByAgent.entries()).map(
+                ([agentSlug, hits]) => ({ agentSlug, hits }),
+              ),
+            })),
+            maxTurns: maxTurnsPerBatch,
+          });
         findings.push(...batchFindings);
+        surfaces.push(...batchSurfaces);
         for (const f of batchFindings) {
           byAgent[f.agentSlug] = (byAgent[f.agentSlug] ?? 0) + 1;
         }
-        if (opts.verbose || batchFindings.length > 0) {
+        for (const s of batchSurfaces) {
+          surfacesByAgent[s.agentSlug] = (surfacesByAgent[s.agentSlug] ?? 0) + 1;
+        }
+        if (opts.verbose || batchFindings.length > 0 || batchSurfaces.length > 0) {
+          const surfaceNote =
+            batchSurfaces.length > 0 ? `, ${batchSurfaces.length} surface(s)` : "";
           console.log(
-            `    batch [${labels}]: ${batchFindings.length} finding(s) across ${agentsInBatch.length} agent(s)`,
+            `    batch [${labels}]: ${batchFindings.length} finding(s)${surfaceNote} across ${agentsInBatch.length} agent(s)`,
           );
         }
         // Persist per (file, agent) pair: each finding goes to its
@@ -567,17 +627,49 @@ export async function runScan(
           }
           persistDetection(f.filePath, owningAgent, content, [f]);
         }
+        // Same persistence shape for surfaces: route each into its
+        // owning recon agent's FileRecord.surfaces[]. Mirrors the
+        // findings loop above so a file flagged by both a vuln and a
+        // recon agent ends up with entries in both arrays.
+        for (const s of batchSurfaces) {
+          if (!s.filePath || s.filePath === "(unknown)") continue;
+          const owningAgent = agentsBySlug.get(s.agentSlug);
+          if (!owningAgent) continue;
+          const inBatch = batch.find((c) => c.relPath === s.filePath);
+          let content: string;
+          if (inBatch) {
+            content = inBatch.content;
+          } else {
+            try {
+              content = readFileSync(resolve(root, s.filePath), "utf8");
+            } catch {
+              continue;
+            }
+          }
+          persistSurfaces(s.filePath, owningAgent, content, [s]);
+        }
         // Stamp empty AnalysisRun for (batch member, agent) pairs
-        // that produced zero findings so status reports "analyzed".
+        // that produced zero artifacts so status reports "analyzed".
+        // The agent's outputType picks which persist call to make so
+        // we don't write an empty findings entry for a recon agent
+        // (or vice versa).
         for (const c of batch) {
           for (const slug of c.hitsByAgent.keys()) {
-            const fHere = batchFindings.some(
-              (f) => f.filePath === c.relPath && f.agentSlug === slug,
-            );
-            if (fHere) continue;
             const owningAgent = agentsBySlug.get(slug);
             if (!owningAgent) continue;
-            persistDetection(c.relPath, owningAgent, c.content, []);
+            if (owningAgent.outputType === "surface") {
+              const sHere = batchSurfaces.some(
+                (s) => s.filePath === c.relPath && s.agentSlug === slug,
+              );
+              if (sHere) continue;
+              persistSurfaces(c.relPath, owningAgent, c.content, []);
+            } else {
+              const fHere = batchFindings.some(
+                (f) => f.filePath === c.relPath && f.agentSlug === slug,
+              );
+              if (fHere) continue;
+              persistDetection(c.relPath, owningAgent, c.content, []);
+            }
           }
         }
       } catch (err) {
@@ -838,8 +930,10 @@ export async function runScan(
     startedAt,
     completedAt,
     findings,
+    surfaces,
     filesScanned: touchedFiles.size,
     byAgent,
+    surfacesByAgent,
     includeFalsePositives: opts.includeFalsePositives,
   });
 
@@ -851,8 +945,9 @@ export async function runScan(
   runFinalized = true;
   process.off("SIGINT", sigintHandler);
 
+  const surfaceNote = surfaces.length > 0 ? `, ${surfaces.length} surface(s)` : "";
   console.log(
-    `\nDone. ${findings.length} finding(s) across ${touchedFiles.size} file(s).`,
+    `\nDone. ${findings.length} finding(s)${surfaceNote} across ${touchedFiles.size} file(s).`,
   );
   console.log(`  Summary: ${report.summaryPath}`);
   console.log(`  Findings dir: ${outDir}\\findings`);

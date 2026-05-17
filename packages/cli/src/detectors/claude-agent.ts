@@ -7,6 +7,8 @@ import {
   type Detector,
   type HuntArgs,
   type InvestigateArgs,
+  type InvestigateResult,
+  attributeInvestigateResult,
   buildDetectPrompt,
   buildHuntPrompt,
   buildInvestigatePrompt,
@@ -144,7 +146,7 @@ export class ClaudeAgentDetector implements Detector {
     );
   }
 
-  async investigate(args: InvestigateArgs): Promise<Finding[]> {
+  async investigate(args: InvestigateArgs): Promise<InvestigateResult> {
     const { agents, rootDir, candidates, maxTurns } = args;
     const prompt = buildInvestigatePrompt(agents, candidates);
 
@@ -162,29 +164,7 @@ export class ClaudeAgentDetector implements Detector {
       schema: DetectionResult,
     });
 
-    // Attribution rules:
-    // - Single-agent batch: every finding is stamped with that agent.
-    // - Multi-agent batch: the model is told to set `agentSlug` per
-    //   finding; we trust that tag. Findings without a recognized
-    //   agentSlug in a multi-agent batch are dropped (they're either
-    //   model-invented or unattributable).
-    const agentsBySlug = new Map(agents.map((a) => [a.slug, a]));
-    const fallbackFilePath = candidates[0]?.filePath ?? "(unknown)";
-    const findings: Finding[] = [];
-    for (const f of result.findings) {
-      const owningAgent = (() => {
-        if (agents.length === 1) return agents[0];
-        if (f.agentSlug && agentsBySlug.has(f.agentSlug)) {
-          return agentsBySlug.get(f.agentSlug)!;
-        }
-        return undefined;
-      })();
-      if (!owningAgent) continue;
-      findings.push(
-        hydrateFinding(f, owningAgent, f.filePath ?? fallbackFilePath),
-      );
-    }
-    return findings;
+    return attributeInvestigateResult(result, agents, candidates);
   }
 
   async validateFinding(args: { finding: Finding; fileContent: string; scope?: string }) {

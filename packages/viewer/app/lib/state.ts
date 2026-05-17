@@ -5,6 +5,7 @@ import {
   type Finding,
   type RunMeta,
   type ScanMeta,
+  type Surface,
   listRuns,
   loadAllFileRecords,
   readScanMeta,
@@ -35,6 +36,13 @@ export type ViewerState = {
   files: FileRecord[];
   runs: RunMeta[];
   findings: Finding[];
+  /**
+   * Surfaces from recon agents (`agent.outputType === "surface"`).
+   * Loaded alongside findings but kept separate so the existing
+   * Findings UI doesn't have to filter them out — they're a different
+   * artifact type with no severity / no verdict.
+   */
+  surfaces: Surface[];
   counts: {
     files: number;
     analyzed: number;
@@ -45,6 +53,8 @@ export type ViewerState = {
     findingsByVerdict: Record<string, number>;
     findingsByAgent: AgentSummary[];
     findingsBySeverity: Record<string, number>;
+    surfaces: number;
+    surfacesByAgent: AgentSummary[];
   };
 };
 
@@ -55,6 +65,9 @@ export function loadViewerState(): ViewerState {
   const runs = listRuns(outputDir);
 
   const findings = files.flatMap((f) => f.findings);
+  // FileRecord.surfaces is optional on older records — coalesce so the
+  // viewer renders cleanly against scans created before surfaces shipped.
+  const surfaces = files.flatMap((f) => f.surfaces ?? []);
   const findingsValidated = findings.filter((f) => f.validation).length;
 
   const findingsByVerdict: Record<string, number> = {};
@@ -78,6 +91,14 @@ export function loadViewerState(): ViewerState {
     findingsBySeverity[key] = (findingsBySeverity[key] ?? 0) + 1;
   }
 
+  const surfaceAgentCounts: Record<string, number> = {};
+  for (const s of surfaces) {
+    surfaceAgentCounts[s.agentSlug] = (surfaceAgentCounts[s.agentSlug] ?? 0) + 1;
+  }
+  const surfacesByAgent: AgentSummary[] = Object.entries(surfaceAgentCounts)
+    .map(([slug, count]) => ({ slug, count }))
+    .sort((a, b) => b.count - a.count);
+
   const statusCounts = { analyzed: 0, validated: 0, pending: 0 };
   for (const r of files) statusCounts[r.status]++;
 
@@ -87,6 +108,7 @@ export function loadViewerState(): ViewerState {
     files,
     runs,
     findings,
+    surfaces,
     counts: {
       files: files.length,
       analyzed: statusCounts.analyzed,
@@ -97,6 +119,8 @@ export function loadViewerState(): ViewerState {
       findingsByVerdict,
       findingsByAgent,
       findingsBySeverity,
+      surfaces: surfaces.length,
+      surfacesByAgent,
     },
   };
 }
