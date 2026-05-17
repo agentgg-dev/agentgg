@@ -13,18 +13,18 @@ import { getCustomAgentsDir } from "./agents-fs.js";
  * malformed file shouldn't block a scan that doesn't even reference it.
  * Run `agentgg agents update` to install or refresh official agents.
  *
- * Structural violations of the official tree (duplicate slugs, filename
- * not matching slug) are returned in `violations`. They're separate from
- * `errors` because they indicate a corrupt catalog rather than one bad
- * file — `scan` refuses to run with any violation, while `agents list`
- * surfaces them as warnings so the user can see what's broken.
+ * Structural checks (slug uniqueness, filename == slug) live in
+ * `lintOfficialAgents` and are intentionally NOT run here. The
+ * agentgg-agents repo's pre-commit hook is the gate. At scan time we
+ * trust the published catalog and let `-t <slug>` resolve to every
+ * matching agent — official-vs-custom shadowing is allowed by design
+ * (the fork-and-tweak workflow), and `resolveTemplates` runs both.
  */
 export function loadAllAgents(
   env: NodeJS.ProcessEnv = process.env,
-): { agents: Agent[]; errors: string[]; violations: string[] } {
+): { agents: Agent[]; errors: string[] } {
   const errors: string[] = [];
   const all: Agent[] = [];
-  const officialAgents: Agent[] = [];
 
   // Official agents — downloaded from agentgg-dev/agentgg-agents
   const officialDir = getOfficialAgentsDir(env);
@@ -33,7 +33,6 @@ export function loadAllAgents(
       kind: "official",
       collectErrors: true,
     });
-    officialAgents.push(...loaded.agents);
     all.push(...loaded.agents);
     for (const err of loaded.errors) {
       errors.push(`${err.filePath ?? "?"}: ${err.message}`);
@@ -53,27 +52,26 @@ export function loadAllAgents(
     }
   }
 
-  const violations = validateOfficialAgents(officialAgents);
-  return { agents: all, errors, violations };
+  return { agents: all, errors };
 }
 
 /**
- * Structural checks for the official agent tree. Enforces two invariants
- * that the user gets to rely on:
+ * Structural checks for an official agent tree. Run by `agentgg agents
+ * lint` (CLI) and the agentgg-agents pre-commit hook. Two invariants:
  *
- *   1. Slug uniqueness — `scan -t <slug>` resolves to exactly one agent.
+ *   1. Slug uniqueness — every official agent has a globally unique
+ *      slug. Lets users rely on slug as a stable identifier even though
+ *      `resolveTemplates` itself does not depend on this (it returns all
+ *      slug matches, supporting official-vs-custom shadowing).
  *   2. Filename matches slug — `<slug>.md` is the only filename allowed,
  *      so a `grep`/`find` by filename and a slug lookup are equivalent.
  *      Subdirectory location is irrelevant (taxonomy is free).
  *
  * Custom agents are exempt: hand-dropped files in the custom dir don't
  * have to follow the convention, and shadowing official slugs is allowed
- * intentionally (the fork-and-tweak workflow). The `agentgg agents
- * validate` command runs the same checks against an arbitrary path so
- * the agents repo's pre-commit hook can guard the curated tree before it
- * ships.
+ * intentionally.
  */
-export function validateOfficialAgents(agents: ReadonlyArray<Agent>): string[] {
+export function lintOfficialAgents(agents: ReadonlyArray<Agent>): string[] {
   const violations: string[] = [];
 
   // Duplicate slug check — bucket by slug, report any bucket > 1 with all paths.

@@ -19,8 +19,12 @@ import { type Agent, loadAgentFile, loadAgentsFromDir } from "@agentgg/core";
  *   - Comma-separated:    `-t a,b,c`
  *   - Whitespace-separated (quoted): `-t "a b c"`
  *
- * All three can be mixed. Duplicate slugs are deduped (a slug supplied
- * via both a path and its slug only runs once). Same shape as nuclei's
+ * All three can be mixed. Duplicate inputs are deduped by file path —
+ * if a user passes the same agent twice (once by slug, once by its
+ * file, once via a list file), it still only runs once. But two
+ * distinct agents that happen to share a slug (e.g. an official agent
+ * and a custom one shadowing it) both run, matching the fork-and-tweak
+ * workflow we support across official+custom. Same shape as nuclei's
  * `-t/-templates`.
  *
  * On unresolvable inputs, throws with a precise per-entry error list.
@@ -35,32 +39,35 @@ export function resolveTemplates(
   if (tokens.length === 0) return [];
 
   const errors: string[] = [];
-  // Dedupe by slug — if a user passes the same agent twice (e.g. once
-  // by slug, once by path, once via a list file), we still only run it
-  // once.
+  // Dedupe by source path, not slug — see header comment.
   const seen = new Map<string, Agent>();
+  const dedupKey = (a: Agent): string => a.source?.path ?? `slug:${a.slug}`;
 
   for (const token of tokens) {
     if (looksLikeFilesystemPath(token)) {
       try {
         const found = loadFromPath(token, officialAgentsDir);
         for (const agent of found) {
-          if (!seen.has(agent.slug)) seen.set(agent.slug, agent);
+          const key = dedupKey(agent);
+          if (!seen.has(key)) seen.set(key, agent);
         }
       } catch (err) {
         errors.push(`'${token}': ${(err as Error).message}`);
       }
       continue;
     }
-    const match = availableAgents.find((a) => a.slug === token);
-    if (!match) {
+    const matches = availableAgents.filter((a) => a.slug === token);
+    if (matches.length === 0) {
       errors.push(
         `'${token}': no installed agent with that slug. ` +
           `Run \`agentgg agents list\` to see what's available, or pass a path to a .md file.`,
       );
       continue;
     }
-    if (!seen.has(match.slug)) seen.set(match.slug, match);
+    for (const m of matches) {
+      const key = dedupKey(m);
+      if (!seen.has(key)) seen.set(key, m);
+    }
   }
 
   if (errors.length > 0) {

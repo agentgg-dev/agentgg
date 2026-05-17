@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadAgentsFromDir } from "@agentgg/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadAllAgents, validateOfficialAgents } from "../src/agent-catalog.js";
+import { lintOfficialAgents, loadAllAgents } from "../src/agent-catalog.js";
 
 const VALID_MD = `---
 slug: SLUG_PLACEHOLDER
@@ -38,13 +38,13 @@ afterEach(() => {
   rmSync(agentggHome, { recursive: true, force: true });
 });
 
-describe("validateOfficialAgents", () => {
+describe("lintOfficialAgents", () => {
   it("returns no violations on a clean tree", () => {
     writeFileSync(join(officialDir, "foo.md"), md("foo"));
     mkdirSync(join(officialDir, "sub"), { recursive: true });
     writeFileSync(join(officialDir, "sub", "bar.md"), md("bar"));
     const { agents } = loadAgentsFromDir(officialDir, { kind: "official" });
-    expect(validateOfficialAgents(agents)).toEqual([]);
+    expect(lintOfficialAgents(agents)).toEqual([]);
   });
 
   it("flags duplicate slugs across subdirs with both paths", () => {
@@ -53,7 +53,7 @@ describe("validateOfficialAgents", () => {
     writeFileSync(join(officialDir, "a", "dup.md"), md("dup"));
     writeFileSync(join(officialDir, "b", "dup.md"), md("dup"));
     const { agents } = loadAgentsFromDir(officialDir, { kind: "official" });
-    const violations = validateOfficialAgents(agents);
+    const violations = lintOfficialAgents(agents);
     expect(violations).toHaveLength(1);
     expect(violations[0]).toMatch(/duplicate slug 'dup'/);
     expect(violations[0]).toMatch(/a[\\/]dup\.md/);
@@ -63,7 +63,7 @@ describe("validateOfficialAgents", () => {
   it("flags filename that does not match slug", () => {
     writeFileSync(join(officialDir, "wrong-name.md"), md("right-slug"));
     const { agents } = loadAgentsFromDir(officialDir, { kind: "official" });
-    const violations = validateOfficialAgents(agents);
+    const violations = lintOfficialAgents(agents);
     expect(violations).toHaveLength(1);
     expect(violations[0]).toMatch(
       /filename does not match slug: 'wrong-name\.md' should be 'right-slug\.md'/,
@@ -82,27 +82,28 @@ describe("validateOfficialAgents", () => {
       md("openclaw-audit-demo"),
     );
     const { agents } = loadAgentsFromDir(officialDir, { kind: "official" });
-    expect(validateOfficialAgents(agents)).toEqual([]);
+    expect(lintOfficialAgents(agents)).toEqual([]);
   });
 });
 
 describe("loadAllAgents", () => {
-  it("returns violations alongside agents and errors", () => {
+  it("does not run lint at runtime — broken official tree still loads", () => {
+    // Filename mismatch is a hygiene violation, but scan must still
+    // work. The agentgg-agents pre-commit hook is the gate.
     writeFileSync(join(officialDir, "wrong-name.md"), md("right-slug"));
     const result = loadAllAgents(env);
     expect(result.agents).toHaveLength(1);
     expect(result.errors).toEqual([]);
-    expect(result.violations).toHaveLength(1);
-    expect(result.violations[0]).toMatch(/filename does not match slug/);
   });
 
-  it("does not validate custom agents — shadowing and free filenames are allowed", () => {
+  it("loads official and custom agents into one flat catalog", () => {
     const customDir = join(agentggHome, "agents", "custom");
     mkdirSync(customDir, { recursive: true });
     writeFileSync(join(officialDir, "shared.md"), md("shared"));
     writeFileSync(join(customDir, "anything.md"), md("shared"));
     const result = loadAllAgents(env);
+    // Both load — official-vs-custom shadow is intentional, the user
+    // gets to keep their tweaked copy alongside the upstream one.
     expect(result.agents).toHaveLength(2);
-    expect(result.violations).toEqual([]);
   });
 });

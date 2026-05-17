@@ -77,6 +77,26 @@ describe("resolveTemplates", () => {
     expect(out).toHaveLength(1);
   });
 
+  it("returns every agent matching a slug — official + custom shadow both run", () => {
+    // Two distinct agents share a slug (e.g. user copied an official
+    // agent into their custom dir and tweaked it). Resolving by slug
+    // should produce both, deduped only by source path.
+    const officialCopy: Agent = {
+      ...makeAgent("sql-injection"),
+      source: { kind: "official", path: "/official/sql-injection.md" },
+    };
+    const customCopy: Agent = {
+      ...makeAgent("sql-injection"),
+      source: { kind: "custom", path: "/custom/sql-injection.md" },
+    };
+    const out = resolveTemplates(
+      ["sql-injection"],
+      [officialCopy, customCopy],
+    );
+    expect(out).toHaveLength(2);
+    expect(out.map((a) => a.source?.kind).sort()).toEqual(["custom", "official"]);
+  });
+
   it("throws with the offending tokens when a slug doesn't match", () => {
     expect(() => resolveTemplates(["nope-no-such-slug"], catalog)).toThrow(
       /no installed agent with that slug/,

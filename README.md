@@ -318,6 +318,8 @@ agentgg agents info sql-injection                    # show prompt + frontmatter
 agentgg agents add ./my-agent.md                     # install into ~/.agentgg/agents/custom/
 agentgg agents add ./agents-dir/                     # install every .md in a dir
 agentgg agents remove my-agent                       # uninstall by slug
+agentgg agents lint                                  # lint installed official tree
+agentgg agents lint ./agentgg-agents                 # lint an arbitrary tree (pre-commit-friendly)
 ```
 
 ### Inspect saved config
@@ -379,6 +381,7 @@ Short reasoning citing the unsafe code element.
 | `agentgg agents info <slug>` | ✅ |
 | `agentgg agents add <file-or-dir>` | ✅ installs into `~/.agentgg/agents/custom/` |
 | `agentgg agents remove <slug>` | ✅ |
+| `agentgg agents lint [path]` | ✅ slug uniqueness + filename == slug for the official tree |
 | `agentgg agents update` | ⏳ stub (needs official agents repo) |
 | `agentgg config` | ✅ secrets masked |
 

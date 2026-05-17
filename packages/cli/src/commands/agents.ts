@@ -2,7 +2,7 @@ import { existsSync, statSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import { type Agent, getOfficialAgentsDir, loadAgentsFromDir } from "@agentgg/core";
 import type { Command } from "commander";
-import { loadAllAgents, validateOfficialAgents } from "../agent-catalog.js";
+import { lintOfficialAgents, loadAllAgents } from "../agent-catalog.js";
 import { addAgents, getCustomAgentsDir, removeAgent } from "../agents-fs.js";
 import { getInstalledVersion, installOfficialAgents } from "../agents-install.js";
 
@@ -146,12 +146,9 @@ export function registerAgentsCommand(program: Command): void {
         mode?: string;
         noise?: string;
       }) => {
-        const { agents: all, errors, violations } = loadAllAgents();
+        const { agents: all, errors } = loadAllAgents();
         for (const err of errors) {
           console.warn(`warning: ${err}`);
-        }
-        for (const v of violations) {
-          console.warn(`warning: ${v}`);
         }
 
         const categories = parseList(opts.category);
@@ -231,9 +228,9 @@ export function registerAgentsCommand(program: Command): void {
     });
 
   agents
-    .command("validate [path]")
+    .command("lint [path]")
     .description(
-      "validate an agents tree (defaults to the installed official dir) — checks for duplicate slugs and filename != slug",
+      "lint an agents tree (defaults to the installed official dir) — checks for duplicate slugs and filename != slug. Intended for the agentgg-agents repo's pre-commit hook.",
     )
     .action((path: string | undefined) => {
       const env = process.env;
@@ -253,10 +250,10 @@ export function registerAgentsCommand(program: Command): void {
       const parseErrors = errors.map(
         (e) => `parse error: ${e.filePath ?? "?"}: ${e.message}`,
       );
-      const violations = validateOfficialAgents(loaded);
+      const violations = lintOfficialAgents(loaded);
       const all = [...parseErrors, ...violations];
       if (all.length === 0) {
-        console.log(`✓ ${loaded.length} agents valid (${target})`);
+        console.log(`✓ ${loaded.length} agents lint clean (${target})`);
         return;
       }
       for (const v of all) console.error(v);
