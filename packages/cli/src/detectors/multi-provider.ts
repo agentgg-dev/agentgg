@@ -5,7 +5,6 @@ import {
   type Detector,
   type HuntArgs,
   type InvestigateArgs,
-  type InvestigateResult,
   buildDetectPrompt,
   hydrateFinding,
 } from "../detect.js";
@@ -129,7 +128,7 @@ export class MultiProviderDetector implements Detector {
     );
   }
 
-  async investigate(_args: InvestigateArgs): Promise<InvestigateResult> {
+  async investigate(_args: InvestigateArgs): Promise<Finding[]> {
     throw new Error(
       `Walker mode is not supported by the MultiProviderDetector (provider: ${this.name}). ` +
         "Walker-mode per-file investigation needs tool access; route through " +

@@ -1,10 +1,8 @@
-import { AlertCircle, ArrowRight, Clock, Compass, FileText, ShieldCheck } from 'lucide-react';
-import Link from 'next/link';
+import { AlertCircle, Clock, FileText, ShieldCheck } from 'lucide-react';
 import Nav from './components/Nav';
 import StatCard from './components/StatCard';
 import { loadViewerState } from './lib/state';
 import FindingsTable from './components/FindingsTable';
-import AgentBadgeList from './components/AgentBadgeList';
 
 export const dynamic = 'force-dynamic';
 
@@ -96,42 +94,6 @@ export default function DashboardPage() {
           />
         </section>
 
-        {/* surface strip — only when recon agents produced an inventory.
-            Surfaces aren't vulnerabilities so they don't share the verdict
-            grid; render them as a separate panel that links to the
-            dedicated /surfaces page for filtering and triage. */}
-        {counts.surfaces > 0 && (
-          <Link
-            href="/surfaces"
-            className="block mb-10 rounded-xl border border-bg-border bg-bg-panel/40 hover:bg-bg-panel/60 hover:border-cyan/30 p-5 group transition-colors"
-          >
-            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-              <div>
-                <div className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-[0.18em] text-ink-dim mb-1">
-                  <Compass className="w-3 h-3" />
-                  Attack surface inventory
-                </div>
-                <div className="text-sm text-ink">
-                  <span className="text-cyan-glow font-mono">{counts.surfaces}</span>{' '}
-                  entry point{counts.surfaces === 1 ? '' : 's'} mapped by{' '}
-                  <span className="text-ink">{counts.surfacesByAgent.length}</span> recon agent
-                  {counts.surfacesByAgent.length === 1 ? '' : 's'}
-                  <span className="inline-flex items-center gap-1 ml-2 text-xs text-cyan group-hover:text-cyan-glow">
-                    view <ArrowRight className="w-3 h-3" />
-                  </span>
-                </div>
-              </div>
-              <div className="flex flex-wrap items-center gap-1.5 max-w-full md:max-w-[55%]">
-                <AgentBadgeList
-                  agents={counts.surfacesByAgent}
-                  initialLimit={8}
-                  color="cyan"
-                />
-              </div>
-            </div>
-          </Link>
-        )}
-
         {/* meta strip */}
         <section className="mb-10 grid md:grid-cols-3 gap-4">
           <div className="rounded-xl border border-bg-border bg-bg-panel/40 p-5">
@@ -151,15 +113,24 @@ export default function DashboardPage() {
             <div className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-[0.18em] text-ink-dim mb-2">
               <ShieldCheck className="w-3 h-3" /> Agents that fired
             </div>
-            <div className="flex flex-wrap items-center gap-1.5">
+            <div className="flex flex-wrap gap-1.5">
               {counts.findingsByAgent.length === 0 ? (
                 <span className="text-xs text-ink-muted">No findings yet.</span>
               ) : (
-                <AgentBadgeList
-                  agents={counts.findingsByAgent}
-                  initialLimit={6}
-                  color="amber"
-                />
+                counts.findingsByAgent.slice(0, 6).map((a) => (
+                  <span
+                    key={a.slug}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-mono border border-bg-border bg-bg/40 text-ink-muted"
+                  >
+                    <span className="text-amber">{a.slug}</span>
+                    <span className="text-ink-dim">×{a.count}</span>
+                  </span>
+                ))
+              )}
+              {counts.findingsByAgent.length > 6 && (
+                <span className="text-xs text-ink-dim">
+                  +{counts.findingsByAgent.length - 6} more
+                </span>
               )}
             </div>
           </div>

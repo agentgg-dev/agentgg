@@ -177,7 +177,6 @@ export async function runRevalidate(
             verdict: result.verdict,
             reasoning: result.reasoning,
           };
-          finding.runId = runMeta.runId;
           dirtyRecords.add(record);
         }
         if (opts.verbose) {
@@ -221,7 +220,6 @@ export async function runRevalidate(
         verdict: result.verdict,
         reasoning: result.reasoning,
       };
-      finding.runId = runMeta.runId;
       verdicts[result.verdict] = (verdicts[result.verdict] ?? 0) + 1;
       dirtyRecords.add(record);
       if (opts.verbose) {
@@ -266,19 +264,11 @@ export async function runRevalidate(
   // Re-render the per-finding markdown + summary so the on-disk
   // reports reflect the new verdicts. Without this, `findings/*.md`
   // keeps showing "Validation: _not run_" even though the underlying
-  // FileRecord has the verdict. Surfaces aren't touched by revalidate
-  // (they're not vulnerabilities — no verdict to apply), but we still
-  // pass them through so the regenerated summary keeps the inventory
-  // listing intact instead of silently dropping it on every re-run.
+  // FileRecord has the verdict.
   const allFindings = records.flatMap((r) => r.findings);
-  const allSurfaces = records.flatMap((r) => r.surfaces ?? []);
   const byAgent: Record<string, number> = {};
   for (const f of allFindings) {
     byAgent[f.agentSlug] = (byAgent[f.agentSlug] ?? 0) + 1;
-  }
-  const surfacesByAgent: Record<string, number> = {};
-  for (const s of allSurfaces) {
-    surfacesByAgent[s.agentSlug] = (surfacesByAgent[s.agentSlug] ?? 0) + 1;
   }
   writeMarkdownReport({
     outDir: outputDir,
@@ -286,10 +276,8 @@ export async function runRevalidate(
     startedAt,
     completedAt,
     findings: allFindings,
-    surfaces: allSurfaces,
     filesScanned: records.length,
     byAgent,
-    surfacesByAgent,
     includeFalsePositives: opts.includeFalsePositives,
   });
 

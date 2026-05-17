@@ -43,7 +43,6 @@ function makeRecord(filePath: string): FileRecord {
     contentHash: hashContent("hello"),
     candidates: [],
     findings: [],
-    surfaces: [],
     analysisHistory: [],
     scope: { outOfScope: false },
     status: "pending",

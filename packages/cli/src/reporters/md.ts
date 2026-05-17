@@ -1,6 +1,6 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { Finding, Surface } from "@agentgg/core";
+import type { Finding } from "@agentgg/core";
 
 export interface ScanReportInput {
   outDir: string;
@@ -8,18 +8,10 @@ export interface ScanReportInput {
   startedAt: Date;
   completedAt: Date;
   findings: ReadonlyArray<Finding>;
-  /**
-   * Surfaces from recon agents (`agent.outputType === "surface"`).
-   * Optional for back-compat with older callers that don't yet emit
-   * surfaces — treated as empty when undefined.
-   */
-  surfaces?: ReadonlyArray<Surface>;
   /** Files scanned, for the summary stats. */
   filesScanned: number;
   /** Per-agent findings count (slug → count). */
   byAgent: Record<string, number>;
-  /** Per-recon-agent surface count (slug → count). */
-  surfacesByAgent?: Record<string, number>;
   /**
    * When false (default), findings with `validation.verdict ===
    * "false-positive"` are skipped when writing per-finding `.md`
@@ -155,7 +147,6 @@ export function renderSummaryMd(
 ): string {
   const durationMs = input.completedAt.getTime() - input.startedAt.getTime();
   const durationSec = (durationMs / 1000).toFixed(1);
-  const surfaces = input.surfaces ?? [];
   const lines: string[] = [];
   lines.push("# Scan summary");
   lines.push("");
@@ -165,9 +156,6 @@ export function renderSummaryMd(
   lines.push(`**Duration:** ${durationSec}s`);
   lines.push(`**Files scanned:** ${input.filesScanned}`);
   lines.push(`**Total findings:** ${input.findings.length}`);
-  if (surfaces.length > 0) {
-    lines.push(`**Total surfaces:** ${surfaces.length}`);
-  }
   lines.push("");
 
   lines.push("## Findings by agent");
@@ -181,24 +169,6 @@ export function renderSummaryMd(
     }
   }
   lines.push("");
-
-  // Recon agents (outputType: surface) get their own bucket — surfaces
-  // are an attack-surface inventory, not vulnerabilities, so mixing
-  // them into "Findings by agent" would mislead the reader.
-  if (surfaces.length > 0 || (input.surfacesByAgent && Object.keys(input.surfacesByAgent).length > 0)) {
-    lines.push("## Surfaces by agent");
-    lines.push("");
-    const bySlug = input.surfacesByAgent ?? {};
-    const surfaceSlugs = Object.keys(bySlug).sort();
-    if (surfaceSlugs.length === 0) {
-      lines.push("_No surfaces._");
-    } else {
-      for (const slug of surfaceSlugs) {
-        lines.push(`- \`${slug}\`: ${bySlug[slug]}`);
-      }
-    }
-    lines.push("");
-  }
 
   const byVerdict: Record<string, number> = {};
   let unvalidated = 0;
@@ -230,29 +200,6 @@ export function renderSummaryMd(
       const loc = f.lineRange ? `:${f.lineRange[0]}` : "";
       lines.push(`- [${f.title}](${rel}) — \`${f.filePath}${loc}\``);
     });
-    lines.push("");
-  }
-
-  if (surfaces.length > 0) {
-    lines.push("## All surfaces");
-    lines.push("");
-    // No per-surface .md files yet — surfaces are listed inline. When
-    // the surface count grows large enough to want a separate file
-    // per surface, mirror findings/ with surfaces/.
-    for (const s of surfaces) {
-      const loc = s.lineRange ? `:${s.lineRange[0]}` : "";
-      const meta: string[] = [];
-      if (s.method) meta.push(s.method);
-      if (s.path) meta.push(s.path);
-      if (s.authInScope.length > 0) {
-        meta.push(`auth: ${s.authInScope.join(", ")}`);
-      } else {
-        meta.push("auth: none observed");
-      }
-      lines.push(
-        `- **${s.title}** — \`${s.filePath}${loc}\` (${meta.join(" · ")})`,
-      );
-    }
     lines.push("");
   }
 
