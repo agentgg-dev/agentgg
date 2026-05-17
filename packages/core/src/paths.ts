@@ -136,3 +136,14 @@ export function getRunMetaPath(outputDir: string, runId: string): string {
   assertSafeSegment(runId, "runId");
   return join(getStateRunsDir(outputDir), `${runId}.json`);
 }
+
+/** `<outputDir>/state/agents/` — one `AgentRun` `.json` per hunt/walker agent. */
+export function getStateAgentsDir(outputDir: string): string {
+  return join(getStateDir(outputDir), "agents");
+}
+
+/** `<outputDir>/state/agents/<slug>.json` — `AgentRun` sidecar (hunt/walker resume). */
+export function getAgentRunPath(outputDir: string, agentSlug: string): string {
+  assertSafeSegment(agentSlug, "agentSlug");
+  return join(getStateAgentsDir(outputDir), `${agentSlug}.json`);
+}

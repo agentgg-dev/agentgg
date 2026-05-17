@@ -1,14 +1,17 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
-import type { Agent, FileRecord, Finding } from "@agentgg/core";
+import type { Agent, AgentRun, FileRecord, Finding } from "@agentgg/core";
 import {
   completeRun,
   createRunMeta,
   getOfficialAgentsDir,
   hashContent,
+  loadAllFileRecords,
   loadUserConfig,
+  readAgentRun,
   readFileRecord,
   upsertScanMeta,
+  writeAgentRun,
   writeFileRecord,
   writeRunMeta,
 } from "@agentgg/core";
@@ -272,6 +275,18 @@ export async function runScan(
     maxFileSizeBytes,
   };
 
+  // Scope signature stamped on the per-agent resume sidecar. Walker/hunt
+  // agents skip on re-run only when this exact scope is still in effect.
+  // A change to --diff, --exclude, --only, --max-file-size, or root
+  // invalidates resume and re-runs the agent.
+  const currentScope: AgentRun["scope"] = {
+    diff: opts.diff,
+    excludePatterns: [...excludePatterns],
+    includePatterns: [...includePatterns],
+    maxFileSizeKb: opts.maxFileSize ?? 500,
+    rootPath: root,
+  };
+
   const startedAt = new Date();
 
   console.log(`Scanning ${root}`);
@@ -367,7 +382,46 @@ export async function runScan(
   // Under --diff, the hunter still runs but receives the commit patch
   // in its prompt as a focus hint; tools stay unrestricted so it can
   // chase context outward beyond the diff.
+  // Cached FileRecords used by both hunt and walker resume to lift prior
+  // findings on agent-level skip. Loaded lazily on first need so a
+  // first scan (state dir empty) doesn't pay the cost.
+  let allRecordsCache: FileRecord[] | null = null;
+  const getAllRecords = (): FileRecord[] => {
+    if (allRecordsCache === null) {
+      allRecordsCache = loadAllFileRecords(outDir);
+    }
+    return allRecordsCache;
+  };
   for (const agent of huntAgents) {
+    // Resume path: per-agent sidecar records "this hunt finished in this
+    // output dir under this scope." Mirrors file-mode's per-file resume.
+    // Skip the LLM call entirely and lift prior findings from disk so the
+    // report still reflects them. `--rescan` bypasses the check.
+    if (!opts.rescan) {
+      const prior = readAgentRun(outDir, agent.slug);
+      if (prior && prior.mode === "hunt" && scopeMatches(prior.scope, currentScope)) {
+        const cached = getAllRecords()
+          .flatMap((r) => r.findings)
+          .filter((f) => f.agentSlug === agent.slug);
+        findings.push(...cached);
+        byAgent[agent.slug] = (byAgent[agent.slug] ?? 0) + cached.length;
+        for (const f of cached) {
+          if (f.filePath && f.filePath !== "(unknown)") touchedFiles.add(f.filePath);
+        }
+        console.log(
+          `  ${agent.slug}[hunt]: cached (${cached.length} finding(s) from prior run; pass --rescan to force)`,
+        );
+        continue;
+      }
+      if (opts.verbose && prior) {
+        const reason = !scopeMatches(prior.scope, currentScope)
+          ? scopeMismatchReason(prior.scope, currentScope)
+          : `prior mode was ${prior.mode}, expected hunt`;
+        console.log(
+          `  ${agent.slug}[hunt]: sidecar present but ignored (${reason}) — re-running`,
+        );
+      }
+    }
     console.log(
       opts.diff
         ? `  ${agent.slug}[hunt]: reviewing commit ${opts.diff} (Read/Glob/Grep)`
@@ -432,6 +486,29 @@ export async function runScan(
         }
         persistDetection(relPath, agent, content, group);
       }
+      // Mark the agent as completed in this output dir under this scope so
+      // the next re-run can skip it. The cache is invalidated naturally if
+      // any scope field differs (see `scopeMatches`). Only written on the
+      // happy path — a thrown hunt leaves no sidecar and re-runs next time.
+      try {
+        writeAgentRun(outDir, {
+          agentSlug: agent.slug,
+          mode: "hunt",
+          lastCompletedRunId: runMeta.runId,
+          lastCompletedAt: new Date().toISOString(),
+          scope: currentScope,
+          findingCount: validHuntFindings.length,
+        });
+        // Invalidate the records cache — a subsequent walker resume in the
+        // same scan run shouldn't miss findings we just persisted.
+        allRecordsCache = null;
+      } catch (err) {
+        if (opts.verbose) {
+          console.error(
+            `    hunt:${agent.slug}: failed to write resume sidecar: ${(err as Error).message}`,
+          );
+        }
+      }
     } catch (err) {
       logDetectionError(opts, `hunt:${agent.slug}`, err);
     }
@@ -460,6 +537,9 @@ export async function runScan(
     const pool = new Map<string, PooledFile>();
     const agentsBySlug = new Map(walkerAgents.map((a) => [a.slug, a]));
 
+    // Per-(file, agent) cached pairs we lifted from disk instead of
+    // queuing for the LLM. Only used for the verbose log line below.
+    let walkerCachedPairs = 0;
     for (const { agent, files } of walkerWork) {
       const scopedFiles = diffFiles
         ? files.filter((f) => diffFiles.has(f))
@@ -477,10 +557,41 @@ export async function runScan(
           pool.set(relPath, entry);
         }
         const hits = evaluatePreFilter(entry.content, agent.preFilter ?? []);
-        if (hits.length > 0) {
-          entry.hitsByAgent.set(agent.slug, hits);
-          touchedFiles.add(relPath);
+        if (hits.length === 0) continue;
+        // Resume path (per-(file, agent), mirrors file mode). When the
+        // FileRecord shows this agent already ran a `detect` on this file
+        // with the same contentHash, skip queuing the hit for the batch
+        // and lift the prior findings into memory so they appear in the
+        // report. `--rescan` bypasses the check.
+        if (!opts.rescan) {
+          const normalized = relPath.replace(/\\/g, "/");
+          let existing: FileRecord | null;
+          try {
+            existing = readFileRecord(outDir, normalized);
+          } catch {
+            existing = null;
+          }
+          const fileHash = hashContent(entry.content);
+          const ranBefore =
+            !!existing &&
+            existing.contentHash === fileHash &&
+            existing.analysisHistory.some(
+              (a) =>
+                a.phase === "detect" && a.agentSlugs.includes(agent.slug),
+            );
+          if (ranBefore && existing) {
+            const cached = existing.findings.filter(
+              (f) => f.agentSlug === agent.slug,
+            );
+            findings.push(...cached);
+            byAgent[agent.slug] = (byAgent[agent.slug] ?? 0) + cached.length;
+            touchedFiles.add(relPath);
+            walkerCachedPairs++;
+            continue;
+          }
         }
+        entry.hitsByAgent.set(agent.slug, hits);
+        touchedFiles.add(relPath);
       }
     }
 
@@ -520,7 +631,11 @@ export async function runScan(
       0,
     );
     console.log(
-      `  walker: ${walkerAgents.length} agent(s), ${candidates.length} candidate file(s), ${totalAgentHits} (file × agent) hit pair(s) → ${batches.length} batch(es) of up to ${batchSize} (concurrency ${concurrency})`,
+      `  walker: ${walkerAgents.length} agent(s), ${candidates.length} candidate file(s), ${totalAgentHits} (file × agent) hit pair(s) → ${batches.length} batch(es) of up to ${batchSize} (concurrency ${concurrency})${
+        walkerCachedPairs > 0
+          ? ` — ${walkerCachedPairs} pair(s) reused from prior run (pass --rescan to force)`
+          : ""
+      }`,
     );
 
     await runConcurrent(batches, concurrency, async (batch) => {
@@ -1006,6 +1121,61 @@ export async function runScan(
       handle.child.once("exit", () => res());
     });
   }
+}
+
+/**
+ * True when two scope signatures describe the same effective scan. List
+ * fields compare order-insensitively (`--exclude a --exclude b` and
+ * `--exclude b --exclude a` are the same scope). Mismatch on any field
+ * invalidates a sidecar and forces the agent to re-run.
+ */
+function scopeMatches(
+  prior: AgentRun["scope"],
+  current: AgentRun["scope"],
+): boolean {
+  if (prior.diff !== current.diff) return false;
+  if (prior.rootPath !== current.rootPath) return false;
+  if (prior.maxFileSizeKb !== current.maxFileSizeKb) return false;
+  if (!sameSet(prior.excludePatterns, current.excludePatterns)) return false;
+  if (!sameSet(prior.includePatterns, current.includePatterns)) return false;
+  return true;
+}
+
+function sameSet(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const sa = [...a].sort();
+  const sb = [...b].sort();
+  for (let i = 0; i < sa.length; i++) {
+    if (sa[i] !== sb[i]) return false;
+  }
+  return true;
+}
+
+/**
+ * Human-readable explanation of which scope field caused a mismatch.
+ * Only called from the verbose-mode diagnostic log so the user can see
+ * *why* a hunt sidecar got ignored on resume.
+ */
+function scopeMismatchReason(
+  prior: AgentRun["scope"],
+  current: AgentRun["scope"],
+): string {
+  if (prior.diff !== current.diff) {
+    return `diff: ${prior.diff ?? "(none)"} → ${current.diff ?? "(none)"}`;
+  }
+  if (prior.rootPath !== current.rootPath) {
+    return `root: ${prior.rootPath} → ${current.rootPath}`;
+  }
+  if (prior.maxFileSizeKb !== current.maxFileSizeKb) {
+    return `maxFileSizeKb: ${prior.maxFileSizeKb} → ${current.maxFileSizeKb}`;
+  }
+  if (!sameSet(prior.excludePatterns, current.excludePatterns)) {
+    return `excludePatterns: [${prior.excludePatterns.join(",")}] → [${current.excludePatterns.join(",")}]`;
+  }
+  if (!sameSet(prior.includePatterns, current.includePatterns)) {
+    return `includePatterns: [${prior.includePatterns.join(",")}] → [${current.includePatterns.join(",")}]`;
+  }
+  return "scope differs";
 }
 
 function logDetectionError(opts: ScanOpts, label: string, err: unknown): void {

@@ -31,6 +31,7 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import {
+  getAgentRunPath,
   getFileRecordPath,
   getRunMetaPath,
   getScanMetaPath,
@@ -38,6 +39,7 @@ import {
   getStateRunsDir,
 } from "./paths.js";
 import {
+  AgentRun,
   FileRecord,
   RunMeta,
   ScanMeta,
@@ -210,6 +212,30 @@ function walk(dir: string, visit: (filePath: string) => void): void {
       visit(full);
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// AgentRun (hunt/walker resume sidecar)
+// ---------------------------------------------------------------------------
+
+export function readAgentRun(
+  outputDir: string,
+  agentSlug: string,
+): AgentRun | null {
+  const p = getAgentRunPath(outputDir, agentSlug);
+  if (!existsSync(p)) return null;
+  try {
+    return AgentRun.parse(JSON.parse(readFileSync(p, "utf8")));
+  } catch {
+    return null;
+  }
+}
+
+export function writeAgentRun(outputDir: string, record: AgentRun): void {
+  writeFileAtomic(
+    getAgentRunPath(outputDir, record.agentSlug),
+    JSON.stringify(record, null, 2) + "\n",
+  );
 }
 
 // ---------------------------------------------------------------------------

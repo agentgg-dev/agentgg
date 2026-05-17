@@ -503,6 +503,34 @@ export const UserConfig = z
   });
 export type UserConfig = z.infer<typeof UserConfig>;
 
+// ---------------------------------------------------------------------------
+// AgentRun — per-agent completion sidecar (`<outputDir>/state/agents/<slug>.json`)
+// ---------------------------------------------------------------------------
+//
+// Hunt and walker agents don't map 1:1 onto a single file the way file-mode
+// agents do, so their resume signal can't live on FileRecord alone. This
+// sidecar records "this agent completed in this output dir, under this
+// scope." On a re-run with the same --output and matching scope, the
+// orchestrator can skip the agent (lifting prior findings from disk) unless
+// --rescan is passed. Scope-aware so a re-run with different --diff /
+// --exclude / --only invalidates the resume and re-runs the agent.
+
+export const AgentRun = z.object({
+  agentSlug: z.string(),
+  mode: AgentMode,
+  lastCompletedRunId: z.string(),
+  lastCompletedAt: z.string(),
+  scope: z.object({
+    diff: z.string().optional(),
+    excludePatterns: z.array(z.string()).default([]),
+    includePatterns: z.array(z.string()).default([]),
+    maxFileSizeKb: z.number().int().positive(),
+    rootPath: z.string(),
+  }),
+  findingCount: z.number().int().nonnegative().default(0),
+});
+export type AgentRun = z.infer<typeof AgentRun>;
+
 export const RunMeta = z.object({
   runId: z.string(),
   type: z.enum(["scan", "detect", "validate"]),
