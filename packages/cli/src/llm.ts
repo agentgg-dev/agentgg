@@ -1,5 +1,4 @@
 import type { Provider, UserConfig } from "@agentgg/core";
-import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createOllama } from "ollama-ai-provider";
 import type { Detector } from "./detect.js";
@@ -95,50 +94,20 @@ function buildAnthropicDetector(
 
   const modelName = options.model ?? config.anthropic?.model ?? FALLBACK_MODELS.anthropic;
 
-  // OAuth-only path: claude-agent-sdk for both modes. Direct API
-  // calls with an OAuth token get rate-limited by Anthropic.
-  if (oauthToken && !apiKey) {
-    return new ClaudeAgentDetector({
-      oauthToken,
-      model: modelName,
-      verbose: options.verbose,
-      validateMaxTurns: options.validateMaxTurns,
-      effort: options.effort,
-      thinking: options.thinking,
-    });
-  }
-
-  // API-key path: hybrid Detector. Vercel SDK serves file-mode calls
-  // (cheap structured output), claude-agent-sdk serves hunt-mode calls
-  // (tool access). The agent's `mode` decides which method is invoked
-  // upstream; we just provide both.
-  if (apiKey) {
-    const anthropic = createAnthropic({ apiKey });
-    const fileDetector = new MultiProviderDetector("anthropic-api", anthropic(modelName), {
-      effort: options.effort,
-      thinking: options.thinking,
-    });
-    const huntDetector = new ClaudeAgentDetector({
-      apiKey,
-      model: modelName,
-      verbose: options.verbose,
-      validateMaxTurns: options.validateMaxTurns,
-      effort: options.effort,
-      thinking: options.thinking,
-    });
-    return {
-      name: "anthropic-api",
-      detectFile: (args) => fileDetector.detectFile(args),
-      hunt: (args) => huntDetector.hunt(args),
-      // Walker mode needs tool access; route through the agent SDK
-      // just like hunt does.
-      investigate: (args) => huntDetector.investigate(args),
-      validateFinding: (args) => fileDetector.validateFinding(args),
-      validateFindingByScope: (args) => fileDetector.validateFindingByScope(args),
-    };
-  }
-
-  throw new Error("anthropic detector: no credentials");
+  // Both auth types route through claude-agent-sdk for all five Detector
+  // methods. Direct API calls via the Vercel SDK aren't viable here: OAuth
+  // tokens hitting the API directly get rate-limited by Anthropic, and the
+  // Vercel SDK's Anthropic provider rejects `mode: "json"` for structured
+  // output.
+  return new ClaudeAgentDetector({
+    apiKey,
+    oauthToken,
+    model: modelName,
+    verbose: options.verbose,
+    validateMaxTurns: options.validateMaxTurns,
+    effort: options.effort,
+    thinking: options.thinking,
+  });
 }
 
 function buildOpenAIDetector(
