@@ -5,6 +5,7 @@ import {
   type Finding,
   type RunMeta,
   type ScanMeta,
+  type Surface,
   listRuns,
   loadAllFileRecords,
   readScanMeta,
@@ -35,6 +36,13 @@ export type ViewerState = {
   files: FileRecord[];
   runs: RunMeta[];
   findings: Finding[];
+  /**
+   * Surfaces from recon agents (`agent.outputType === "surface"`).
+   * Loaded alongside findings but kept separate so the existing
+   * Findings UI doesn't have to filter them out — they're a different
+   * artifact type with no severity / no verdict.
+   */
+  surfaces: Surface[];
   counts: {
     files: number;
     analyzed: number;
@@ -45,6 +53,8 @@ export type ViewerState = {
     findingsByVerdict: Record<string, number>;
     findingsByAgent: AgentSummary[];
     findingsBySeverity: Record<string, number>;
+    surfaces: number;
+    surfacesByAgent: AgentSummary[];
   };
 };
 
@@ -54,7 +64,29 @@ export function loadViewerState(): ViewerState {
   const files = loadAllFileRecords(outputDir);
   const runs = listRuns(outputDir);
 
-  const findings = files.flatMap((f) => f.findings);
+  const allFindings = files.flatMap((f) => f.findings);
+  // FileRecord.surfaces is optional on older records — coalesce so the
+  // viewer renders cleanly against scans created before surfaces shipped.
+  const allSurfaces = files.flatMap((f) => f.surfaces ?? []);
+
+  // Scope the dashboard to the latest run so the numbers match
+  // `summary.md` and `findings/*.md` (which only reflect that one run).
+  // State still accumulates findings/surfaces across runs — the audit
+  // trail is intact — we just don't render the cumulative union here.
+  // Pre-fix records won't have a runId stamp; fall back to "show
+  // everything" when nothing in state carries one so legacy result
+  // dirs keep rendering.
+  const lastRunId = runs[0]?.runId;
+  const anyFindingHasRunId = allFindings.some((f) => f.runId);
+  const anySurfaceHasRunId = allSurfaces.some((s) => s.runId);
+  const findings =
+    lastRunId && anyFindingHasRunId
+      ? allFindings.filter((f) => f.runId === lastRunId)
+      : allFindings;
+  const surfaces =
+    lastRunId && anySurfaceHasRunId
+      ? allSurfaces.filter((s) => s.runId === lastRunId)
+      : allSurfaces;
   const findingsValidated = findings.filter((f) => f.validation).length;
 
   const findingsByVerdict: Record<string, number> = {};
@@ -78,6 +110,14 @@ export function loadViewerState(): ViewerState {
     findingsBySeverity[key] = (findingsBySeverity[key] ?? 0) + 1;
   }
 
+  const surfaceAgentCounts: Record<string, number> = {};
+  for (const s of surfaces) {
+    surfaceAgentCounts[s.agentSlug] = (surfaceAgentCounts[s.agentSlug] ?? 0) + 1;
+  }
+  const surfacesByAgent: AgentSummary[] = Object.entries(surfaceAgentCounts)
+    .map(([slug, count]) => ({ slug, count }))
+    .sort((a, b) => b.count - a.count);
+
   const statusCounts = { analyzed: 0, validated: 0, pending: 0 };
   for (const r of files) statusCounts[r.status]++;
 
@@ -87,6 +127,7 @@ export function loadViewerState(): ViewerState {
     files,
     runs,
     findings,
+    surfaces,
     counts: {
       files: files.length,
       analyzed: statusCounts.analyzed,
@@ -97,6 +138,8 @@ export function loadViewerState(): ViewerState {
       findingsByVerdict,
       findingsByAgent,
       findingsBySeverity,
+      surfaces: surfaces.length,
+      surfacesByAgent,
     },
   };
 }

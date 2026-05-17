@@ -227,6 +227,14 @@ export type CvssScore = z.infer<typeof CvssScore>;
 export const Finding = z.object({
   /** Unique within a FileRecord. Hash of (agentSlug + title + lineRange). */
   id: z.string(),
+  /**
+   * The most recent run that produced or re-touched this finding. Set
+   * by the persistence layer (detect or validate). Optional for back-
+   * compat with FileRecord JSON written before runId stamping shipped —
+   * the viewer treats unstamped findings as legacy and falls back to
+   * showing them unfiltered when *no* finding in state has a runId.
+   */
+  runId: z.string().optional(),
   agentSlug: z.string(),
   title: z.string(),
   /**
@@ -291,6 +299,78 @@ export const Finding = z.object({
 export type Finding = z.infer<typeof Finding>;
 
 // ---------------------------------------------------------------------------
+// Surface (an attack-surface entry emitted by a recon agent)
+// ---------------------------------------------------------------------------
+//
+// Surfaces are NOT vulnerabilities — they're an inventory of attacker-
+// reachable code. Recon agents (agent.outputType === "surface") emit
+// these instead of Findings. No severity, no CVSS, no validation —
+// surfaces describe attack surface, not security claims.
+//
+// When a recon agent and a vuln agent both flag the same file, walker
+// pooling investigates the file once and the LLM emits both a Surface
+// (for the recon brief) and a Finding (for the vuln brief), attributed
+// per-agent.
+
+export const Surface = z.object({
+  /** Unique within a FileRecord. Hash of (agentSlug + filePath + title + lineRange). */
+  id: z.string(),
+  /**
+   * The most recent run that emitted this surface. Same semantics and
+   * back-compat treatment as {@link Finding.runId}.
+   */
+  runId: z.string().optional(),
+  agentSlug: z.string(),
+  /**
+   * One-line label suitable for a row in a surface inventory. Conventionally
+   * "Entry point: <METHOD> <PATH>" (or "<KIND> <NAME>" for non-HTTP).
+   */
+  title: z.string(),
+  filePath: z.string(),
+  lineRange: z.tuple([z.number().int(), z.number().int()]).optional(),
+  /**
+   * One-sentence summary — handler name + auth posture is the usual shape.
+   * Quotable in a surface-map row without further editing.
+   */
+  summary: z.string(),
+  /**
+   * HTTP verb (`GET`/`POST`/…), `ALL`, `ANY`, or a non-HTTP marker like
+   * `RPC`, `TASK`, `EVENT`, `LAMBDA`, `WORKER`. Optional because some
+   * surface kinds (e.g. mobile manifests) don't map to a method.
+   */
+  method: z.string().optional(),
+  /**
+   * Route pattern, RPC name, queue name — whatever identifies the surface
+   * at the API boundary. Optional for the same reason as `method`.
+   */
+  path: z.string().optional(),
+  /** Handler function / class name (and source location). */
+  handler: z.string().optional(),
+  /** Runtime hint: `nodejs` / `edge` / `lambda` / `worker` / `bun` / etc. */
+  runtime: z.string().optional(),
+  /**
+   * Auth-related names observed in scope at the surface: middleware,
+   * guards, decorators, options. Empty array = no auth observed (the
+   * loudest signal a downstream missing-auth agent should pick up).
+   */
+  authInScope: z.array(z.string()).default([]),
+  /**
+   * Free-form short label for the surface category — `nextjs-route-handler`,
+   * `bullmq-worker`, `aws-lambda`, etc. Mirrors `Finding.vulnSlug` in
+   * spirit: a tag the reporter can group by.
+   */
+  surfaceKind: z.string().optional(),
+  /**
+   * Markdown body with the structured detail block (Method / Path /
+   * Handler / Runtime / Auth-in-scope). The reporter renders this as-is.
+   */
+  details: z.string(),
+  references: z.array(z.string()).default([]),
+  confidence: z.number().min(0).max(1).default(1),
+});
+export type Surface = z.infer<typeof Surface>;
+
+// ---------------------------------------------------------------------------
 // AnalysisRun — one entry per detect/validate pass on a file
 // ---------------------------------------------------------------------------
 
@@ -329,6 +409,14 @@ export const FileRecord = z.object({
   contentHash: z.string(),
   candidates: z.array(CandidateMatch).default([]),
   findings: z.array(Finding).default([]),
+  /**
+   * Surfaces emitted by recon agents (agent.outputType === "surface").
+   * Lives alongside `findings` rather than mixed into it so the validation
+   * pipeline (which only knows about findings) ignores them cleanly. Old
+   * FileRecord JSON on disk without this field round-trips fine — zod's
+   * `.default([])` fills it in.
+   */
+  surfaces: z.array(Surface).default([]),
   analysisHistory: z.array(AnalysisRun).default([]),
   scope: z
     .object({

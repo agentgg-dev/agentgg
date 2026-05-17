@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { extname } from "node:path";
-import type { Agent, Finding } from "@agentgg/core";
+import type { Agent, Finding, Surface } from "@agentgg/core";
 import { z } from "zod";
 
 /**
@@ -68,8 +68,98 @@ export const LlmFinding = z.object({
 });
 export type LlmFinding = z.infer<typeof LlmFinding>;
 
+/**
+ * Subset of `Surface` the LLM produces. Mirrors `LlmFinding` for the
+ * recon path: id and the runtime-stamped `agentSlug` (when single-agent)
+ * are added after parsing. Recon agents emit this; vuln agents emit
+ * `LlmFinding`. Walker pooling can mix both in one batched call.
+ */
+export const LlmSurface = z.object({
+  title: z
+    .string()
+    .describe(
+      "Short, specific one-line title. Conventionally 'Entry point: <METHOD> <PATH>'. No trailing period.",
+    ),
+  agentSlug: z
+    .string()
+    .nullable()
+    .describe(
+      "Slug of the recon agent whose brief surfaced this entry. Required in multi-agent batches (so the runtime can attribute). Null in single-agent investigations — the runtime stamps the calling agent's slug.",
+    ),
+  filePath: z
+    .string()
+    .nullable()
+    .describe(
+      "Path of the file the surface lives in, relative to the repo root. Required only when the agent located it via tools; otherwise the runtime fills it from the candidate file.",
+    ),
+  lineRange: z
+    .array(z.number().int().min(1))
+    .length(2)
+    .nullable()
+    .describe("[startLine, endLine], 1-indexed, exactly 2 elements. null if not applicable."),
+  summary: z
+    .string()
+    .describe(
+      "One sentence stating what the surface is — handler name + auth posture is the canonical shape.",
+    ),
+  method: z
+    .string()
+    .nullable()
+    .describe(
+      "HTTP verb (GET/POST/PUT/PATCH/DELETE/...), or 'ALL'/'ANY' for catch-all, or a non-HTTP marker like 'RPC' / 'TASK' / 'EVENT' / 'LAMBDA' / 'WORKER'. Null when not applicable (e.g. mobile manifests).",
+    ),
+  path: z
+    .string()
+    .nullable()
+    .describe(
+      "Route pattern, RPC name, queue name — the identifier at the surface boundary. Null when not applicable.",
+    ),
+  handler: z
+    .string()
+    .nullable()
+    .describe("Handler function or class name plus line number. Null when not derivable."),
+  runtime: z
+    .string()
+    .nullable()
+    .describe(
+      "Runtime hint: 'nodejs' / 'edge' / 'lambda' / 'worker' / 'bun' / etc. Null when unknown.",
+    ),
+  authInScope: z
+    .array(z.string())
+    .describe(
+      "Names of auth middleware / guards / decorators / options observed in scope at this surface, verbatim. Empty array = no auth observed.",
+    ),
+  surfaceKind: z
+    .string()
+    .nullable()
+    .describe(
+      "Short label categorising the surface — 'nextjs-route-handler', 'bullmq-worker', 'aws-lambda', 'graphql-resolver', etc.",
+    ),
+  details: z
+    .string()
+    .describe(
+      "Markdown body with the structured Method / Path / Handler / Runtime / Auth-in-scope bullets that the agent's prompt asks for.",
+    ),
+  references: z
+    .array(z.string())
+    .describe("CWE IDs, framework docs links. Use [] if none."),
+  confidence: z
+    .preprocess((v) => (typeof v === "number" && v > 1 ? v / 100 : v), z.number().min(0).max(1))
+    .describe(
+      "Decimal 0.0–1.0. NOT a percentage. 1.0 = unambiguously declared surface, 0.7 = inferred from dynamic registration, 0.5 = uncertain.",
+    ),
+});
+export type LlmSurface = z.infer<typeof LlmSurface>;
+
+/**
+ * Walker / hunt structured-output envelope. Carries both vuln findings
+ * and recon surfaces so a pooled batch (mixed vuln + recon agents on
+ * the same files) can emit both shapes in a single LLM call. Vuln-only
+ * batches keep `surfaces: []`; recon-only batches keep `findings: []`.
+ */
 export const DetectionResult = z.object({
-  findings: z.array(LlmFinding),
+  findings: z.array(LlmFinding).default([]),
+  surfaces: z.array(LlmSurface).default([]),
 });
 export type DetectionResult = z.infer<typeof DetectionResult>;
 
@@ -112,8 +202,13 @@ export interface Detector {
    * the line-level hits, and tool access to follow imports / chase
    * callers. Same enforcement-by-SDK-schema as `detectFile` and
    * `hunt`. Backends without tool support throw.
+   *
+   * Returns BOTH findings (from vuln agents in the batch) and
+   * surfaces (from recon agents). Either array may be empty depending
+   * on the agent mix; both are attributed per-agent by the
+   * implementation before returning.
    */
-  investigate(args: InvestigateArgs): Promise<Finding[]>;
+  investigate(args: InvestigateArgs): Promise<InvestigateResult>;
 
   /**
    * Validation phase — second-pass classifier that re-reads the source
@@ -199,6 +294,17 @@ export interface InvestigateCandidate {
    * model both see the same agent ordering.
    */
   hitsByAgent: InvestigateAgentHits[];
+}
+
+/**
+ * Return shape of `Detector.investigate(...)`. Walker pooling lets a
+ * single LLM call serve both vuln-detection and reconnaissance agents
+ * on the same files, so the result carries both arrays. Either may be
+ * empty for batches that contain only one kind of agent.
+ */
+export interface InvestigateResult {
+  findings: Finding[];
+  surfaces: Surface[];
 }
 
 export interface InvestigateArgs {
@@ -332,18 +438,54 @@ export function buildInvestigatePrompt(
     .map((c, i) => renderCandidateBlock(c, i + 1, candidates.length))
     .join("\n\n---\n\n");
 
+  // Annotate each brief with its expected output type so the model
+  // knows whether to emit a Finding (vuln agents) or a Surface (recon
+  // agents) for that brief's hits. The annotation is the single most
+  // important attribution signal in a mixed batch.
   const briefs = agents
-    .map(
-      (a) => `### Brief: \`${a.slug}\`
+    .map((a) => {
+      const tag =
+        a.outputType === "surface"
+          ? "**Emits:** `surface` (entry-point inventory — NOT a vulnerability)"
+          : "**Emits:** `finding` (security vulnerability)";
+      return `### Brief: \`${a.slug}\`
 
-${a.prompt}`,
-    )
+${tag}
+
+${a.prompt}`;
+    })
     .join("\n\n---\n\n");
 
+  const hasVuln = agents.some((a) => a.outputType !== "surface");
+  const hasSurface = agents.some((a) => a.outputType === "surface");
   const multi = agents.length > 1;
+
+  // Output-shape instructions vary by what the batch actually contains.
+  // A vuln-only batch shouldn't be told to emit surfaces (the array
+  // would be empty), and vice versa. Mixed batches get the full menu.
+  const outputShape: string[] = [];
+  if (hasVuln && hasSurface) {
+    outputShape.push(
+      "This batch contains BOTH vulnerability-detection agents (emit `findings`) AND reconnaissance agents (emit `surfaces`).",
+      "For each vuln-detection brief's hits: emit a `Finding` (the standard shape — title, vulnSlug, summary, details, poc, impact, references, confidence).",
+      "For each recon brief's hits: emit a `Surface` (title, summary, method, path, handler, runtime, authInScope, surfaceKind, details, references, confidence). Surfaces are an attack-surface inventory — they have NO severity, NO impact, NO PoC. Do NOT fabricate vuln data for them.",
+      "When a single file is flagged by both a vuln brief and a recon brief, emit BOTH artifacts attributed to their respective agents.",
+    );
+  } else if (hasSurface) {
+    outputShape.push(
+      "This batch only contains reconnaissance agents. Emit `surfaces` (NOT `findings`).",
+      "A Surface has: title, summary, method, path, handler, runtime, authInScope, surfaceKind, details, references, confidence. NO severity, NO PoC, NO impact — surfaces are an attack-surface inventory, not security claims.",
+      "Leave the `findings` array empty.",
+    );
+  } else {
+    outputShape.push(
+      "This batch only contains vulnerability-detection agents. Emit `findings` only; leave `surfaces` empty.",
+    );
+  }
+
   const attributionRule = multi
-    ? `When multiple agents' briefs are listed above, every finding MUST set \`agentSlug\` to the slug of the brief whose detection criteria the finding satisfies. Findings without \`agentSlug\` in a multi-agent batch are dropped.`
-    : `Set \`agentSlug\` to \`null\` (or omit it) — the runtime stamps the single agent's slug.`;
+    ? `Every emitted artifact (finding OR surface) MUST set \`agentSlug\` to the slug of the brief whose criteria it satisfies. Artifacts without a recognised \`agentSlug\` in a multi-agent batch are dropped.`
+    : `Set \`agentSlug\` to \`null\` (or omit it) — the runtime stamps the single agent's slug onto whichever array carries the output.`;
 
   return `${INVESTIGATOR_SCAFFOLDING}
 
@@ -367,17 +509,20 @@ the files below are already the targets.
 
 ${fileBlocks}
 
+## Output shape
+
+${outputShape.map((s) => `- ${s}`).join("\n")}
+
 ## Reporting
 
-Investigate each file in the batch. Apply every applicable detection
-brief to its corresponding hits. If a flagged candidate turns out to
-be safe or already patched, simply omit it from the findings — do
-NOT emit a low-confidence finding to "be thorough." For each real
-issue, every finding's \`filePath\` should be the file the bug lives
-in (one of the batch members, or a related file you uncovered while
-tracing — set \`filePath\` accordingly). Be specific: cite the
-exact line range and code element. Do NOT invent findings to satisfy
-expectations — false positives erode trust.
+Investigate each file in the batch. Apply every applicable brief to
+its corresponding hits. For vuln briefs: if a flagged candidate turns
+out to be safe or already patched, omit it — do NOT emit a
+low-confidence finding to "be thorough." For recon briefs: emit one
+surface per declared entry point in the candidate file (recon is
+inventory work; partial coverage is worse than no coverage). Be
+specific: cite exact line ranges and code elements. Do NOT invent
+artifacts to satisfy expectations.
 
 ${attributionRule}`;
 }
@@ -474,6 +619,105 @@ Respond with ONLY a JSON object in this exact shape — no prose, no markdown fe
 IMPORTANT: \`filePath\` MUST be \`null\` — the file path is already known to the caller.
 
 If nothing matches, respond with exactly: {"findings":[]}`;
+}
+
+/**
+ * Turn an `LlmSurface` into a full `Surface`. Same stable-id and
+ * filePath-fallback rules as `hydrateFinding` so re-runs of the same
+ * recon agent on the same file dedupe instead of producing parallel
+ * entries.
+ */
+export function hydrateSurface(
+  raw: LlmSurface,
+  agent: Agent,
+  fallbackFilePath: string,
+): Surface {
+  const filePath =
+    raw.filePath != null && raw.filePath.trim() !== "" ? raw.filePath : fallbackFilePath;
+  const lineKey = raw.lineRange != null ? `${raw.lineRange[0]}-${raw.lineRange[1]}` : "0";
+  const id = createHash("sha256")
+    .update(`${agent.slug}|${filePath}|${raw.title}|${lineKey}`)
+    .digest("hex")
+    .slice(0, 12);
+  return {
+    id,
+    agentSlug: agent.slug,
+    title: raw.title,
+    filePath,
+    lineRange: raw.lineRange != null ? (raw.lineRange as [number, number]) : undefined,
+    summary: raw.summary,
+    method: raw.method ?? undefined,
+    path: raw.path ?? undefined,
+    handler: raw.handler ?? undefined,
+    runtime: raw.runtime ?? undefined,
+    authInScope: raw.authInScope ?? [],
+    surfaceKind: raw.surfaceKind ?? undefined,
+    details: raw.details,
+    references: raw.references ?? [],
+    confidence: raw.confidence,
+  };
+}
+
+/**
+ * Take a raw walker `DetectionResult` from the LLM, attribute each
+ * finding / surface to the right walker agent in the batch, and
+ * hydrate them into the runtime types. Shared between detector
+ * implementations so attribution rules stay identical:
+ *
+ *   - Single-agent batch: every artifact stamped with that agent. The
+ *     model is told it MAY omit `agentSlug`.
+ *   - Multi-agent batch: trust the model's `agentSlug` tag. Drop any
+ *     artifact whose tag isn't a recognised agent in this batch.
+ *
+ *   - A finding attributed to a recon agent (outputType === "surface")
+ *     is misattribution by the model; drop it. Same for a surface
+ *     attributed to a vuln agent. The output-type tag in the prompt
+ *     is unambiguous — the model only emits the wrong shape when it
+ *     hallucinates against the brief.
+ */
+export function attributeInvestigateResult(
+  raw: DetectionResult,
+  agents: ReadonlyArray<Agent>,
+  candidates: ReadonlyArray<InvestigateCandidate>,
+): { findings: Finding[]; surfaces: Surface[] } {
+  const agentsBySlug = new Map(agents.map((a) => [a.slug, a]));
+  const fallbackFilePath = candidates[0]?.filePath ?? "(unknown)";
+  const singleAgent = agents.length === 1 ? agents[0] : undefined;
+
+  const findings: Finding[] = [];
+  for (const f of raw.findings) {
+    const owningAgent = (() => {
+      if (singleAgent) return singleAgent;
+      if (f.agentSlug && agentsBySlug.has(f.agentSlug)) {
+        return agentsBySlug.get(f.agentSlug)!;
+      }
+      return undefined;
+    })();
+    if (!owningAgent) continue;
+    // Drop findings attributed to a recon agent — recon agents emit
+    // surfaces, not findings. The model is told this explicitly in
+    // the prompt; cross-attribution is hallucination.
+    if (owningAgent.outputType === "surface") continue;
+    findings.push(hydrateFinding(f, owningAgent, f.filePath ?? fallbackFilePath));
+  }
+
+  const surfaces: Surface[] = [];
+  for (const s of raw.surfaces) {
+    const owningAgent = (() => {
+      if (singleAgent) return singleAgent;
+      if (s.agentSlug && agentsBySlug.has(s.agentSlug)) {
+        return agentsBySlug.get(s.agentSlug)!;
+      }
+      return undefined;
+    })();
+    if (!owningAgent) continue;
+    // Mirror of the findings rule: a surface attributed to a vuln agent
+    // is misattribution; drop it.
+    if (owningAgent.outputType !== "surface") continue;
+    surfaces.push(hydrateSurface(s, owningAgent, s.filePath ?? fallbackFilePath));
+  }
+
+  return { findings, surfaces };
 }
 
 /**

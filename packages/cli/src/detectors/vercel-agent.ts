@@ -10,6 +10,8 @@ import {
   type Detector,
   type HuntArgs,
   type InvestigateArgs,
+  type InvestigateResult,
+  attributeInvestigateResult,
   buildDetectPrompt,
   buildHuntPrompt,
   buildInvestigatePrompt,
@@ -136,7 +138,7 @@ export class VercelAgentDetector implements Detector {
   async hunt(args: HuntArgs): Promise<Finding[]> {
     const { agent, rootDir, excludePatterns, includePatterns, maxFileSizeKb, maxTurns, diff } = args;
     const basePrompt = buildHuntPrompt(agent, { excludePatterns, includePatterns, maxFileSizeKb, diff });
-    const prompt = `${basePrompt}\n\n${jsonOutputInstruction(false)}`;
+    const prompt = `${basePrompt}\n\n${jsonOutputInstruction(false, false)}`;
 
     try {
       const { text } = await withTpmRetry(() =>
@@ -148,7 +150,9 @@ export class VercelAgentDetector implements Detector {
           providerOptions: this.providerOptionsArg(),
         }),
       );
-      const result = await this.parseOrReformat(text, false);
+      // Hunt mode is findings-only at this layer — the second `false`
+      // tells the JSON-instruction renderer not to mention surfaces.
+      const result = await this.parseOrReformat(text, false, false);
       return result.findings.map((f) => hydrateFinding(f, agent, f.filePath ?? "(unknown)"));
     } catch (err) {
       debugLog("VercelAgentDetector.hunt", err);
@@ -156,11 +160,12 @@ export class VercelAgentDetector implements Detector {
     }
   }
 
-  async investigate(args: InvestigateArgs): Promise<Finding[]> {
+  async investigate(args: InvestigateArgs): Promise<InvestigateResult> {
     const { agents, rootDir, candidates, maxTurns } = args;
     const basePrompt = buildInvestigatePrompt(agents, candidates);
     const multi = agents.length > 1;
-    const prompt = `${basePrompt}\n\n${jsonOutputInstruction(multi)}`;
+    const hasSurface = agents.some((a) => a.outputType === "surface");
+    const prompt = `${basePrompt}\n\n${jsonOutputInstruction(multi, hasSurface)}`;
 
     try {
       const { text } = await withTpmRetry(() =>
@@ -173,21 +178,8 @@ export class VercelAgentDetector implements Detector {
         }),
       );
 
-      const result = await this.parseOrReformat(text, multi);
-
-      const agentsBySlug = new Map(agents.map((a) => [a.slug, a]));
-      const fallbackFilePath = candidates[0]?.filePath ?? "(unknown)";
-      const findings: Finding[] = [];
-      for (const f of result.findings) {
-        const owningAgent = (() => {
-          if (agents.length === 1) return agents[0];
-          if (f.agentSlug && agentsBySlug.has(f.agentSlug)) return agentsBySlug.get(f.agentSlug)!;
-          return undefined;
-        })();
-        if (!owningAgent) continue;
-        findings.push(hydrateFinding(f, owningAgent, f.filePath ?? fallbackFilePath));
-      }
-      return findings;
+      const result = await this.parseOrReformat(text, multi, hasSurface);
+      return attributeInvestigateResult(result, agents, candidates);
     } catch (err) {
       debugLog("VercelAgentDetector.investigate", err);
       throw err;
@@ -233,7 +225,11 @@ export class VercelAgentDetector implements Detector {
   /** Parse findings from the tool-loop's final text. If extraction fails and a
    *  structuredModel is configured, re-asks that model (with JSON mode) to
    *  reformat the raw analysis into the required schema. */
-  private async parseOrReformat(text: string, multiAgent: boolean): Promise<DetectionResultType> {
+  private async parseOrReformat(
+    text: string,
+    multiAgent: boolean,
+    hasSurface: boolean,
+  ): Promise<DetectionResultType> {
     try {
       return DetectionResult.parse(extractJSON(text));
     } catch (extractErr) {
@@ -242,7 +238,7 @@ export class VercelAgentDetector implements Detector {
         model: this.structuredModel,
         schema: DetectionResult,
         mode: "json",
-        prompt: `The following is a completed security analysis. Extract all confirmed findings into structured JSON.\n\n${text}\n\n${jsonOutputInstruction(multiAgent)}`,
+        prompt: `The following is a completed security analysis. Extract all confirmed findings (and surfaces if present) into structured JSON.\n\n${text}\n\n${jsonOutputInstruction(multiAgent, hasSurface)}`,
       });
       return object;
     }
@@ -290,13 +286,27 @@ function buildTools(cwd: string, maxFileSizeKb: number | undefined, verbose: boo
     }),
     Glob: tool({
       description:
-        "Find files matching a glob pattern. Returns paths relative to the repository root.",
+        "Find files matching a glob pattern. Call with a single `pattern` string (e.g. '**/*.ts' or 'src/**/*.js'). Returns paths relative to the repository root.",
+      // `pattern` is the canonical shape. `patterns`/`recursive`/`case_sensitive`
+      // are accepted because some local models (e.g. llama3.1 via Ollama)
+      // hallucinate that shape and the resulting Zod failure aborts the whole
+      // walker batch. Tolerating them keeps tool-loop progress.
       parameters: z.object({
-        pattern: z.string().describe("Glob pattern, e.g. '**/*.ts' or 'src/**/*.js'"),
+        pattern: z.string().optional().describe("Glob pattern, e.g. '**/*.ts' or 'src/**/*.js'"),
+        patterns: z
+          .array(z.string())
+          .optional()
+          .describe("Alternate form: array of glob patterns. Prefer `pattern`."),
+        recursive: z.boolean().optional(),
+        case_sensitive: z.boolean().optional(),
       }),
-      execute: async ({ pattern }) => {
-        logTool("Glob", pattern);
-        return globToolExecute(pattern, cwd);
+      execute: async ({ pattern, patterns }) => {
+        const list = pattern ? [pattern] : (patterns ?? []);
+        if (list.length === 0) {
+          return "Error: provide a `pattern` (string) or `patterns` (array of strings).";
+        }
+        logTool("Glob", list.join(", "));
+        return globToolExecuteMulti(list, cwd);
       },
     }),
     Grep: tool({
@@ -340,12 +350,18 @@ async function readToolExecute(
   }
 }
 
-async function globToolExecute(pattern: string, cwd: string): Promise<string> {
+async function globToolExecuteMulti(patterns: string[], cwd: string): Promise<string> {
   try {
-    const results = await walkAndMatch(cwd, pattern, GLOB_MAX_RESULTS);
-    if (results.length === 0) return "(no matches)";
-    const out = results.join("\n");
-    return results.length >= GLOB_MAX_RESULTS ? `${out}\n(truncated at ${GLOB_MAX_RESULTS} results)` : out;
+    const seen = new Set<string>();
+    for (const p of patterns) {
+      const remaining = GLOB_MAX_RESULTS - seen.size;
+      if (remaining <= 0) break;
+      const results = await walkAndMatch(cwd, p, remaining);
+      for (const r of results) seen.add(r);
+    }
+    if (seen.size === 0) return "(no matches)";
+    const out = [...seen].join("\n");
+    return seen.size >= GLOB_MAX_RESULTS ? `${out}\n(truncated at ${GLOB_MAX_RESULTS} results)` : out;
   } catch (err) {
     return `Error: ${(err as Error).message}`;
   }
@@ -441,17 +457,33 @@ function derivedProviderKey(name: string): "anthropic" | "openai" | "ollama" | u
   return undefined;
 }
 
-function jsonOutputInstruction(multiAgent: boolean): string {
+function jsonOutputInstruction(multiAgent: boolean, hasSurface: boolean): string {
   const agentSlugNote = multiAgent
-    ? 'Set `agentSlug` to the slug of the detection brief whose criteria the finding satisfies.'
-    : 'Set `agentSlug` to `null` — the runtime stamps the calling agent\'s slug.';
+    ? "Set `agentSlug` on every artifact to the slug of the brief whose criteria it satisfies."
+    : "Set `agentSlug` to `null` — the runtime stamps the calling agent's slug.";
+
+  // Vuln-only batches: keep the prompt findings-only so the model isn't
+  // confused by an irrelevant surfaces array. Surface-present batches
+  // get both arrays in the example and an explicit note.
+  if (!hasSurface) {
+    return `## Output format
+
+After your investigation, output a single JSON object matching EXACTLY this shape — no prose, no markdown fences, no trailing text:
+
+{"findings":[{"title":"Short title","vulnSlug":"vuln-class","agentSlug":null,"lineRange":[1,10],"filePath":"src/routes/users.ts","summary":"One sentence.","details":"Markdown analysis with file paths and line numbers.","poc":"Reproduction steps.","impact":"Who is affected and what they get.","references":[],"confidence":0.9}],"surfaces":[]}
+
+IMPORTANT: Every \`filePath\` must be a real file path you actually read or located with tools during this session. Do NOT copy the example path above — replace it with the actual path from your investigation. If no findings, output exactly: {"findings":[],"surfaces":[]}
+
+${agentSlugNote}`;
+  }
+
   return `## Output format
 
-After your investigation, output ALL findings as a single JSON object matching EXACTLY this shape — no prose, no markdown fences, no trailing text:
+After your investigation, output a single JSON object matching EXACTLY this shape — no prose, no markdown fences, no trailing text. \`findings\` and \`surfaces\` may each be \`[]\` if that kind of artifact does not apply to this batch.
 
-{"findings":[{"title":"Short title","vulnSlug":"vuln-class","agentSlug":null,"lineRange":[1,10],"filePath":"src/routes/users.ts","summary":"One sentence.","details":"Markdown analysis with file paths and line numbers.","poc":"Reproduction steps.","impact":"Who is affected and what they get.","references":[],"confidence":0.9}]}
+{"findings":[{"title":"Short title","vulnSlug":"vuln-class","agentSlug":null,"lineRange":[1,10],"filePath":"src/routes/users.ts","summary":"One sentence.","details":"Markdown analysis.","poc":"Reproduction steps.","impact":"Who is affected and what they get.","references":[],"confidence":0.9}],"surfaces":[{"title":"Entry point: POST /api/users","agentSlug":null,"filePath":"src/routes/users.ts","lineRange":[12,18],"summary":"createUser handler; no auth observed.","method":"POST","path":"/api/users","handler":"createUser (L12)","runtime":"nodejs","authInScope":[],"surfaceKind":"express-route","details":"- **Method** — POST\\n- **Path** — /api/users\\n- ...","references":[],"confidence":1.0}]}
 
-IMPORTANT: Every \`filePath\` must be a real file path you actually read or located with tools during this session. Do NOT copy the example path above — replace it with the actual path from your investigation. If no findings, output exactly: {"findings":[]}
+IMPORTANT: Every \`filePath\` must be a real file path you actually read or located with tools. Do NOT copy the example path above. Emit findings for VULN briefs and surfaces for RECON briefs — never mix the two kinds. If neither applies, output exactly: {"findings":[],"surfaces":[]}
 
 ${agentSlugNote}`;
 }
