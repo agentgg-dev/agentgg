@@ -64,10 +64,29 @@ export function loadViewerState(): ViewerState {
   const files = loadAllFileRecords(outputDir);
   const runs = listRuns(outputDir);
 
-  const findings = files.flatMap((f) => f.findings);
+  const allFindings = files.flatMap((f) => f.findings);
   // FileRecord.surfaces is optional on older records — coalesce so the
   // viewer renders cleanly against scans created before surfaces shipped.
-  const surfaces = files.flatMap((f) => f.surfaces ?? []);
+  const allSurfaces = files.flatMap((f) => f.surfaces ?? []);
+
+  // Scope the dashboard to the latest run so the numbers match
+  // `summary.md` and `findings/*.md` (which only reflect that one run).
+  // State still accumulates findings/surfaces across runs — the audit
+  // trail is intact — we just don't render the cumulative union here.
+  // Pre-fix records won't have a runId stamp; fall back to "show
+  // everything" when nothing in state carries one so legacy result
+  // dirs keep rendering.
+  const lastRunId = runs[0]?.runId;
+  const anyFindingHasRunId = allFindings.some((f) => f.runId);
+  const anySurfaceHasRunId = allSurfaces.some((s) => s.runId);
+  const findings =
+    lastRunId && anyFindingHasRunId
+      ? allFindings.filter((f) => f.runId === lastRunId)
+      : allFindings;
+  const surfaces =
+    lastRunId && anySurfaceHasRunId
+      ? allSurfaces.filter((s) => s.runId === lastRunId)
+      : allSurfaces;
   const findingsValidated = findings.filter((f) => f.validation).length;
 
   const findingsByVerdict: Record<string, number> = {};

@@ -177,6 +177,7 @@ export async function runRevalidate(
             verdict: result.verdict,
             reasoning: result.reasoning,
           };
+          finding.runId = runMeta.runId;
           dirtyRecords.add(record);
         }
         if (opts.verbose) {
@@ -220,6 +221,7 @@ export async function runRevalidate(
         verdict: result.verdict,
         reasoning: result.reasoning,
       };
+      finding.runId = runMeta.runId;
       verdicts[result.verdict] = (verdicts[result.verdict] ?? 0) + 1;
       dirtyRecords.add(record);
       if (opts.verbose) {

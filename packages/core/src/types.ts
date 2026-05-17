@@ -227,6 +227,14 @@ export type CvssScore = z.infer<typeof CvssScore>;
 export const Finding = z.object({
   /** Unique within a FileRecord. Hash of (agentSlug + title + lineRange). */
   id: z.string(),
+  /**
+   * The most recent run that produced or re-touched this finding. Set
+   * by the persistence layer (detect or validate). Optional for back-
+   * compat with FileRecord JSON written before runId stamping shipped —
+   * the viewer treats unstamped findings as legacy and falls back to
+   * showing them unfiltered when *no* finding in state has a runId.
+   */
+  runId: z.string().optional(),
   agentSlug: z.string(),
   title: z.string(),
   /**
@@ -307,6 +315,11 @@ export type Finding = z.infer<typeof Finding>;
 export const Surface = z.object({
   /** Unique within a FileRecord. Hash of (agentSlug + filePath + title + lineRange). */
   id: z.string(),
+  /**
+   * The most recent run that emitted this surface. Same semantics and
+   * back-compat treatment as {@link Finding.runId}.
+   */
+  runId: z.string().optional(),
   agentSlug: z.string(),
   /**
    * One-line label suitable for a row in a surface inventory. Conventionally

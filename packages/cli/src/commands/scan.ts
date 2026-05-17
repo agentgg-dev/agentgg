@@ -337,7 +337,10 @@ export async function runScan(
   ): void {
     const { record, normalized } = loadOrCreateRecord(relPath, fileContent);
     const byId = new Map(record.findings.map((f) => [f.id, f]));
-    for (const f of newFindings) byId.set(f.id, f);
+    // Stamp runId = "last run that emitted this finding" so the viewer
+    // can scope to the latest run. On re-detection (same id, different
+    // run), the new entry overwrites — last-seen wins.
+    for (const f of newFindings) byId.set(f.id, { ...f, runId: runMeta.runId });
     record.findings = [...byId.values()];
     record.analysisHistory.push({
       runId: runMeta.runId,
@@ -375,7 +378,8 @@ export async function runScan(
   ): void {
     const { record, normalized } = loadOrCreateRecord(relPath, fileContent);
     const byId = new Map((record.surfaces ?? []).map((s) => [s.id, s]));
-    for (const s of newSurfaces) byId.set(s.id, s);
+    // Stamp runId same way as findings — see persistDetection.
+    for (const s of newSurfaces) byId.set(s.id, { ...s, runId: runMeta.runId });
     record.surfaces = [...byId.values()];
     record.analysisHistory.push({
       runId: runMeta.runId,
@@ -883,7 +887,12 @@ export async function runScan(
         const inMemory = new Map(group.map((f) => [f.id, f]));
         record.findings = record.findings.map((rec) => {
           const live = inMemory.get(rec.id);
-          return live?.validation ? { ...rec, validation: live.validation } : rec;
+          // A validate pass also bumps runId so the viewer keeps showing
+          // findings that were re-touched by the latest run, even when
+          // the detect phase didn't re-emit them this round.
+          return live?.validation
+            ? { ...rec, runId: runMeta.runId, validation: live.validation }
+            : rec;
         });
         record.analysisHistory.push({
           runId: runMeta.runId,
