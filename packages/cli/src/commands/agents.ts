@@ -1,7 +1,8 @@
-import { relative, sep } from "node:path";
-import { type Agent, getOfficialAgentsDir } from "@agentgg/core";
+import { existsSync, statSync } from "node:fs";
+import { relative, resolve, sep } from "node:path";
+import { type Agent, getOfficialAgentsDir, loadAgentsFromDir } from "@agentgg/core";
 import type { Command } from "commander";
-import { loadAllAgents } from "../agent-catalog.js";
+import { loadAllAgents, validateOfficialAgents } from "../agent-catalog.js";
 import { addAgents, getCustomAgentsDir, removeAgent } from "../agents-fs.js";
 import { getInstalledVersion, installOfficialAgents } from "../agents-install.js";
 
@@ -145,9 +146,12 @@ export function registerAgentsCommand(program: Command): void {
         mode?: string;
         noise?: string;
       }) => {
-        const { agents: all, errors } = loadAllAgents();
+        const { agents: all, errors, violations } = loadAllAgents();
         for (const err of errors) {
           console.warn(`warning: ${err}`);
+        }
+        for (const v of violations) {
+          console.warn(`warning: ${v}`);
         }
 
         const categories = parseList(opts.category);
@@ -224,6 +228,42 @@ export function registerAgentsCommand(program: Command): void {
         console.error(`remove failed: ${(err as Error).message}`);
         process.exit(1);
       }
+    });
+
+  agents
+    .command("validate [path]")
+    .description(
+      "validate an agents tree (defaults to the installed official dir) — checks for duplicate slugs and filename != slug",
+    )
+    .action((path: string | undefined) => {
+      const env = process.env;
+      const target = path ? resolve(path) : getOfficialAgentsDir(env);
+      if (!existsSync(target)) {
+        console.error(`No such file or directory: ${target}`);
+        process.exit(1);
+      }
+      if (!statSync(target).isDirectory()) {
+        console.error(`Not a directory: ${target}`);
+        process.exit(1);
+      }
+      const { agents: loaded, errors } = loadAgentsFromDir(target, {
+        kind: "official",
+        collectErrors: true,
+      });
+      const parseErrors = errors.map(
+        (e) => `parse error: ${e.filePath ?? "?"}: ${e.message}`,
+      );
+      const violations = validateOfficialAgents(loaded);
+      const all = [...parseErrors, ...violations];
+      if (all.length === 0) {
+        console.log(`✓ ${loaded.length} agents valid (${target})`);
+        return;
+      }
+      for (const v of all) console.error(v);
+      console.error(
+        `\n${all.length} problem${all.length === 1 ? "" : "s"} in ${target}`,
+      );
+      process.exit(1);
     });
 
   agents

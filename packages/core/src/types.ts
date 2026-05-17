@@ -42,6 +42,25 @@ export const AgentMode = z.enum(["file", "hunt", "walker"]);
 export type AgentMode = z.infer<typeof AgentMode>;
 
 /**
+ * Declares what kind of artifact an agent emits. Controls how the
+ * detector surfaces results and how the reporter renders them.
+ *
+ * - `finding` (default) — security vulnerability. Goes into
+ *   `FileRecord.findings[]` as a `Finding` with severity/CVSS/impact.
+ *   This is the default for back-compat with every agent in `base/`.
+ * - `surface` — reconnaissance / entry-point map. Goes into
+ *   `FileRecord.surfaces[]` as a `Surface` with method/path/handler/
+ *   auth-in-scope. No severity/CVSS — surfaces describe attack surface,
+ *   not vulnerabilities. Used by agents under `recon/`.
+ *
+ * Walker pooling is artifact-agnostic: a file flagged by both a recon
+ * agent and a vuln agent gets one investigation session that emits a
+ * Surface AND a Finding, attributed per-agent.
+ */
+export const OutputType = z.enum(["finding", "surface"]);
+export type OutputType = z.infer<typeof OutputType>;
+
+/**
  * One regex in a walker agent's `preFilter`. Files where any
  * `preFilter` regex matches at least one line become "candidates" the
  * LLM investigates. The optional `label` is shown to the model
@@ -80,6 +99,13 @@ export const Agent = z.object({
   /** Per-file review vs whole-repo hunt. See AgentMode docstring. */
   mode: AgentMode.default("file"),
   noiseTier: NoiseTier.default("normal"),
+  /**
+   * What the agent emits. See OutputType docstring. Defaults to
+   * "finding" so every existing vulnerability agent in `base/` keeps
+   * working without a frontmatter change. Recon agents under `recon/`
+   * declare `outputType: surface`.
+   */
+  outputType: OutputType.default("finding"),
   /** Glob patterns the agent applies to. Empty = all files. */
   filePatterns: z.array(z.string()).default([]),
   /**

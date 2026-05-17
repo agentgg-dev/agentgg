@@ -194,11 +194,21 @@ export async function runScan(
   const catalog = loadAllAgents(env);
   for (const e of catalog.errors) console.warn(`warning: ${e}`);
 
+  // Structural violations of the official tree (duplicate slugs, filename
+  // != slug) mean `-t <slug>` can't be resolved deterministically. Refuse
+  // to scan rather than silently pick a winner. Run `agentgg agents
+  // validate` to see what's broken.
+  if (catalog.violations.length > 0) {
+    throw new Error(
+      `Official agent catalog is invalid (run \`agentgg agents validate\`):\n${catalog.violations.map((v) => `  ${v}`).join("\n")}`,
+    );
+  }
+
   const officialAgentsDir = getOfficialAgentsDir(env);
 
   // `--template` / `-t` filters the catalog. Each value is a slug,
   // a path to a .md file/dir, or a subdirectory name relative to the
-  // official agents dir (e.g. "base/injection/" or "lite/").
+  // official agents dir (e.g. "base/injection/" or "demo-agents/").
   // When no -t is given, default to the official base/ folder — the
   // full vulnerability library.
   const templateInputs = opts.template ?? [];
