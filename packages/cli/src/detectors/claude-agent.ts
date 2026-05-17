@@ -51,16 +51,14 @@ const ENV_ALLOWLIST = new Set<string>([
 
 /**
  * Detector backed by `@anthropic-ai/claude-agent-sdk`. Spawns the
- * `claude` CLI as a child process. The same backend serves three needs:
+ * `claude` CLI as a child process. Handles every Detector method
+ * (file, hunt, walker, validate) for both Anthropic auth types
+ * (`apiKey` and `oauthToken`).
  *
- *   - Anthropic OAuth (`oauthToken`) — `mode: "file"` and `mode: "hunt"`.
- *   - Anthropic API key (`apiKey`) — `mode: "hunt"` only. (File mode
- *     for API-key users runs through the cheaper MultiProviderDetector path
- *     by default; the resolver picks this detector for hunts instead.)
- *
- * File mode is a one-turn agent with no tools — same behavior as before.
- * Hunt mode opens Read/Glob/Grep and lets the agent decide which files
- * to read, up to a caller-supplied `maxTurns` cap.
+ * File mode is a one-turn agent with no tools — the prompt already
+ * contains the full file content. Hunt and walker modes open
+ * Read/Glob/Grep and let the agent decide which files to read, up to
+ * a caller-supplied `maxTurns` cap.
  */
 export class ClaudeAgentDetector implements Detector {
   readonly name: string;
@@ -95,7 +93,7 @@ export class ClaudeAgentDetector implements Detector {
     this.validateMaxTurns = opts.validateMaxTurns ?? 30;
     this.effort = opts.effort;
     this.thinking = opts.thinking;
-    this.name = opts.oauthToken ? "anthropic-oauth" : "anthropic-api-via-cli";
+    this.name = opts.oauthToken ? "anthropic-oauth" : "anthropic-api";
   }
 
   async detectFile(args: {
