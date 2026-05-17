@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { useMemo, useState } from 'react';
 import { ChevronRight, Search } from 'lucide-react';
-import type { Finding } from '@agentgg/core';
+import type { Finding, Severity } from '@agentgg/core';
 import { ConfidenceBar, SeverityBadge, VerdictBadge } from './Badges';
 
 type Props = {
@@ -13,10 +13,12 @@ type Props = {
 
 type AgentFilter = 'all' | string;
 type VerdictFilter = 'all' | 'confirmed' | 'false-positive' | 'out-of-scope' | 'uncertain' | 'pending';
+type SeverityFilter = 'all' | Severity | 'unscored';
 
 export default function FindingsTable({ findings, agents }: Props) {
   const [agent, setAgent] = useState<AgentFilter>('all');
   const [verdict, setVerdict] = useState<VerdictFilter>('all');
+  const [severity, setSeverity] = useState<SeverityFilter>('all');
   const [query, setQuery] = useState('');
 
   const filtered = useMemo(() => {
@@ -25,13 +27,17 @@ export default function FindingsTable({ findings, agents }: Props) {
       if (agent !== 'all' && f.agentSlug !== agent) return false;
       const v = f.validation?.verdict ?? 'pending';
       if (verdict !== 'all' && v !== verdict) return false;
+      if (severity !== 'all') {
+        const s = f.severity ?? 'unscored';
+        if (s !== severity) return false;
+      }
       if (q) {
         const hay = `${f.title} ${f.filePath} ${f.summary} ${f.agentSlug}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
     });
-  }, [findings, agent, verdict, query]);
+  }, [findings, agent, verdict, severity, query]);
 
   return (
     <div className="rounded-xl border border-bg-border bg-bg-panel/30 overflow-hidden">
@@ -46,6 +52,19 @@ export default function FindingsTable({ findings, agents }: Props) {
             className="w-full pl-9 pr-3 py-2 rounded-lg bg-bg/60 border border-bg-border text-sm text-ink placeholder:text-ink-dim focus:outline-none focus:border-amber/40 transition-colors"
           />
         </div>
+        <Selector
+          value={severity}
+          onChange={(v) => setSeverity(v as SeverityFilter)}
+          options={[
+            { value: 'all', label: 'All severities' },
+            { value: 'CRITICAL', label: 'Critical' },
+            { value: 'HIGH', label: 'High' },
+            { value: 'MEDIUM', label: 'Medium' },
+            { value: 'LOW', label: 'Low' },
+            { value: 'INFO', label: 'Info' },
+            { value: 'unscored', label: 'Unscored' },
+          ]}
+        />
         <Selector
           value={agent}
           onChange={setAgent}

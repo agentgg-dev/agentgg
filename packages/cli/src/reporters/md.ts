@@ -1,6 +1,32 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { Finding } from "@agentgg/core";
+import type { Finding, Severity } from "@agentgg/core";
+
+/**
+ * Sort order for rendered findings: severity bucket descending, then
+ * CVSS base score descending within the bucket, then by file path for
+ * stability. Findings with no severity sort last so unscored items
+ * don't crowd the top of the report.
+ */
+const SEVERITY_ORDER: Record<Severity, number> = {
+  CRITICAL: 0,
+  HIGH: 1,
+  MEDIUM: 2,
+  LOW: 3,
+  INFO: 4,
+};
+
+function severityRank(f: Finding): number {
+  return f.severity ? SEVERITY_ORDER[f.severity] : 5;
+}
+
+function compareForReport(a: Finding, b: Finding): number {
+  const rankDiff = severityRank(a) - severityRank(b);
+  if (rankDiff !== 0) return rankDiff;
+  const scoreDiff = (b.cvss?.baseScore ?? -1) - (a.cvss?.baseScore ?? -1);
+  if (scoreDiff !== 0) return scoreDiff;
+  return a.filePath.localeCompare(b.filePath);
+}
 
 export interface ScanReportInput {
   outDir: string;
@@ -52,9 +78,13 @@ export function writeMarkdownReport(input: ScanReportInput): ScanReportOutput {
   // their own `.md` here unless the caller opted in. The summary
   // still counts them so the operator sees how many the validator
   // filtered out.
-  const renderable = input.includeFalsePositives
-    ? input.findings
-    : input.findings.filter((f) => f.validation?.verdict !== "false-positive");
+  const renderable = (
+    input.includeFalsePositives
+      ? [...input.findings]
+      : input.findings.filter((f) => f.validation?.verdict !== "false-positive")
+  )
+    .slice()
+    .sort(compareForReport);
 
   const findingPaths: string[] = [];
   renderable.forEach((f, i) => {
@@ -65,7 +95,7 @@ export function writeMarkdownReport(input: ScanReportInput): ScanReportOutput {
   });
 
   const summaryPath = join(outDir, "summary.md");
-  writeFileSync(summaryPath, renderSummaryMd(input, findingPaths), "utf8");
+  writeFileSync(summaryPath, renderSummaryMd(input, findingPaths, renderable), "utf8");
 
   return { summaryPath, findingPaths };
 }
@@ -77,8 +107,18 @@ export function writeMarkdownReport(input: ScanReportInput): ScanReportOutput {
  */
 export function findingFilename(f: Finding, index: number): string {
   const seq = String(index + 1).padStart(3, "0");
+  return `${seq}-${findingFilenameSlug(f)}`;
+}
+
+/**
+ * Index-less form of `findingFilename`. Used in streaming logs (e.g.
+ * the scoring phase) where we don't yet know which sequence number a
+ * finding will get after the post-scoring severity sort. Tab-completing
+ * the slug in `findings/` reliably lands on the indexed `.md` file.
+ */
+export function findingFilenameSlug(f: Finding): string {
   const titleSlug = slugify(f.title).slice(0, 40);
-  return `${seq}-${f.agentSlug}-${titleSlug}.md`;
+  return `${f.agentSlug}-${titleSlug}.md`;
 }
 
 export function renderFindingMd(f: Finding): string {
@@ -144,7 +184,17 @@ export function renderFindingMd(f: Finding): string {
 export function renderSummaryMd(
   input: ScanReportInput,
   findingPaths: string[],
+  /**
+   * Findings actually rendered to disk, in the same order their `.md`
+   * files were emitted. Used to drive the All-findings list so the
+   * links line up with the index-prefixed filenames. When omitted,
+   * falls back to `input.findings` for back-compat with older callers
+   * (the standalone `renderSummaryMd` tests still pass an unsorted
+   * list).
+   */
+  rendered?: ReadonlyArray<Finding>,
 ): string {
+  const renderedList = rendered ?? input.findings;
   const durationMs = input.completedAt.getTime() - input.startedAt.getTime();
   const durationSec = (durationMs / 1000).toFixed(1);
   const lines: string[] = [];
@@ -192,19 +242,45 @@ export function renderSummaryMd(
     lines.push("");
   }
 
+  // Severity breakdown — only shown when the scoring phase has run on
+  // at least one finding. Order matches the CVSS severity rubric:
+  // CRITICAL first, INFO last.
   if (input.findings.length > 0) {
+    const bySeverity: Record<string, number> = {};
+    let unscored = 0;
+    for (const f of input.findings) {
+      if (f.severity) {
+        bySeverity[f.severity] = (bySeverity[f.severity] ?? 0) + 1;
+      } else {
+        unscored++;
+      }
+    }
+    const anyScored = Object.keys(bySeverity).length > 0;
+    if (anyScored) {
+      lines.push("## Findings by severity");
+      lines.push("");
+      const order: Severity[] = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"];
+      for (const s of order) {
+        if (bySeverity[s]) lines.push(`- \`${s}\`: ${bySeverity[s]}`);
+      }
+      if (unscored > 0) lines.push(`- _unscored_: ${unscored}`);
+      lines.push("");
+    }
+  }
+
+  if (renderedList.length > 0) {
     lines.push("## All findings");
     lines.push("");
-    input.findings.forEach((f, i) => {
+    renderedList.forEach((f, i) => {
       const rel = `findings/${findingFilename(f, i)}`;
       const loc = f.lineRange ? `:${f.lineRange[0]}` : "";
-      lines.push(`- [${f.title}](${rel}) — \`${f.filePath}${loc}\``);
+      const sevTag = f.severity
+        ? ` \`${f.severity}${f.cvss ? ` ${f.cvss.baseScore.toFixed(1)}` : ""}\``
+        : "";
+      lines.push(`-${sevTag} [${f.title}](${rel}) — \`${f.filePath}${loc}\``);
     });
     lines.push("");
   }
-
-  lines.push("---");
-  lines.push("_Severity / CVSS scores will appear here once the scoring phase ships._");
 
   return lines.join("\n");
 }

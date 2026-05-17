@@ -1,6 +1,6 @@
 import { readFile, readdir } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
-import type { Agent, Finding } from "@agentgg/core";
+import type { Agent, CvssScore, Finding } from "@agentgg/core";
 import { type LanguageModelV1, generateObject, generateText, tool } from "ai";
 import { minimatch } from "minimatch";
 import { z } from "zod";
@@ -15,6 +15,7 @@ import {
   buildInvestigatePrompt,
   hydrateFinding,
 } from "../detect.js";
+import { LlmScore, asCvssScore, buildScorePrompt } from "../scoring.js";
 import {
   LlmValidation,
   asValidationField,
@@ -226,6 +227,24 @@ export class VercelAgentDetector implements Detector {
       return asValidationField(object);
     } catch (err) {
       debugLog("VercelAgentDetector.validateFindingByScope", err);
+      throw err;
+    }
+  }
+
+  async scoreFinding(args: { finding: Finding; fileContent: string }): Promise<CvssScore> {
+    try {
+      const { object } = await withTpmRetry(() =>
+        generateObject({
+          model: this.model,
+          schema: LlmScore,
+          mode: "json",
+          prompt: buildScorePrompt(args),
+          providerOptions: this.providerOptionsArg(),
+        }),
+      );
+      return asCvssScore(object);
+    } catch (err) {
+      debugLog("VercelAgentDetector.scoreFinding", err);
       throw err;
     }
   }

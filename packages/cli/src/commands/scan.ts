@@ -20,7 +20,7 @@ import { diagnoseScanError } from "../diagnostics.js";
 import { listChangedFiles, loadCommitPatch } from "../diff.js";
 import { type CredentialOverrides, resolveDetector } from "../llm.js";
 import { evaluatePreFilter } from "../pre-filter.js";
-import { writeMarkdownReport } from "../reporters/md.js";
+import { findingFilenameSlug, writeMarkdownReport } from "../reporters/md.js";
 import { resolveTemplates } from "../template.js";
 import { DEFAULT_VIEWER_PORT, openBrowser, startViewer } from "../viewer-server.js";
 import { printReady } from "./view.js";
@@ -69,6 +69,17 @@ interface ScanOpts {
   thinking?: "off" | "adaptive" | "enabled";
   /** Keep false-positive findings in the markdown report instead of filtering them out. */
   includeFalsePositives?: boolean;
+  /**
+   * Run the CVSS 3.1 scoring phase after detection (and after validation
+   * when --validate is set). The scoring agent picks the 8 base metrics
+   * per finding; the score and severity bucket are computed
+   * deterministically in Node from those choices. When `--validate` was
+   * passed, findings the validator marked false-positive or out-of-scope
+   * are skipped to avoid paying for findings that won't ship.
+   */
+  score?: boolean;
+  /** Re-score findings even when they already carry a `cvss` on disk. */
+  rescore?: boolean;
   /**
    * Boot the local viewer (Next.js) after the scan finishes and keep
    * it running until Ctrl+C. Accepts an optional port; without one,
@@ -830,6 +841,122 @@ export async function runScan(
     }
   }
 
+  // -------- scoring phase --------
+  // Pick CVSS 3.1 metrics per finding; assemble the full CvssScore in
+  // Node from those choices. Runs after validation so the scorer skips
+  // findings the validator already disqualified (false-positive /
+  // out-of-scope) — no point spending tokens on findings that won't
+  // ship. Without --validate, every detected finding is scored.
+  if (opts.score && findings.length > 0) {
+    const isDisqualified = (f: Finding): boolean => {
+      const v = f.validation?.verdict;
+      return v === "false-positive" || v === "out-of-scope";
+    };
+    const scorable = findings.filter(
+      (f) =>
+        f.filePath &&
+        f.filePath !== "(unknown)" &&
+        !isDisqualified(f) &&
+        (opts.rescore || !f.cvss),
+    );
+    const skippedHasScore = findings.filter((f) => f.cvss).length;
+    const skippedDisq = findings.filter(isDisqualified).length;
+    if (scorable.length > 0) {
+      console.log(
+        `\nScoring ${scorable.length} finding(s)` +
+          (skippedHasScore > 0 ? ` (${skippedHasScore} already scored)` : "") +
+          (skippedDisq > 0 ? ` (${skippedDisq} skipped: FP/out-of-scope)` : ""),
+      );
+      const scoreFileCache = new Map<string, string | null>();
+      const scoredByFile = new Map<string, Finding[]>();
+      // Sequential — same legibility argument as validation. The
+      // scorer is one call per finding; parallelizing it would tangle
+      // progress + rate-limit pressure with the validator above.
+      await runConcurrent(scorable, 1, async (finding) => {
+        let content = scoreFileCache.get(finding.filePath);
+        if (content === undefined) {
+          try {
+            content = readFileSync(resolve(root, finding.filePath), "utf8");
+          } catch {
+            content = null;
+          }
+          scoreFileCache.set(finding.filePath, content);
+        }
+        if (content === null) {
+          if (opts.verbose) {
+            console.log(`    skip score ${finding.id}: file not readable`);
+          }
+          return;
+        }
+        try {
+          const cvss = await detector.scoreFinding({
+            finding,
+            fileContent: content,
+          });
+          finding.cvss = cvss;
+          finding.severity = cvss.severity;
+          const normalized = finding.filePath.replace(/\\/g, "/");
+          const list = scoredByFile.get(normalized) ?? [];
+          list.push(finding);
+          scoredByFile.set(normalized, list);
+          if (opts.verbose) {
+            const loc = finding.lineRange ? `:${finding.lineRange[0]}` : "";
+            console.log(
+              `    ${cvss.severity.padEnd(8)} ${cvss.baseScore.toFixed(1).padStart(4)}  ${findingFilenameSlug(finding)}  ${finding.filePath}${loc}`,
+            );
+          }
+        } catch (err) {
+          logDetectionError(opts, `score:${finding.id}`, err);
+        }
+      });
+      // Persist scored findings back into the FileRecord. Grouped by
+      // file so each record is rewritten once per scoring run.
+      for (const [normalized, group] of scoredByFile) {
+        if (isAbsolute(normalized)) continue;
+        const record = readFileRecord(outDir, normalized);
+        if (!record) continue;
+        const inMemory = new Map(group.map((f) => [f.id, f]));
+        record.findings = record.findings.map((rec) => {
+          const live = inMemory.get(rec.id);
+          if (!live?.cvss) return rec;
+          return { ...rec, cvss: live.cvss, severity: live.severity };
+        });
+        record.analysisHistory.push({
+          runId: runMeta.runId,
+          phase: "detect",
+          ranAt: new Date().toISOString(),
+          durationMs: 0,
+          provider: detector.name,
+          agentSlugs: Array.from(new Set(group.map((f) => f.agentSlug))),
+          findingCount: group.length,
+        });
+        try {
+          writeFileRecord(outDir, record);
+        } catch (err) {
+          if (opts.verbose) {
+            console.error(
+              `    persist failed for ${normalized}: ${(err as Error).message}`,
+            );
+          }
+        }
+      }
+      const buckets: Record<string, number> = {};
+      for (const f of scorable) {
+        if (!f.severity) continue;
+        buckets[f.severity] = (buckets[f.severity] ?? 0) + 1;
+      }
+      const summary = Object.entries(buckets)
+        .sort()
+        .map(([s, n]) => `${s}=${n}`)
+        .join(", ");
+      console.log(`  Severity: ${summary || "(none)"}`);
+    } else if (skippedHasScore + skippedDisq > 0) {
+      console.log(
+        `\nScoring: nothing to do (${skippedHasScore} already scored, ${skippedDisq} FP/out-of-scope). Pass --rescore to redo.`,
+      );
+    }
+  }
+
   const completedAt = new Date();
 
   const report = writeMarkdownReport({
@@ -1001,6 +1128,14 @@ export function registerScanCommand(program: Command): void {
     .option(
       "--include-false-positives",
       "Write per-finding markdown reports for findings the validator marked false-positive (default: skip them). FP findings always stay in state/files/* regardless.",
+    )
+    .option(
+      "--score",
+      "Run the CVSS 3.1 scoring phase after detection (and after --validate when set). The agent picks the 8 base metrics; the score and severity bucket are computed deterministically. Findings the validator marked false-positive or out-of-scope are skipped.",
+    )
+    .option(
+      "--rescore",
+      "Re-score findings even when they already carry a CVSS score on disk (default: skip them)",
     )
     .option(
       "--serve [port]",

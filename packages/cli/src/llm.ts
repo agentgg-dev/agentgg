@@ -178,5 +178,6 @@ function buildOllamaDetector(
     investigate: (args) => agentDetector.investigate(args),
     validateFinding: (args) => fileDetector.validateFinding(args),
     validateFindingByScope: (args) => fileDetector.validateFindingByScope(args),
+    scoreFinding: (args) => fileDetector.scoreFinding(args),
   };
 }

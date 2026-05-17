@@ -1,4 +1,4 @@
-import type { Agent, Finding } from "@agentgg/core";
+import type { Agent, CvssScore, Finding } from "@agentgg/core";
 import { type LanguageModelV1, generateObject } from "ai";
 import {
   DetectionResult,
@@ -8,6 +8,7 @@ import {
   buildDetectPrompt,
   hydrateFinding,
 } from "../detect.js";
+import { LlmScore, asCvssScore, buildScorePrompt } from "../scoring.js";
 import {
   LlmValidation,
   asValidationField,
@@ -174,6 +175,27 @@ export class MultiProviderDetector implements Detector {
         console.error("---- MultiProviderDetector scope-validate error ----");
         console.error(util.inspect(err, { depth: 5, colors: false }));
         console.error("-----------------------------------------------------");
+      }
+      throw err;
+    }
+  }
+
+  async scoreFinding(args: { finding: Finding; fileContent: string }): Promise<CvssScore> {
+    try {
+      const { object } = await generateObject({
+        model: this.model,
+        schema: LlmScore,
+        mode: "json",
+        prompt: buildScorePrompt(args),
+        providerOptions: this.providerOptionsArg(),
+      });
+      return asCvssScore(object);
+    } catch (err) {
+      if (process.env.AGENTGG_DEBUG) {
+        const util = await import("node:util");
+        console.error("---- MultiProviderDetector score error ----");
+        console.error(util.inspect(err, { depth: 5, colors: false }));
+        console.error("-------------------------------------------");
       }
       throw err;
     }
