@@ -1,0 +1,75 @@
+{
+  "name": "agentgg",
+  "version": "0.1.1",
+  "description": "Agentic SAST scanner — white box, CI-ready, multi-provider. Reasoning where regex falls short.",
+  "license": "Apache-2.0",
+  "author": "agentgg <contact@agentgg.dev>",
+  "homepage": "https://agentgg.dev",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/agentgg-dev/agentgg.git",
+    "directory": "packages/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/agentgg-dev/agentgg/issues"
+  },
+  "keywords": [
+    "security",
+    "sast",
+    "vulnerability",
+    "scanner",
+    "ai",
+    "llm",
+    "agentic",
+    "static-analysis",
+    "cli",
+    "code-security",
+    "appsec"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "bin": {
+    "agentgg": "./dist/cli.js"
+  },
+  "main": "./dist/cli.js",
+  "files": [
+    "dist",
+    "scripts",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "scripts": {
+    "typecheck": "tsc -b tsconfig.json",
+    "build": "tsc -b ../core && node scripts/bundle-cli.mjs",
+    "build:bundle": "tsc -b ../core && node scripts/bundle-cli.mjs && node scripts/bundle-viewer.mjs",
+    "clean": "tsc -b --clean",
+    "dev": "tsx src/cli.ts",
+    "prepack": "npm run build:bundle && node scripts/copy-root-docs.mjs"
+  },
+  "dependencies": {
+    "adm-zip": "^0.5.16",
+    "@ai-sdk/amazon-bedrock": "^1.0.0",
+    "@ai-sdk/openai": "^1.0.0",
+    "@anthropic-ai/claude-agent-sdk": "0.2.119",
+    "@aws-sdk/credential-providers": "^3.0.0",
+    "@inquirer/prompts": "^7.0.0",
+    "ai": "^4.0.0",
+    "commander": "^13.0.0",
+    "gray-matter": "^4.0.3",
+    "minimatch": "^10.0.0",
+    "ollama-ai-provider": "^1.0.0",
+    "zod": "^3.23.0",
+    "zod-to-json-schema": "^3.25.0"
+  },
+  "devDependencies": {
+    "@agentgg/core": "workspace:*",
+    "esbuild": "^0.24.0"
+  }
+}

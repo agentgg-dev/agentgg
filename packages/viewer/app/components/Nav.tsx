@@ -1,0 +1,42 @@
+import { FolderOpen } from "lucide-react";
+import Image from "next/image";
+import Link from "next/link";
+
+type Props = {
+  rootPath?: string;
+};
+
+export default function Nav({ rootPath }: Props) {
+  return (
+    <header className="sticky top-0 z-50 backdrop-blur-xl bg-bg/70 border-b border-bg-border">
+      <div className="max-w-6xl mx-auto px-6 h-16 flex items-center justify-between">
+        <Link href="/" className="flex items-center gap-2.5 group">
+          <Image
+            src="/logo-mini.png"
+            alt="agentgg"
+            width={32}
+            height={32}
+            priority
+            className="rounded-md"
+          />
+          <span className="font-mono text-[15px] tracking-tight">
+            <span className="text-cyan">agent</span>
+            <span className="text-amber">gg</span>
+          </span>
+          <span className="hidden sm:inline-block ml-1 text-[10px] font-mono uppercase tracking-widest text-ink-dim border border-bg-border px-1.5 py-0.5 rounded">
+            report
+          </span>
+        </Link>
+
+        {rootPath && (
+          <div className="hidden md:flex items-center gap-2 text-xs font-mono text-ink-muted max-w-[55%] truncate">
+            <FolderOpen className="w-3.5 h-3.5 text-ink-dim shrink-0" />
+            <span className="truncate" title={rootPath}>
+              {rootPath}
+            </span>
+          </div>
+        )}
+      </div>
+    </header>
+  );
+}
