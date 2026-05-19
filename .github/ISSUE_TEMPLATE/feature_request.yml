@@ -1,0 +1,39 @@
+name: Feature request
+description: Suggest a new capability or improvement to the CLI / viewer.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion! Before filing, a quick triage:
+
+        - If this is about **what an agent detects** (or fails to detect), it belongs in [agentgg-agents](https://github.com/agentgg-dev/agentgg-agents/issues) — agents live in a separate repo.
+        - If you're not sure whether something is a feature request or a design question, [start a discussion](https://github.com/agentgg-dev/agentgg/discussions) first.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the pain point — not the proposed solution. What were you trying to do, and what got in the way?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How would you like it to work? Optional — a clear problem statement is often enough.
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any workarounds you've tried, or other shapes the solution could take.
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+    validations:
+      required: false

@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/agentgg-dev/agentgg/security
+    about: Report security issues privately via GitHub. Do not open a public issue.
+  - name: Agent quality (false positives / missed detections)
+    url: https://github.com/agentgg-dev/agentgg-agents/issues
+    about: Issues with what an agent caught or missed belong in the agentgg-agents repo.
+  - name: Questions and discussion
+    url: https://github.com/agentgg-dev/agentgg/discussions
+    about: For open-ended questions, design discussion, or "is this a bug or am I holding it wrong?", start a discussion.

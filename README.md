@@ -8,7 +8,9 @@
 
 `agentgg` is an agentic SAST scanner. Its agents reason about your code. They follow imports, check the call graph, and confirm findings before flagging, instead of pattern-matching the way traditional SAST does. 100+ official agents cover security vulnerabilities, coding anti-patterns, and codebase recon; the catalog auto-downloads on first scan from [agentgg-dev/agentgg-agents](https://github.com/agentgg-dev/agentgg-agents). Run on your full repo or on a git diff for PR reviews. Each agent runs in one of three modes: **file**, **walker**, or **hunt**. Interrupted scans resume on re-run: only new or changed files hit the LLM again.
 
-**[agentgg.dev](https://agentgg.dev)** · [Agents catalog](https://github.com/agentgg-dev/agentgg-agents) · [Report a security issue](https://github.com/agentgg-dev/agentgg/security)
+**[agentgg.dev](https://agentgg.dev)** · [Agents catalog](https://github.com/agentgg-dev/agentgg-agents) · [Report a bug](https://github.com/agentgg-dev/agentgg/issues/new/choose) · [Report a security issue](https://github.com/agentgg-dev/agentgg/security)
+
+> **agentgg is in beta.** Things will move, edges will be rough — bug reports and feedback are very welcome. [Open an issue](https://github.com/agentgg-dev/agentgg/issues/new/choose).
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/agentgg-dev/agentgg/main/static/agentgg-view.png" alt="agentgg viewer UI showing scan findings" width="780" />
