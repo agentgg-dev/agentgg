@@ -1,0 +1,35 @@
+node_modules/
+dist/
+.next/
+out/
+*.tsbuildinfo
+coverage/
+
+.env
+.env.local
+.env.*.local
+
+*.log
+npm-debug.log*
+.pnpm-debug.log*
+
+scan-results/
+
+.DS_Store
+Thumbs.db
+
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+.cache/
+.turbo/
+.claude/
+
+# Tarballs produced by `pnpm pack` / `npm pack`
+*.tgz
+
+# Synced from repo root by prepack — see packages/cli/scripts/copy-root-docs.mjs
+packages/cli/README.md
+packages/cli/LICENSE
+packages/cli/NOTICE

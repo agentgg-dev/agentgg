@@ -1,0 +1,25 @@
+# Normalize all text files to LF on commit and checkout.
+# Cross-platform safe: Windows IDEs handle LF fine; biome/prettier expect LF.
+* text=auto eol=lf
+
+# Explicit binary types (defensive — git auto-detects these too,
+# but listing them prevents accidental normalization).
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.pdf binary
+*.zip binary
+*.tar binary
+*.gz binary
+
+# Shell scripts MUST be LF (Windows-CRLF shell scripts break on Unix).
+*.sh text eol=lf
+
+# Lockfiles: large generated files, leave as-is.
+pnpm-lock.yaml -text

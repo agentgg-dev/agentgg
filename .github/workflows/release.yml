@@ -1,0 +1,84 @@
+name: Release
+
+# Tag-triggered publish to npm. Bump version in packages/cli/package.json
+# and the root package.json, commit, then push a matching `v<version>` tag:
+#
+#   git tag v0.1.0
+#   git push origin v0.1.0
+#
+# Authentication is a granular npm access token stored as the NPM_TOKEN
+# repo secret (Settings → Secrets and variables → Actions). Provenance
+# attestations are still emitted — they use the GitHub Actions OIDC
+# token (id-token: write) to sign the attestation, but the publish
+# itself is token-authenticated.
+#
+# Setup (one-time):
+#   1. npmjs.com/settings/<user>/tokens → Generate New Token → Granular
+#      Access Token. Scope: package agentgg, permission "Read and write".
+#   2. github.com/agentgg-dev/agentgg/settings/secrets/actions → New
+#      repository secret → name NPM_TOKEN, value <the token>.
+#
+# OIDC trusted publishing is the longer-term path but requires:
+#   - pnpm to ship OIDC support (pnpm/pnpm#9812, still open in 2026), or
+#     a switch away from `pnpm publish` in this job (already done — we
+#     use `npm publish`), AND
+#   - npm CLI >= 11.5.1 on the runner, AND
+#   - a trusted publisher registered on npmjs.com.
+# Revisit once those are stable.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # required to sign the npm provenance attestation
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          # Writes ~/.npmrc with `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}`
+          # so `npm publish` picks up the NPM_TOKEN secret.
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: pnpm install --frozen-lockfile
+
+      # Gate the publish on the same checks ci.yml runs against main. The
+      # release event doesn't piggy-back on the main-push CI run, so we
+      # re-run them here on the exact commit being tagged. Single platform
+      # (ubuntu) is enough because ci.yml already validated the matrix
+      # (ubuntu/macos/windows) on the push to main.
+      - name: Lint
+        run: pnpm lint
+
+      # Build before test: vitest imports @agentgg/core via the package's
+      # "main": "./dist/index.js" entry, so the core's dist must exist
+      # before any test that touches the CLI source. Mirrors ci.yml.
+      - name: Build
+        run: pnpm build
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build with bundled viewer
+        run: pnpm --filter agentgg build:bundle
+
+      # pnpm publish does not yet support npm trusted publishers / OIDC
+      # (pnpm/pnpm#9812). Use `npm publish` so the token-based auth
+      # works cleanly and --provenance produces a verifiable SLSA
+      # attestation linking the tarball to this workflow run.
+      - name: Publish to npm with provenance
+        working-directory: packages/cli
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
