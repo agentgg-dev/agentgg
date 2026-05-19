@@ -1,0 +1,75 @@
+name: Bug report
+description: Something broken in the CLI, scan flow, viewer, or build.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug — agentgg is in beta and every report helps.
+
+        Before filing, please confirm this isn't one of the things that belongs elsewhere:
+        - **Security vulnerability** → use [private vulnerability reporting](https://github.com/agentgg-dev/agentgg/security), not a public issue.
+        - **Agent missed something or false-positived** → file at [agentgg-agents](https://github.com/agentgg-dev/agentgg-agents/issues). Those live in a separate repo.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug. What did you expect; what did you see instead?
+      placeholder: When I run `agentgg scan ./src`, …
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Minimal command + setup that triggers the bug. A repro repo or stripped-down test case is hugely helpful.
+      placeholder: |
+        1. `agentgg init --provider openai`
+        2. `agentgg scan ./demo-repo -o ./out`
+        3. …
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: agentgg version
+      description: Output of `agentgg --version`.
+      placeholder: e.g. 0.5.2
+    validations:
+      required: true
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider
+      options:
+        - Anthropic (API key)
+        - Anthropic (OAuth, Claude Pro/Max)
+        - OpenAI
+        - Ollama
+        - AWS Bedrock
+        - Not applicable / unsure
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: OS + Node version
+      placeholder: e.g. macOS 14.5, Node 20.11.0
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Re-run with `--verbose` and paste any relevant output. Please redact credentials and proprietary code.
+      render: shell
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else that might be relevant — config snippets, repo shape, prior scans, etc.
+    validations:
+      required: false
