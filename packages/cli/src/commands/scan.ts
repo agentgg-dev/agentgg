@@ -158,6 +158,21 @@ export async function runScan(
   };
   process.on("SIGINT", sigintHandler);
 
+  // Scan-wide abort controller. Fired by `handleDetectorError` when a
+  // fatal diagnostic (quota exhausted, bad credentials) classifies an
+  // error: cancels every in-flight detector HTTP request so sibling
+  // workers exit immediately instead of waiting for their (doomed)
+  // requests to settle. Each detector call below threads `signal` from
+  // here down to the SDK's abortSignal/abortController option.
+  //
+  // Resume safety: this controller only cancels in-flight requests; it
+  // does NOT write any state. `persistDetection` / `writeAgentRun` only
+  // run on the happy path of each per-task try block, so a cancelled
+  // (file, agent) pair stays "pending" on disk and the next run re-runs
+  // it — including under quota cancellation, where rerunning after the
+  // user tops up Just Works™.
+  const scanAbortController = new AbortController();
+
   try {
     const config = loadOrSynthesizeConfig(env, opts.provider);
 
@@ -432,6 +447,7 @@ export async function runScan(
             opts.diff && diffPatch !== undefined
               ? { commit: opts.diff, patch: diffPatch }
               : undefined,
+          signal: scanAbortController.signal,
         });
         // Drop findings where the model invented a path that doesn't exist on
         // disk — common with smaller models that copy the example filePath from
@@ -499,7 +515,7 @@ export async function runScan(
           }
         }
       } catch (err) {
-        handleDetectorError(opts, `hunt:${agent.slug}`, err);
+        handleDetectorError(opts, `hunt:${agent.slug}`, err, scanAbortController);
       }
     }
 
@@ -636,6 +652,7 @@ export async function runScan(
               })),
             })),
             maxTurns: maxTurnsPerBatch,
+            signal: scanAbortController.signal,
           });
           findings.push(...batchFindings);
           for (const f of batchFindings) {
@@ -681,7 +698,7 @@ export async function runScan(
             }
           }
         } catch (err) {
-          handleDetectorError(opts, `walker:batch[${labels}]`, err);
+          handleDetectorError(opts, `walker:batch[${labels}]`, err, scanAbortController);
         }
       });
     }
@@ -754,6 +771,7 @@ export async function runScan(
               agent,
               filePath: relPath,
               content,
+              signal: scanAbortController.signal,
             });
             findings.push(...fileFindings);
             byAgent[agent.slug] = (byAgent[agent.slug] ?? 0) + fileFindings.length;
@@ -765,7 +783,7 @@ export async function runScan(
             // "pending."
             persistDetection(relPath, agent, content, fileFindings);
           } catch (err) {
-            handleDetectorError(opts, relPath, err);
+            handleDetectorError(opts, relPath, err, scanAbortController);
           }
         });
         if (cachedCount > 0) {
@@ -810,6 +828,7 @@ export async function runScan(
               const result = await detector.validateFindingByScope({
                 finding,
                 scope: scopeContent!,
+                signal: scanAbortController.signal,
               });
               if (result.verdict === "out-of-scope") {
                 finding.validation = {
@@ -825,7 +844,7 @@ export async function runScan(
                 console.log(`    ${finding.filePath}: ${result.verdict} — ${note}`);
               }
             } catch (err) {
-              handleDetectorError(opts, `scope-validate:${finding.id}`, err);
+              handleDetectorError(opts, `scope-validate:${finding.id}`, err, scanAbortController);
             }
             return;
           }
@@ -848,6 +867,7 @@ export async function runScan(
               finding,
               fileContent: content,
               scope: scopeContent,
+              signal: scanAbortController.signal,
             });
             finding.validation = {
               verdict: result.verdict,
@@ -857,7 +877,7 @@ export async function runScan(
               console.log(`    ${finding.filePath}: ${result.verdict}`);
             }
           } catch (err) {
-            handleDetectorError(opts, `validate:${finding.id}`, err);
+            handleDetectorError(opts, `validate:${finding.id}`, err, scanAbortController);
           }
         });
         // Persist validation verdicts back into FileRecords. Group by
@@ -965,6 +985,7 @@ export async function runScan(
             const cvss = await detector.scoreFinding({
               finding,
               fileContent: content,
+              signal: scanAbortController.signal,
             });
             finding.cvss = cvss;
             finding.severity = cvss.severity;
@@ -979,7 +1000,7 @@ export async function runScan(
               );
             }
           } catch (err) {
-            handleDetectorError(opts, `score:${finding.id}`, err);
+            handleDetectorError(opts, `score:${finding.id}`, err, scanAbortController);
           }
         });
         // Persist scored findings back into the FileRecord. Grouped by

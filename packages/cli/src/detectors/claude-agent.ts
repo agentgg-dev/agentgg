@@ -97,8 +97,13 @@ export class ClaudeAgentDetector implements Detector {
     this.name = opts.oauthToken ? "anthropic-oauth" : "anthropic-api";
   }
 
-  async detectFile(args: { agent: Agent; filePath: string; content: string }): Promise<Finding[]> {
-    const { agent, filePath, content } = args;
+  async detectFile(args: {
+    agent: Agent;
+    filePath: string;
+    content: string;
+    signal?: AbortSignal;
+  }): Promise<Finding[]> {
+    const { agent, filePath, content, signal } = args;
     const prompt = buildDetectPrompt(agent, filePath, content);
     // Single-turn: no tools needed — the file content is already in the
     // prompt. `tools: []` removes all built-in tools from the model's
@@ -109,11 +114,12 @@ export class ClaudeAgentDetector implements Detector {
       tools: [],
       maxTurns: 5,
       schema: DetectionResult,
+      signal,
     });
     return result.findings.map((f) => hydrateFinding(f, agent, filePath));
   }
 
-  async hunt(args: HuntArgs): Promise<Finding[]> {
+  async hunt(args: HuntArgs & { signal?: AbortSignal }): Promise<Finding[]> {
     const { agent, rootDir, excludePatterns, includePatterns, maxFileSizeKb, maxTurns, diff } =
       args;
     const prompt = buildHuntPrompt(agent, {
@@ -135,12 +141,13 @@ export class ClaudeAgentDetector implements Detector {
       maxTurns,
       cwd: rootDir,
       schema: DetectionResult,
+      signal: args.signal,
     });
 
     return result.findings.map((f) => hydrateFinding(f, agent, f.filePath ?? "(unknown)"));
   }
 
-  async investigate(args: InvestigateArgs): Promise<Finding[]> {
+  async investigate(args: InvestigateArgs & { signal?: AbortSignal }): Promise<Finding[]> {
     const { agents, rootDir, candidates, maxTurns } = args;
     const prompt = buildInvestigatePrompt(agents, candidates);
 
@@ -156,6 +163,7 @@ export class ClaudeAgentDetector implements Detector {
       maxTurns,
       cwd: rootDir,
       schema: DetectionResult,
+      signal: args.signal,
     });
 
     // Attribution rules:
@@ -181,7 +189,12 @@ export class ClaudeAgentDetector implements Detector {
     return findings;
   }
 
-  async validateFinding(args: { finding: Finding; fileContent: string; scope?: string }) {
+  async validateFinding(args: {
+    finding: Finding;
+    fileContent: string;
+    scope?: string;
+    signal?: AbortSignal;
+  }) {
     const prompt = buildValidatePrompt(args);
     // Single-turn: `tools: []` removes all built-in tools from the
     // model's context, so the validator can't burn turns on speculative
@@ -192,22 +205,28 @@ export class ClaudeAgentDetector implements Detector {
       tools: [],
       maxTurns: this.validateMaxTurns,
       schema: LlmValidation,
+      signal: args.signal,
     });
     return asValidationField(validated);
   }
 
-  async validateFindingByScope(args: { finding: Finding; scope: string }) {
+  async validateFindingByScope(args: { finding: Finding; scope: string; signal?: AbortSignal }) {
     const prompt = buildScopeValidatePrompt(args);
     const validated = await this.runStructured({
       prompt,
       tools: [],
       maxTurns: this.validateMaxTurns,
       schema: LlmValidation,
+      signal: args.signal,
     });
     return asValidationField(validated);
   }
 
-  async scoreFinding(args: { finding: Finding; fileContent: string }): Promise<CvssScore> {
+  async scoreFinding(args: {
+    finding: Finding;
+    fileContent: string;
+    signal?: AbortSignal;
+  }): Promise<CvssScore> {
     // Single-turn, no tools — same constraint as validation: the
     // prompt already carries the full file content, so the model
     // shouldn't burn turns on speculative reads.
@@ -216,6 +235,7 @@ export class ClaudeAgentDetector implements Detector {
       tools: [],
       maxTurns: this.validateMaxTurns,
       schema: LlmScore,
+      signal: args.signal,
     });
     return asCvssScore(llmScore);
   }
@@ -244,8 +264,36 @@ export class ClaudeAgentDetector implements Detector {
     maxTurns: number;
     cwd?: string;
     schema: T;
+    /**
+     * Parent scan abort signal. When the orchestrator decides to bail
+     * (fatal quota / auth diagnostic in a sibling worker), this signal
+     * fires; we mirror it onto a local `AbortController` and hand the
+     * controller to the SDK so its in-flight subprocess request is
+     * cancelled immediately rather than waiting for the next message.
+     */
+    signal?: AbortSignal;
   }): Promise<z.infer<T>> {
     const jsonSchema = zodToJsonSchema(opts.schema) as Record<string, unknown>;
+    // Bridge: parent gives us a signal, SDK wants a controller. Make a
+    // local controller and link parent → local so aborting the parent
+    // aborts ours. If the parent is already aborted, fail fast before
+    // even spawning the subprocess.
+    const sdkAbortController = new AbortController();
+    // Pull into a local const so the addEventListener arrow closure sees
+    // a definitely-non-undefined reference (the outer `opts.signal` would
+    // require a non-null assertion inside the closure).
+    const parentSignal = opts.signal;
+    if (parentSignal) {
+      if (parentSignal.aborted) {
+        sdkAbortController.abort(parentSignal.reason);
+      } else {
+        parentSignal.addEventListener(
+          "abort",
+          () => sdkAbortController.abort(parentSignal.reason),
+          { once: true },
+        );
+      }
+    }
     let structured: unknown;
     let resultText = "";
     try {
@@ -266,6 +314,7 @@ export class ClaudeAgentDetector implements Detector {
           model: this.model,
           env: this.buildEnv(),
           outputFormat: { type: "json_schema", schema: jsonSchema },
+          abortController: sdkAbortController,
         },
       })) {
         const msg = message as Record<string, unknown>;

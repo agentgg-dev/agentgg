@@ -91,8 +91,13 @@ export class MultiProviderDetector implements Detector {
     this.thinking = opts.thinking;
   }
 
-  async detectFile(args: { agent: Agent; filePath: string; content: string }): Promise<Finding[]> {
-    const { agent, filePath, content } = args;
+  async detectFile(args: {
+    agent: Agent;
+    filePath: string;
+    content: string;
+    signal?: AbortSignal;
+  }): Promise<Finding[]> {
+    const { agent, filePath, content, signal } = args;
     try {
       const { object } = await generateObject({
         model: this.model,
@@ -100,6 +105,7 @@ export class MultiProviderDetector implements Detector {
         mode: "json",
         prompt: buildDetectPrompt(agent, filePath, content),
         providerOptions: this.providerOptionsArg(),
+        abortSignal: signal,
       });
       // In file mode the caller provides the real path — ignore whatever
       // the model put in `filePath` (models often emit placeholders here).
@@ -115,7 +121,7 @@ export class MultiProviderDetector implements Detector {
     }
   }
 
-  async hunt(_args: HuntArgs): Promise<Finding[]> {
+  async hunt(_args: HuntArgs & { signal?: AbortSignal }): Promise<Finding[]> {
     throw new Error(
       `Hunt mode is not supported by the MultiProviderDetector (provider: ${this.name}). ` +
         "Hunt-mode agents are routed through the Claude Agent SDK. " +
@@ -124,7 +130,7 @@ export class MultiProviderDetector implements Detector {
     );
   }
 
-  async investigate(_args: InvestigateArgs): Promise<Finding[]> {
+  async investigate(_args: InvestigateArgs & { signal?: AbortSignal }): Promise<Finding[]> {
     throw new Error(
       `Walker mode is not supported by the MultiProviderDetector (provider: ${this.name}). ` +
         "Walker-mode per-file investigation needs tool access; route through " +
@@ -133,7 +139,12 @@ export class MultiProviderDetector implements Detector {
     );
   }
 
-  async validateFinding(args: { finding: Finding; fileContent: string; scope?: string }) {
+  async validateFinding(args: {
+    finding: Finding;
+    fileContent: string;
+    scope?: string;
+    signal?: AbortSignal;
+  }) {
     try {
       const { object } = await generateObject({
         model: this.model,
@@ -141,6 +152,7 @@ export class MultiProviderDetector implements Detector {
         mode: "json",
         prompt: buildValidatePrompt(args),
         providerOptions: this.providerOptionsArg(),
+        abortSignal: args.signal,
       });
       return asValidationField(object);
     } catch (err) {
@@ -154,7 +166,7 @@ export class MultiProviderDetector implements Detector {
     }
   }
 
-  async validateFindingByScope(args: { finding: Finding; scope: string }) {
+  async validateFindingByScope(args: { finding: Finding; scope: string; signal?: AbortSignal }) {
     try {
       const { object } = await generateObject({
         model: this.model,
@@ -162,6 +174,7 @@ export class MultiProviderDetector implements Detector {
         mode: "json",
         prompt: buildScopeValidatePrompt(args),
         providerOptions: this.providerOptionsArg(),
+        abortSignal: args.signal,
       });
       return asValidationField(object);
     } catch (err) {
@@ -175,7 +188,11 @@ export class MultiProviderDetector implements Detector {
     }
   }
 
-  async scoreFinding(args: { finding: Finding; fileContent: string }): Promise<CvssScore> {
+  async scoreFinding(args: {
+    finding: Finding;
+    fileContent: string;
+    signal?: AbortSignal;
+  }): Promise<CvssScore> {
     try {
       const { object } = await generateObject({
         model: this.model,
@@ -183,6 +200,7 @@ export class MultiProviderDetector implements Detector {
         mode: "json",
         prompt: buildScorePrompt(args),
         providerOptions: this.providerOptionsArg(),
+        abortSignal: args.signal,
       });
       return asCvssScore(object);
     } catch (err) {

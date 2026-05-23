@@ -84,6 +84,14 @@ export async function runRevalidate(
     validateMaxTurns: opts.validateMaxTurns,
   });
 
+  // Same abort-on-fatal-diagnostic pattern as scan — see scan.ts for the
+  // full design note. `handleDetectorError` aborts this controller on a
+  // fatal quota/auth diagnostic; sibling in-flight validator calls then
+  // cancel at the SDK layer instead of churning through a dead credential.
+  // Resume safety: validation only writes verdicts on the happy path of
+  // each task, so cancelled findings retain their prior state.
+  const revalidateAbortController = new AbortController();
+
   // Re-read --scope at revalidate time. Treat a missing path as fatal
   // (same fail-fast contract scan uses).
   let scopeContent: string | undefined;
@@ -165,6 +173,7 @@ export async function runRevalidate(
         const result = await detector.validateFindingByScope({
           finding,
           scope: scopeContent!,
+          signal: revalidateAbortController.signal,
         });
         verdicts[result.verdict] = (verdicts[result.verdict] ?? 0) + 1;
         if (result.verdict === "out-of-scope") {
@@ -182,7 +191,7 @@ export async function runRevalidate(
           console.log(`  ${finding.filePath} (${finding.id}): ${result.verdict} — ${note}`);
         }
       } catch (err) {
-        handleDetectorError(opts, `scope-validate:${finding.id}`, err);
+        handleDetectorError(opts, `scope-validate:${finding.id}`, err, revalidateAbortController);
       }
       return;
     }
@@ -208,6 +217,7 @@ export async function runRevalidate(
         finding,
         fileContent: content,
         scope: scopeContent,
+        signal: revalidateAbortController.signal,
       });
       // Mutate in place — the record points to the same Finding
       // object we got from loadAllFileRecords.
@@ -221,7 +231,7 @@ export async function runRevalidate(
         console.log(`  ${finding.filePath} (${finding.id}): ${result.verdict}`);
       }
     } catch (err) {
-      handleDetectorError(opts, `validate:${finding.id}`, err);
+      handleDetectorError(opts, `validate:${finding.id}`, err, revalidateAbortController);
     }
   });
 

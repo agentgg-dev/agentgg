@@ -141,7 +141,132 @@ class AuthFailure extends ScanDiagnostic {
   }
 }
 
-const DIAGNOSTICS: DiagnosticConstructor[] = [AuthFailure, OllamaContextOverflow];
+/**
+ * Provider quota / billing / credit exhaustion. Distinct from short-term
+ * rate limiting: rate limits resolve in seconds (handled by withTpmRetry
+ * in the Vercel detector); quota exhaustion needs a top-up / quota
+ * increase request and won't fix itself inside a single scan run. Marked
+ * fatal so the scan aborts cleanly and resume picks up where it stopped.
+ *
+ * Recognized shapes (verified against provider docs / community reports —
+ * see packages/cli/src/__tests__/fixtures/quota/ for canonical bodies):
+ *
+ *   Anthropic API key — modern: HTTP 402 with error.type === "billing_error".
+ *   Anthropic API key — legacy: HTTP 400 with error.type === "invalid_request_error"
+ *                              AND body matching /credit balance is too low/i.
+ *                              Same handler still surfaces in the wild via the
+ *                              Claude Agent SDK subprocess stderr.
+ *   OpenAI:               HTTP 429 with error.type or error.code === "insufficient_quota"
+ *                         (status alone is ambiguous — short-term rate limits are also 429).
+ *   AWS Bedrock:          ServiceQuotaExceededException — recognized via the AWS SDK's
+ *                         __type field or the exception's name property.
+ *
+ * Deliberately NOT recognized (handled elsewhere or kept retryable):
+ *   - Anthropic 429 rate_limit_error: retryable (existing withTpmRetry) for
+ *     API-key TPM and OAuth Pro/Max usage-window cases. The OAuth window
+ *     case may need a separate diagnostic later — pending real-error
+ *     capture to confirm the body shape.
+ *   - OpenAI 429 rate_limit_exceeded: retryable.
+ *   - Bedrock ThrottlingException: retryable.
+ */
+class QuotaExhausted extends ScanDiagnostic {
+  override readonly fatal = true;
+
+  private constructor(
+    private readonly providerLabel: string,
+    private readonly remediation: string,
+  ) {
+    super();
+  }
+
+  static from(err: unknown): QuotaExhausted | null {
+    if (!(err instanceof Error)) return null;
+    const e = err as Error & {
+      statusCode?: number;
+      responseBody?: string;
+      cause?: unknown;
+      name?: string;
+      // AWS SDK v3 attaches these on service exceptions.
+      $metadata?: { httpStatusCode?: number };
+      __type?: string;
+    };
+    const cause =
+      typeof e.cause === "object" && e.cause !== null
+        ? (e.cause as {
+            statusCode?: number;
+            responseBody?: string;
+            message?: string;
+            name?: string;
+            $metadata?: { httpStatusCode?: number };
+            __type?: string;
+          })
+        : undefined;
+
+    const status = e.statusCode ?? cause?.statusCode ?? e.$metadata?.httpStatusCode;
+    const haystack = [e.message, e.responseBody, cause?.message, cause?.responseBody]
+      .filter((v): v is string => typeof v === "string" && v.length > 0)
+      .join("\n");
+
+    // Anthropic — modern billing_error path: HTTP 402 OR error.type
+    // explicitly named. Body shape per platform.claude.com errors doc.
+    if (status === 402 || /"type"\s*:\s*"billing_error"/i.test(haystack)) {
+      return new QuotaExhausted(
+        "Anthropic",
+        "Top up at https://console.anthropic.com/settings/billing, then re-run the scan — resume picks up pending files automatically.",
+      );
+    }
+
+    // Anthropic — legacy/secondary shape: 400 invalid_request_error with
+    // "credit balance is too low" body. Still observed in the wild and
+    // surfaces verbatim through the Claude Agent SDK subprocess stderr,
+    // so match on the message string regardless of statusCode.
+    if (/credit balance is too low/i.test(haystack)) {
+      return new QuotaExhausted(
+        "Anthropic",
+        "Top up at https://console.anthropic.com/settings/billing, then re-run the scan — resume picks up pending files automatically.",
+      );
+    }
+
+    // OpenAI — distinguish quota from short-term rate limit by the body
+    // type/code field. Both are HTTP 429, so status alone is ambiguous.
+    // Match the literal token rather than the message string because
+    // OpenAI rewords the user-facing message periodically.
+    if (
+      /"(?:type|code)"\s*:\s*"insufficient_quota"/i.test(haystack) ||
+      /insufficient_quota/i.test(e.name ?? "")
+    ) {
+      return new QuotaExhausted(
+        "OpenAI",
+        "Add credits or upgrade your plan at https://platform.openai.com/account/billing, then re-run the scan — resume picks up pending files automatically.",
+      );
+    }
+
+    // AWS Bedrock — account-level service quota exceeded. AWS SDK v3
+    // surfaces this as a typed exception with `name === "ServiceQuotaExceededException"`
+    // and (sometimes) `__type` set on the wire payload. Distinct from
+    // ThrottlingException (short-term, retryable).
+    const bedrockName = e.name ?? cause?.name ?? "";
+    const bedrockType = e.__type ?? cause?.__type ?? "";
+    if (
+      /ServiceQuotaExceededException/.test(bedrockName) ||
+      /ServiceQuotaExceededException/.test(bedrockType) ||
+      /"__type"\s*:\s*"[^"]*ServiceQuotaExceededException/i.test(haystack)
+    ) {
+      return new QuotaExhausted(
+        "AWS Bedrock",
+        "Request a quota increase via AWS Support (Service Quotas → Amazon Bedrock), then re-run the scan — resume picks up pending files automatically.",
+      );
+    }
+
+    return null;
+  }
+
+  format(): string {
+    return `${this.providerLabel} quota / credits exhausted. ${this.remediation}`;
+  }
+}
+
+const DIAGNOSTICS: DiagnosticConstructor[] = [AuthFailure, QuotaExhausted, OllamaContextOverflow];
 
 export function diagnoseScanError(err: unknown): ScanDiagnostic | null {
   for (const cls of DIAGNOSTICS) {
@@ -151,16 +276,47 @@ export function diagnoseScanError(err: unknown): ScanDiagnostic | null {
   return null;
 }
 
+/** Detect whether an error came from an `AbortController.abort()` we initiated. */
+function isAbortError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  if (err.name === "AbortError") return true;
+  // Vercel AI SDK + node fetch wrap aborts as DOMException("AbortError")
+  // or surface them via the `cause` chain. Walk one level of cause.
+  const cause = (err as Error & { cause?: unknown }).cause;
+  if (
+    cause instanceof Error &&
+    (cause.name === "AbortError" || /aborted|abort_err/i.test(cause.message))
+  ) {
+    return true;
+  }
+  return /\b(aborted|the operation was aborted|request was aborted)\b/i.test(err.message);
+}
+
 /**
  * Single sink for detector-side errors. Recoverable errors get logged
  * inline with optional stack-trace context; fatal errors (e.g. bad
  * credentials) are converted into a `FatalScanError` and thrown so the
  * caller's outer try/catch can abort the run cleanly.
+ *
+ * When `abortController` is passed and the diagnostic is fatal, the
+ * controller is aborted BEFORE the throw — that cancels every in-flight
+ * detector HTTP request so sibling workers exit immediately instead of
+ * waiting for their (doomed) requests to settle. The thrown
+ * `FatalScanError` still propagates up via `runConcurrent` to the outer
+ * scan handler.
+ *
+ * Once `abortController.signal.aborted` is true, subsequent calls into
+ * this sink for the same scan are expected to be `AbortError`s from
+ * sibling in-flight requests (they all share the same dead credential).
+ * Those get a single-line "cancelled" log instead of the full stack +
+ * response body dump — there's nothing actionable about an abort
+ * triggered by an earlier diagnostic.
  */
 export function handleDetectorError(
   opts: { verbose?: boolean },
   label: string,
   err: unknown,
+  abortController?: AbortController,
 ): void {
   const e = err as Error & {
     cause?: unknown;
@@ -169,8 +325,22 @@ export function handleDetectorError(
     url?: string;
   };
 
+  // Already-aborted scan: in-flight siblings throw AbortError once the
+  // controller fires. Surface them as a one-liner — the originating
+  // fatal diagnostic has already been printed by the worker that hit it.
+  if (abortController?.signal.aborted && isAbortError(err)) {
+    if (opts.verbose) {
+      console.error(`    ${label}: cancelled (scan aborted)`);
+    }
+    return;
+  }
+
   const diagnostic = diagnoseScanError(err);
   if (diagnostic?.fatal) {
+    // Cancel in-flight sibling requests before throwing so they unwind
+    // immediately instead of waiting out their HTTP timeout against an
+    // exhausted credential.
+    abortController?.abort(new FatalScanError(diagnostic, label));
     throw new FatalScanError(diagnostic, label);
   }
 

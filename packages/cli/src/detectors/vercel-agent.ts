@@ -43,9 +43,18 @@ function parseRetryAfterMs(message: string): number | null {
  * body). The OpenAI error message includes the exact wait time; we parse and
  * sleep it rather than guessing. Non-TPM errors and non-429s fall through
  * immediately so the Vercel AI SDK's own retry logic can handle them.
+ *
+ * When `signal` is provided and fires during a backoff sleep, the sleep
+ * is interrupted with an AbortError so a quota-cancelled scan doesn't
+ * have to wait out a 60s TPM window before exiting.
  */
-async function withTpmRetry<T>(fn: () => Promise<T>, maxAttempts = 4): Promise<T> {
+async function withTpmRetry<T>(
+  fn: () => Promise<T>,
+  signal?: AbortSignal,
+  maxAttempts = 4,
+): Promise<T> {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (signal?.aborted) throw signal.reason ?? new Error("aborted");
     try {
       return await fn();
     } catch (err) {
@@ -53,10 +62,34 @@ async function withTpmRetry<T>(fn: () => Promise<T>, maxAttempts = 4): Promise<T
       const isTpm = /tokens per min/i.test(msg) || /tpm/i.test(msg);
       if (!isTpm || attempt >= maxAttempts) throw err;
       const waitMs = parseRetryAfterMs(msg) ?? 60_000;
-      await new Promise<void>((r) => setTimeout(r, waitMs));
+      await abortableSleep(waitMs, signal);
     }
   }
   throw new Error("withTpmRetry: exhausted attempts");
+}
+
+/** setTimeout that resolves early when `signal` aborts. Rejects with the
+ *  signal's reason on abort so the caller's try/catch sees an AbortError
+ *  rather than a silent early-return from a still-pending backoff. */
+function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? new Error("aborted"));
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      // `?.reason` is safe — this listener only fires when `signal`
+      // exists (we gate the addEventListener below on `signal?.`),
+      // but TS can't prove that across the closure boundary.
+      reject(signal?.reason ?? new Error("aborted"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 type ProviderOptionsArg = {
@@ -121,17 +154,25 @@ export class VercelAgentDetector implements Detector {
     this.verbose = opts.verbose ?? false;
   }
 
-  async detectFile(args: { agent: Agent; filePath: string; content: string }): Promise<Finding[]> {
-    const { agent, filePath, content } = args;
+  async detectFile(args: {
+    agent: Agent;
+    filePath: string;
+    content: string;
+    signal?: AbortSignal;
+  }): Promise<Finding[]> {
+    const { agent, filePath, content, signal } = args;
     try {
-      const { object } = await withTpmRetry(() =>
-        generateObject({
-          model: this.model,
-          schema: DetectionResult,
-          mode: "json",
-          prompt: buildDetectPrompt(agent, filePath, content),
-          providerOptions: this.providerOptionsArg(),
-        }),
+      const { object } = await withTpmRetry(
+        () =>
+          generateObject({
+            model: this.model,
+            schema: DetectionResult,
+            mode: "json",
+            prompt: buildDetectPrompt(agent, filePath, content),
+            providerOptions: this.providerOptionsArg(),
+            abortSignal: signal,
+          }),
+        signal,
       );
       // In file mode the caller provides the real path — ignore whatever
       // the model put in `filePath` (models often emit placeholders here).
@@ -142,7 +183,7 @@ export class VercelAgentDetector implements Detector {
     }
   }
 
-  async hunt(args: HuntArgs): Promise<Finding[]> {
+  async hunt(args: HuntArgs & { signal?: AbortSignal }): Promise<Finding[]> {
     const { agent, rootDir, excludePatterns, includePatterns, maxFileSizeKb, maxTurns, diff } =
       args;
     const basePrompt = buildHuntPrompt(agent, {
@@ -154,16 +195,19 @@ export class VercelAgentDetector implements Detector {
     const prompt = `${basePrompt}\n\n${jsonOutputInstruction(false)}`;
 
     try {
-      const { text } = await withTpmRetry(() =>
-        generateText({
-          model: this.model,
-          prompt,
-          tools: buildTools(resolve(rootDir), maxFileSizeKb, this.verbose),
-          maxSteps: maxTurns + 1,
-          providerOptions: this.providerOptionsArg(),
-        }),
+      const { text } = await withTpmRetry(
+        () =>
+          generateText({
+            model: this.model,
+            prompt,
+            tools: buildTools(resolve(rootDir), maxFileSizeKb, this.verbose),
+            maxSteps: maxTurns + 1,
+            providerOptions: this.providerOptionsArg(),
+            abortSignal: args.signal,
+          }),
+        args.signal,
       );
-      const result = await this.parseOrReformat(text, false);
+      const result = await this.parseOrReformat(text, false, args.signal);
       return result.findings.map((f) => hydrateFinding(f, agent, f.filePath ?? "(unknown)"));
     } catch (err) {
       debugLog("VercelAgentDetector.hunt", err);
@@ -171,24 +215,27 @@ export class VercelAgentDetector implements Detector {
     }
   }
 
-  async investigate(args: InvestigateArgs): Promise<Finding[]> {
+  async investigate(args: InvestigateArgs & { signal?: AbortSignal }): Promise<Finding[]> {
     const { agents, rootDir, candidates, maxTurns } = args;
     const basePrompt = buildInvestigatePrompt(agents, candidates);
     const multi = agents.length > 1;
     const prompt = `${basePrompt}\n\n${jsonOutputInstruction(multi)}`;
 
     try {
-      const { text } = await withTpmRetry(() =>
-        generateText({
-          model: this.model,
-          prompt,
-          tools: buildTools(resolve(rootDir), undefined, this.verbose),
-          maxSteps: maxTurns + 1,
-          providerOptions: this.providerOptionsArg(),
-        }),
+      const { text } = await withTpmRetry(
+        () =>
+          generateText({
+            model: this.model,
+            prompt,
+            tools: buildTools(resolve(rootDir), undefined, this.verbose),
+            maxSteps: maxTurns + 1,
+            providerOptions: this.providerOptionsArg(),
+            abortSignal: args.signal,
+          }),
+        args.signal,
       );
 
-      const result = await this.parseOrReformat(text, multi);
+      const result = await this.parseOrReformat(text, multi, args.signal);
 
       const agentsBySlug = new Map(agents.map((a) => [a.slug, a]));
       const fallbackFilePath = candidates[0]?.filePath ?? "(unknown)";
@@ -209,16 +256,24 @@ export class VercelAgentDetector implements Detector {
     }
   }
 
-  async validateFinding(args: { finding: Finding; fileContent: string; scope?: string }) {
+  async validateFinding(args: {
+    finding: Finding;
+    fileContent: string;
+    scope?: string;
+    signal?: AbortSignal;
+  }) {
     try {
-      const { object } = await withTpmRetry(() =>
-        generateObject({
-          model: this.model,
-          schema: LlmValidation,
-          mode: "json",
-          prompt: buildValidatePrompt(args),
-          providerOptions: this.providerOptionsArg(),
-        }),
+      const { object } = await withTpmRetry(
+        () =>
+          generateObject({
+            model: this.model,
+            schema: LlmValidation,
+            mode: "json",
+            prompt: buildValidatePrompt(args),
+            providerOptions: this.providerOptionsArg(),
+            abortSignal: args.signal,
+          }),
+        args.signal,
       );
       return asValidationField(object);
     } catch (err) {
@@ -227,16 +282,19 @@ export class VercelAgentDetector implements Detector {
     }
   }
 
-  async validateFindingByScope(args: { finding: Finding; scope: string }) {
+  async validateFindingByScope(args: { finding: Finding; scope: string; signal?: AbortSignal }) {
     try {
-      const { object } = await withTpmRetry(() =>
-        generateObject({
-          model: this.model,
-          schema: LlmValidation,
-          mode: "json",
-          prompt: buildScopeValidatePrompt(args),
-          providerOptions: this.providerOptionsArg(),
-        }),
+      const { object } = await withTpmRetry(
+        () =>
+          generateObject({
+            model: this.model,
+            schema: LlmValidation,
+            mode: "json",
+            prompt: buildScopeValidatePrompt(args),
+            providerOptions: this.providerOptionsArg(),
+            abortSignal: args.signal,
+          }),
+        args.signal,
       );
       return asValidationField(object);
     } catch (err) {
@@ -245,16 +303,23 @@ export class VercelAgentDetector implements Detector {
     }
   }
 
-  async scoreFinding(args: { finding: Finding; fileContent: string }): Promise<CvssScore> {
+  async scoreFinding(args: {
+    finding: Finding;
+    fileContent: string;
+    signal?: AbortSignal;
+  }): Promise<CvssScore> {
     try {
-      const { object } = await withTpmRetry(() =>
-        generateObject({
-          model: this.model,
-          schema: LlmScore,
-          mode: "json",
-          prompt: buildScorePrompt(args),
-          providerOptions: this.providerOptionsArg(),
-        }),
+      const { object } = await withTpmRetry(
+        () =>
+          generateObject({
+            model: this.model,
+            schema: LlmScore,
+            mode: "json",
+            prompt: buildScorePrompt(args),
+            providerOptions: this.providerOptionsArg(),
+            abortSignal: args.signal,
+          }),
+        args.signal,
       );
       return asCvssScore(object);
     } catch (err) {
@@ -265,8 +330,13 @@ export class VercelAgentDetector implements Detector {
 
   /** Parse findings from the tool-loop's final text. If extraction fails and a
    *  structuredModel is configured, re-asks that model (with JSON mode) to
-   *  reformat the raw analysis into the required schema. */
-  private async parseOrReformat(text: string, multiAgent: boolean): Promise<DetectionResultType> {
+   *  reformat the raw analysis into the required schema. The reformat call
+   *  is also a real LLM request, so it carries the scan's abort signal too. */
+  private async parseOrReformat(
+    text: string,
+    multiAgent: boolean,
+    signal?: AbortSignal,
+  ): Promise<DetectionResultType> {
     try {
       return DetectionResult.parse(extractJSON(text));
     } catch (extractErr) {
@@ -276,6 +346,7 @@ export class VercelAgentDetector implements Detector {
         schema: DetectionResult,
         mode: "json",
         prompt: `The following is a completed security analysis. Extract all confirmed findings into structured JSON.\n\n${text}\n\n${jsonOutputInstruction(multiAgent)}`,
+        abortSignal: signal,
       });
       return object;
     }

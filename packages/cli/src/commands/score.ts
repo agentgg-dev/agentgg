@@ -76,6 +76,10 @@ export async function runScore(
     verbose: opts.verbose,
   });
 
+  // See scan.ts for the design note. On a fatal quota / auth diagnostic,
+  // sibling in-flight scoring calls cancel at the SDK layer.
+  const scoreAbortController = new AbortController();
+
   const records = loadAllFileRecords(outputDir);
   if (records.length === 0) {
     console.log(`No FileRecords in ${outputDir}/state/files/.`);
@@ -155,6 +159,7 @@ export async function runScore(
       const cvss = await detector.scoreFinding({
         finding,
         fileContent: content,
+        signal: scoreAbortController.signal,
       });
       // Mutate in place — the record holds the same Finding object.
       finding.cvss = cvss;
@@ -168,7 +173,7 @@ export async function runScore(
         );
       }
     } catch (err) {
-      handleDetectorError(opts, `score:${finding.id}`, err);
+      handleDetectorError(opts, `score:${finding.id}`, err, scoreAbortController);
     }
   });
 

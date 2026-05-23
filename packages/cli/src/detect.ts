@@ -80,12 +80,29 @@ export type DetectionResult = z.infer<typeof DetectionResult>;
  *     The agent uses Read/Glob/Grep to find its own targets. Used by
  *     `mode: "hunt"` agents.
  */
+/**
+ * Optional abort signal carried by every Detector method. When the
+ * orchestrator decides the scan should bail (e.g. a fatal quota
+ * diagnostic fired in a sibling worker), it aborts the controller and
+ * every in-flight detector HTTP request is cancelled at the SDK layer.
+ *
+ * Detectors translate `signal` to their underlying SDK's preferred
+ * shape: Vercel AI SDK consumes `abortSignal`; Claude Agent SDK wants
+ * an `AbortController` (we wrap via a linked controller). Detectors
+ * MUST NOT swallow `AbortError` — let it propagate so the per-(file,
+ * agent) catch in scan.ts leaves the FileRecord untouched, preserving
+ * resume.
+ */
+export type AbortableArgs = { signal?: AbortSignal };
+
 export interface Detector {
   /** Short label for logs: "anthropic-api", "anthropic-oauth", "openai", "ollama". */
   readonly name: string;
 
   /** Per-file review. The caller picks files; the agent reads what it's given. */
-  detectFile(args: { agent: Agent; filePath: string; content: string }): Promise<Finding[]>;
+  detectFile(
+    args: { agent: Agent; filePath: string; content: string } & AbortableArgs,
+  ): Promise<Finding[]>;
 
   /**
    * Whole-repo hunt with tool access. The agent picks its own files via
@@ -93,7 +110,7 @@ export interface Detector {
    * Backends that can't run hunt mode (currently OpenAI / Ollama) throw
    * a clear error from this method.
    */
-  hunt(args: HuntArgs): Promise<Finding[]>;
+  hunt(args: HuntArgs & AbortableArgs): Promise<Finding[]>;
 
   /**
    * Walker-mode per-file investigation. The walker has already
@@ -103,7 +120,7 @@ export interface Detector {
    * callers. Same enforcement-by-SDK-schema as `detectFile` and
    * `hunt`. Backends without tool support throw.
    */
-  investigate(args: InvestigateArgs): Promise<Finding[]>;
+  investigate(args: InvestigateArgs & AbortableArgs): Promise<Finding[]>;
 
   /**
    * Validation phase — second-pass classifier that re-reads the source
@@ -111,12 +128,14 @@ export interface Detector {
    * out-of-scope / uncertain. Same backend as detection by default;
    * the future `--validate-model` flag can swap to a stronger model.
    */
-  validateFinding(args: {
-    finding: Finding;
-    fileContent: string;
-    /** Optional scope document; threaded into the validator prompt verbatim. */
-    scope?: string;
-  }): Promise<{
+  validateFinding(
+    args: {
+      finding: Finding;
+      fileContent: string;
+      /** Optional scope document; threaded into the validator prompt verbatim. */
+      scope?: string;
+    } & AbortableArgs,
+  ): Promise<{
     verdict: "confirmed" | "false-positive" | "out-of-scope" | "uncertain";
     reasoning: string;
   }>;
@@ -129,7 +148,7 @@ export interface Detector {
    * `revalidate --scope-validate` as a cheap pre-filter to dismiss
    * scope-disqualified findings before paying the full validator cost.
    */
-  validateFindingByScope(args: { finding: Finding; scope: string }): Promise<{
+  validateFindingByScope(args: { finding: Finding; scope: string } & AbortableArgs): Promise<{
     verdict: "confirmed" | "false-positive" | "out-of-scope" | "uncertain";
     reasoning: string;
   }>;
@@ -142,7 +161,7 @@ export interface Detector {
    * (finding + file content), so the model can ground its metric
    * choices in the actual code rather than the detector's prose.
    */
-  scoreFinding(args: { finding: Finding; fileContent: string }): Promise<CvssScore>;
+  scoreFinding(args: { finding: Finding; fileContent: string } & AbortableArgs): Promise<CvssScore>;
 }
 
 export interface HuntArgs {
