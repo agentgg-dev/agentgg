@@ -6,25 +6,20 @@ name: Release
 #   git tag v0.1.0
 #   git push origin v0.1.0
 #
-# Authentication is a granular npm access token stored as the NPM_TOKEN
-# repo secret (Settings → Secrets and variables → Actions). Provenance
-# attestations are still emitted — they use the GitHub Actions OIDC
-# token (id-token: write) to sign the attestation, but the publish
-# itself is token-authenticated.
+# Authentication uses npm trusted publishing (OIDC). No NPM_TOKEN secret
+# is required — npm 11.5.1+ exchanges the GitHub Actions OIDC token
+# (id-token: write) for a short-lived publish credential, and the same
+# token signs the SLSA provenance attestation.
 #
-# Setup (one-time):
-#   1. npmjs.com/settings/<user>/tokens → Generate New Token → Granular
-#      Access Token. Scope: package agentgg, permission "Read and write".
-#   2. github.com/agentgg-dev/agentgg/settings/secrets/actions → New
-#      repository secret → name NPM_TOKEN, value <the token>.
-#
-# OIDC trusted publishing is the longer-term path but requires:
-#   - pnpm to ship OIDC support (pnpm/pnpm#9812, still open in 2026), or
-#     a switch away from `pnpm publish` in this job (already done — we
-#     use `npm publish`), AND
-#   - npm CLI >= 11.5.1 on the runner, AND
-#   - a trusted publisher registered on npmjs.com.
-# Revisit once those are stable.
+# Setup (one-time, already done):
+#   1. npmjs.com → package `agentgg` → Settings → Publishing access →
+#      add a Trusted Publisher with:
+#        Publisher: GitHub Actions
+#        Organization: agentgg-dev
+#        Repository:   agentgg
+#        Workflow:     .github/workflows/release.yml
+#        Environment:  (leave blank)
+#   2. Remove the legacy NPM_TOKEN secret from the repo (no longer used).
 
 on:
   push:
@@ -47,9 +42,11 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          # Writes ~/.npmrc with `//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}`
-          # so `npm publish` picks up the NPM_TOKEN secret.
           registry-url: 'https://registry.npmjs.org'
+
+      # Node 22 ships with npm 10.x; trusted publishing (OIDC) needs >=11.5.1.
+      - name: Upgrade npm to a version that supports trusted publishing
+        run: npm install -g npm@latest
 
       - run: pnpm install --frozen-lockfile
 
@@ -74,11 +71,11 @@ jobs:
         run: pnpm --filter agentgg build:bundle
 
       # pnpm publish does not yet support npm trusted publishers / OIDC
-      # (pnpm/pnpm#9812). Use `npm publish` so the token-based auth
-      # works cleanly and --provenance produces a verifiable SLSA
-      # attestation linking the tarball to this workflow run.
-      - name: Publish to npm with provenance
+      # (pnpm/pnpm#9812). Use `npm publish` directly: with no token
+      # configured and `id-token: write` granted above, npm 11.5.1+
+      # automatically does an OIDC token exchange against the trusted
+      # publisher registered on npmjs.com, and --provenance produces a
+      # verifiable SLSA attestation linking the tarball to this run.
+      - name: Publish to npm via trusted publisher (OIDC) with provenance
         working-directory: packages/cli
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
