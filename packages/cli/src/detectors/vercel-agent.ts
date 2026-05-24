@@ -14,6 +14,7 @@ import {
   type HuntArgs,
   hydrateFinding,
   type InvestigateArgs,
+  type RuleHitsForFile,
 } from "../detect.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import {
@@ -158,9 +159,10 @@ export class VercelAgentDetector implements Detector {
     agent: Agent;
     filePath: string;
     content: string;
+    ruleHits?: ReadonlyArray<RuleHitsForFile>;
     signal?: AbortSignal;
   }): Promise<Finding[]> {
-    const { agent, filePath, content, signal } = args;
+    const { agent, filePath, content, ruleHits, signal } = args;
     try {
       const { object } = await withTpmRetry(
         () =>
@@ -168,7 +170,7 @@ export class VercelAgentDetector implements Detector {
             model: this.model,
             schema: DetectionResult,
             mode: "json",
-            prompt: buildDetectPrompt(agent, filePath, content),
+            prompt: buildDetectPrompt(agent, filePath, content, ruleHits),
             providerOptions: this.providerOptionsArg(),
             abortSignal: signal,
           }),
@@ -184,13 +186,22 @@ export class VercelAgentDetector implements Detector {
   }
 
   async hunt(args: HuntArgs & { signal?: AbortSignal }): Promise<Finding[]> {
-    const { agent, rootDir, excludePatterns, includePatterns, maxFileSizeKb, maxTurns, diff } =
-      args;
+    const {
+      agent,
+      rootDir,
+      excludePatterns,
+      includePatterns,
+      maxFileSizeKb,
+      maxTurns,
+      diff,
+      ruleHits,
+    } = args;
     const basePrompt = buildHuntPrompt(agent, {
       excludePatterns,
       includePatterns,
       maxFileSizeKb,
       diff,
+      ruleHits,
     });
     const prompt = `${basePrompt}\n\n${jsonOutputInstruction(false)}`;
 

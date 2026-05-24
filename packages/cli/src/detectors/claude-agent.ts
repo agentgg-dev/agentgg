@@ -11,6 +11,7 @@ import {
   type HuntArgs,
   hydrateFinding,
   type InvestigateArgs,
+  type RuleHitsForFile,
 } from "../detect.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import {
@@ -101,10 +102,11 @@ export class ClaudeAgentDetector implements Detector {
     agent: Agent;
     filePath: string;
     content: string;
+    ruleHits?: ReadonlyArray<RuleHitsForFile>;
     signal?: AbortSignal;
   }): Promise<Finding[]> {
-    const { agent, filePath, content, signal } = args;
-    const prompt = buildDetectPrompt(agent, filePath, content);
+    const { agent, filePath, content, ruleHits, signal } = args;
+    const prompt = buildDetectPrompt(agent, filePath, content, ruleHits);
     // Single-turn: no tools needed — the file content is already in the
     // prompt. `tools: []` removes all built-in tools from the model's
     // context, so it can't burn turns on speculative tool calls.
@@ -120,13 +122,22 @@ export class ClaudeAgentDetector implements Detector {
   }
 
   async hunt(args: HuntArgs & { signal?: AbortSignal }): Promise<Finding[]> {
-    const { agent, rootDir, excludePatterns, includePatterns, maxFileSizeKb, maxTurns, diff } =
-      args;
+    const {
+      agent,
+      rootDir,
+      excludePatterns,
+      includePatterns,
+      maxFileSizeKb,
+      maxTurns,
+      diff,
+      ruleHits,
+    } = args;
     const prompt = buildHuntPrompt(agent, {
       excludePatterns,
       includePatterns,
       maxFileSizeKb,
       diff,
+      ruleHits,
     });
 
     // Single agentic run with SDK-enforced structured output. The
@@ -324,6 +335,7 @@ export class ClaudeAgentDetector implements Detector {
         if (msg.type === "result" && msg.subtype === "success") {
           structured = (msg as { structured_output?: unknown }).structured_output;
           resultText = String((msg as { result?: unknown }).result ?? "");
+          if (this.verbose) this.logUsage(msg);
         }
       }
     } catch (err) {
@@ -341,6 +353,34 @@ export class ClaudeAgentDetector implements Detector {
       );
     }
     return opts.schema.parse(structured) as z.infer<T>;
+  }
+
+  /**
+   * Render the SDK's per-call usage block. The result message carries
+   * `usage` with cache hit/miss token counts — surfacing it lets the
+   * operator confirm the SDK's automatic prompt caching is firing.
+   * A cache_read_input_tokens > 0 means the prefix was served from the
+   * 5-min ephemeral cache at ~0.1× the normal input rate.
+   */
+  private logUsage(msg: Record<string, unknown>): void {
+    const usage = msg.usage as
+      | {
+          input_tokens?: number;
+          output_tokens?: number;
+          cache_creation_input_tokens?: number;
+          cache_read_input_tokens?: number;
+        }
+      | undefined;
+    if (!usage) return;
+    const inTok = usage.input_tokens ?? 0;
+    const outTok = usage.output_tokens ?? 0;
+    const cacheWrite = usage.cache_creation_input_tokens ?? 0;
+    const cacheRead = usage.cache_read_input_tokens ?? 0;
+    const cost = msg.total_cost_usd as number | undefined;
+    const costStr = typeof cost === "number" ? ` cost=$${cost.toFixed(4)}` : "";
+    console.log(
+      `    [usage] in=${inTok} out=${outTok} cache_read=${cacheRead} cache_write=${cacheWrite}${costStr}`,
+    );
   }
 
   /**

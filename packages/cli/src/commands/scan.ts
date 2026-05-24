@@ -4,6 +4,7 @@ import type { Agent, AgentRun, FileRecord, Finding, Provider } from "@agentgg/co
 import {
   completeRun,
   createRunMeta,
+  fingerprint,
   getOfficialAgentsDir,
   hashContent,
   loadAllFileRecords,
@@ -18,10 +19,11 @@ import type { Command } from "commander";
 import { loadAllAgents } from "../agent-catalog.js";
 import { installOfficialAgents } from "../agents-install.js";
 import { runConcurrent } from "../concurrent.js";
+import type { RuleHitsForFile } from "../detect.js";
 import { FatalScanError, handleDetectorError } from "../diagnostics.js";
 import { listChangedFiles, loadCommitPatch } from "../diff.js";
 import { loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
-import { evaluatePreFilter } from "../pre-filter.js";
+import { evaluatePreFilter, type PreFilterHit } from "../pre-filter.js";
 import { buildCredentialsFromOpts, validateProviderFlags } from "../providers/index.js";
 import { findingFilenameSlug, writeMarkdownReport } from "../reporters/md.js";
 import { resolveTemplates } from "../template.js";
@@ -73,6 +75,16 @@ interface ScanOpts {
   thinking?: "off" | "adaptive" | "enabled";
   /** Keep false-positive findings in the markdown report instead of filtering them out. */
   includeFalsePositives?: boolean;
+  /**
+   * Tech gate. Defaults to true. Disable with `--no-gate` to force
+   * every selected template to run regardless of `tech` declarations
+   * — useful for debugging a new agent on a repo where the tech
+   * detector doesn't yet recognize the stack.
+   *
+   * Commander stores `--no-gate` as `gate: false` (not `noGate`), so
+   * the field name here intentionally mirrors the flag root.
+   */
+  gate?: boolean;
   /**
    * Run the CVSS 3.1 scoring phase after detection (and after validation
    * when --validate is set). The scoring agent picks the 8 base metrics
@@ -228,7 +240,7 @@ export async function runScan(
     // full vulnerability library.
     const templateInputs = opts.template ?? [];
     const baseDir = join(officialAgentsDir, "base");
-    const selectedAgents: Agent[] =
+    let selectedAgents: Agent[] =
       templateInputs.length > 0
         ? resolveTemplates(templateInputs, catalog.agents, officialAgentsDir)
         : existsSync(baseDir)
@@ -237,6 +249,64 @@ export async function runScan(
     if (selectedAgents.length === 0) {
       throw new Error("No agents selected — nothing to scan.");
     }
+
+    // -------- tech gate --------
+    // Fingerprint the project once, then drop templates whose `tech`
+    // doesn't match any detected tag. `--no-gate` bypasses the filter for
+    // every selected template (debugging escape hatch). Templates with
+    // no `tech` declared always run — they're framework-agnostic.
+    //
+    // Done before mode dispatch so gated-out agents never enter the
+    // hunt/walker/file loops below. Logged as a single summary line
+    // (verbose lists the skipped slugs) so users can see what was dropped
+    // without scrolling through per-agent noise.
+    const project = fingerprint(root);
+    const gateEnabled = opts.gate !== false;
+    const detectedTagSet = new Set(project.tags);
+    const gatedAgents: Agent[] = [];
+    const skippedByGate: { slug: string; required: string[] }[] = [];
+    if (gateEnabled) {
+      for (const a of selectedAgents) {
+        const required = a.tech ?? [];
+        if (required.length === 0 || required.some((t) => detectedTagSet.has(t))) {
+          gatedAgents.push(a);
+        } else {
+          skippedByGate.push({ slug: a.slug, required });
+        }
+      }
+    } else {
+      gatedAgents.push(...selectedAgents);
+    }
+
+    console.log(
+      `Fingerprint: ${project.tags.length > 0 ? project.tags.join(", ") : "(no known tech detected)"}`,
+    );
+    if (skippedByGate.length > 0) {
+      console.log(
+        `Gated out: ${skippedByGate.length} template(s) (tech not present; pass --no-gate to force)`,
+      );
+      if (opts.verbose) {
+        for (const s of skippedByGate) {
+          console.log(`  - ${s.slug} (tech: ${s.required.join(", ")})`);
+        }
+      }
+    } else if (!gateEnabled && selectedAgents.some((a) => (a.tech ?? []).length > 0)) {
+      console.log("Gate: disabled (--no-gate) — running every selected template");
+    }
+
+    if (gatedAgents.length === 0) {
+      throw new Error(
+        "No agents survived the tech gate — every selected template requires tech not present in this repo. " +
+          "Pass --no-gate to force, or `agentgg agents list` to find agents that match this stack.",
+      );
+    }
+
+    // Re-bind so downstream code (hunt/walker/file split, summary printing)
+    // works against the gated set. Reassign rather than mutating because
+    // when `templateInputs.length === 0` and no base dir exists,
+    // `selectedAgents` aliases `catalog.agents` — mutating would corrupt
+    // the loader's catalog.
+    selectedAgents = gatedAgents;
 
     // `--diff <commit>` scopes the scan to a single commit's own changes
     // (parent → commit), independent of working tree state.
@@ -376,6 +446,69 @@ export async function runScan(
     const fileAgents = selectedAgents.filter((a) => a.mode === "file");
     const huntAgents = selectedAgents.filter((a) => a.mode === "hunt");
     const walkerAgents = selectedAgents.filter((a) => a.mode === "walker");
+    const ruleAgents = selectedAgents.filter((a) => a.mode === "rule");
+
+    // -------- rule templates (run BEFORE hunt/walker/file) --------
+    // Rules are regex only — no LLM. They scan files matching their
+    // `filePatterns` with `preFilter` regexes and produce candidate
+    // hits attached to the matching files. Hits are seeded into the
+    // walker pool below so any walker agent whose `filePatterns`
+    // overlap a flagged file picks them up automatically, alongside
+    // that agent's own preFilter hits. Same `PreFilterHit` shape;
+    // existing batched-investigation prompt renders them with the
+    // rule slug as the source key.
+    //
+    // Cost: pure regex over `filePatterns`-matching files. ~ms per
+    // file; no LLM calls. Downstream effect is more candidates entering
+    // the walker pool — that adds LLM calls, but only where a consuming
+    // walker agent's file patterns overlap.
+    const ruleHitsByFile = new Map<string, Map<string, PreFilterHit[]>>();
+    if (ruleAgents.length > 0) {
+      const ruleWork = walkForAgents(root, ruleAgents, walkCfg);
+      let totalRuleHits = 0;
+      for (const { agent: rule, files } of ruleWork) {
+        const scopedFiles = diffFiles ? files.filter((f) => diffFiles.has(f)) : files;
+        for (const relPath of scopedFiles) {
+          let content: string;
+          try {
+            content = readFileSync(resolve(root, relPath), "utf8");
+          } catch {
+            continue;
+          }
+          const hits = evaluatePreFilter(content, rule.preFilter ?? []);
+          // `evaluatePreFilter` returns a synthetic single-line hit
+          // when preFilter is empty. For rule mode that would mean
+          // "every file you matched is a hit," which is rarely useful
+          // and almost never what the author intended — skip rules
+          // without explicit patterns.
+          if ((rule.preFilter ?? []).length === 0 || hits.length === 0) continue;
+          let byRule = ruleHitsByFile.get(relPath);
+          if (!byRule) {
+            byRule = new Map();
+            ruleHitsByFile.set(relPath, byRule);
+          }
+          byRule.set(rule.slug, hits);
+          totalRuleHits += hits.length;
+        }
+      }
+      console.log(
+        `  rules: ${ruleAgents.length} template(s) produced ${totalRuleHits} hit(s) across ${ruleHitsByFile.size} file(s)`,
+      );
+    }
+
+    // Pre-compute the detector-shaped rule-hits map for hunt mode. Hunt
+    // calls receive the whole repo's rule hits as a scanner-context block
+    // in the prompt. File mode reuses the inner Map directly per file
+    // (converted inline at the dispatch call site below).
+    const huntRuleHits: ReadonlyMap<string, RuleHitsForFile[]> | undefined =
+      ruleHitsByFile.size > 0
+        ? new Map(
+            Array.from(ruleHitsByFile.entries()).map(([filePath, byRule]) => [
+              filePath,
+              Array.from(byRule.entries()).map(([ruleSlug, hits]) => ({ ruleSlug, hits })),
+            ]),
+          )
+        : undefined;
 
     // -------- hunt-mode agents (run FIRST) --------
     // Hunt agents are the heavier pass — give them a head start so the
@@ -447,6 +580,7 @@ export async function runScan(
             opts.diff && diffPatch !== undefined
               ? { commit: opts.diff, patch: diffPatch }
               : undefined,
+          ruleHits: huntRuleHits,
           signal: scanAbortController.signal,
         });
         // Drop findings where the model invented a path that doesn't exist on
@@ -591,6 +725,36 @@ export async function runScan(
           }
           entry.hitsByAgent.set(agent.slug, hits);
           touchedFiles.add(relPath);
+        }
+      }
+
+      // Seed rule hits into the pool. For every file already in the pool
+      // (i.e. matching at least one walker agent's filePatterns), attach
+      // any rule's hits under the rule's slug as another entry in
+      // `hitsByAgent`. The investigation prompt renders these the same
+      // way it renders walker-agent preFilter hits — the rule's slug
+      // and labels appear in context, but no LLM session runs for the
+      // rule itself.
+      //
+      // Files where a rule fired but no walker agent's filePatterns
+      // overlap are NOT pulled into the pool — that would require
+      // assigning the file to a specific agent's investigation, which
+      // we have no signal for in MVP.
+      if (ruleHitsByFile.size > 0) {
+        let ruleSeededFiles = 0;
+        for (const [relPath, byRule] of ruleHitsByFile) {
+          const entry = pool.get(relPath);
+          if (!entry) continue;
+          for (const [ruleSlug, hits] of byRule) {
+            entry.hitsByAgent.set(ruleSlug, hits);
+          }
+          ruleSeededFiles++;
+          touchedFiles.add(relPath);
+        }
+        if (opts.verbose && ruleSeededFiles > 0) {
+          console.log(
+            `    rules seeded ${ruleSeededFiles} file(s) into the walker pool with regex hits`,
+          );
         }
       }
 
@@ -767,10 +931,21 @@ export async function runScan(
             }
           }
           try {
+            // Per-file rule hits: convert this file's inner map to the
+            // detector-shaped array. Cheap (one Map.get + a small spread);
+            // undefined when no rule fired on this file.
+            const fileRuleHitsMap = ruleHitsByFile.get(relPath);
+            const fileRuleHits: RuleHitsForFile[] | undefined = fileRuleHitsMap
+              ? Array.from(fileRuleHitsMap.entries()).map(([ruleSlug, hits]) => ({
+                  ruleSlug,
+                  hits,
+                }))
+              : undefined;
             const fileFindings = await detector.detectFile({
               agent,
               filePath: relPath,
               content,
+              ruleHits: fileRuleHits,
               signal: scanAbortController.signal,
             });
             findings.push(...fileFindings);
@@ -1239,6 +1414,10 @@ export function registerScanCommand(program: Command): void {
     .option(
       "--include-false-positives",
       "Write per-finding markdown reports for findings the validator marked false-positive (default: skip them). FP findings always stay in state/files/* regardless.",
+    )
+    .option(
+      "--no-gate",
+      "Disable the tech gate. By default, agents/rules declaring `tech` skip on repos that don't match (e.g. PHP agents on a Go repo). Pass this to force every selected template to run regardless — useful when the tech detector doesn't yet recognize your stack, or when debugging a new agent.",
     )
     .option(
       "--score",

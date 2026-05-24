@@ -6,11 +6,11 @@
 
 **Agentic SAST. White box. CI ready.**
 
-`agentgg` is an agentic SAST scanner. Its agents reason about your code. They follow imports, check the call graph, and confirm findings before flagging, instead of pattern-matching the way traditional SAST does. 100+ official agents cover security vulnerabilities, coding anti-patterns, and codebase recon; the catalog auto-downloads on first scan from [agentgg-dev/agentgg-agents](https://github.com/agentgg-dev/agentgg-agents). Run on your full repo or on a git diff for PR reviews. Each agent runs in one of three modes: **file**, **walker**, or **hunt**. Interrupted scans resume on re-run: only new or changed files hit the LLM again.
+`agentgg` is an agentic SAST scanner. Its agents reason about your code. They follow imports, check the call graph, and confirm findings before flagging, instead of pattern-matching the way traditional SAST does. 200+ official agents and rule templates cover security vulnerabilities, coding anti-patterns, and codebase recon; the catalog auto-downloads on first scan from [agentgg-dev/agentgg-agents](https://github.com/agentgg-dev/agentgg-agents). Run on your full repo or on a git diff for PR reviews. Each agent runs in one of four modes: **file**, **walker**, **hunt** (all LLM-driven), or **rule** (regex only, no LLM cost). agentgg fingerprints the project on each scan and skips agents whose tech declaration doesn't match the stack. PHP agents never run on Go-only repos. Interrupted scans resume on re-run: only new or changed files hit the LLM again.
 
 **[agentgg.dev](https://agentgg.dev)** · [Agents catalog](https://github.com/agentgg-dev/agentgg-agents) · [Report a bug](https://github.com/agentgg-dev/agentgg/issues/new/choose) · [Report a security issue](https://github.com/agentgg-dev/agentgg/security)
 
-> **agentgg is in beta.** Things will move, edges will be rough — bug reports and feedback are very welcome. [Open an issue](https://github.com/agentgg-dev/agentgg/issues/new/choose).
+> **agentgg is in beta.** Things will move and edges will be rough. Bug reports and feedback are very welcome. [Open an issue](https://github.com/agentgg-dev/agentgg/issues/new/choose).
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/agentgg-dev/agentgg/main/static/agentgg-view.png" alt="agentgg viewer UI showing scan findings" width="780" />
@@ -21,7 +21,8 @@
 - [Install](#install)
 - [Quick start](#quick-start)
 - [How agents work](#how-agents-work)
-- [Three execution modes](#three-execution-modes)
+- [Four execution modes](#four-execution-modes)
+- [Tech gating](#tech-gating)
 - [Providers](#providers)
 - [Examples](#examples)
 - [GitHub Actions](#github-actions)
@@ -101,9 +102,13 @@ The same schema applies whether the agent lives in:
 - **User-installed** (`~/.agentgg/agents/custom/`): `agentgg agents add ./my-agent.md`
 - **Per-scan**: pass a `.md` file, directory, or `.txt` list to `-t/--template`
 
-## Three execution modes
+## Four execution modes
 
 Each agent declares its own `mode`. The framework dispatches accordingly.
+
+**`mode: rule`**: regex only. No LLM, no cost. The rule's `preFilter` patterns run against files matching `filePatterns` and produce candidate hits attached to those files. Hits flow into walker pool sessions, hunt prompts, and file prompts as scanner context, so other agents use them as anchors without rediscovering what's already known. Tech-gated by convention (e.g. only fires on Laravel repos):
+
+- `php-laravel-route`, `py-django-view`, `go-gin-route`, `jvm-spring-controller`, … (75+ framework entry-point finders)
 
 **`mode: file`**: one LLM call per (agent, matching file). No tools. Cheap, predictable:
 
@@ -118,7 +123,20 @@ Each agent declares its own `mode`. The framework dispatches accordingly.
 - `missing-access-control`: IDOR / auth-middleware coverage across handlers
 - `openclaw-audit-allowlist-identity-hunter`: project-specific mutable-identity allowlist bypass
 
-All three modes run side-by-side in one scan. Hunt agents run first (heaviest), then walker, then file agents.
+All four modes run side-by-side in one scan. Rules run first (no LLM), then hunt agents (heaviest), then walker, then file agents.
+
+## Tech gating
+
+agentgg fingerprints the project on each scan (`package.json` deps, `composer.json`, `go.mod`, `Gemfile`, `pyproject.toml`, `Cargo.toml`, `.csproj`, etc.) and produces a set of tech tags (`nextjs`, `laravel`, `django`, `go`, `spring`, …). Agents and rules with a `tech:` field only run when at least one of their declared tags is present.
+
+A scan against a Go-only repo silently skips PHP/Python/Ruby/.NET agents; a Laravel scan silently skips Django/Rails/Spring agents. Generic agents (no `tech:` field) always run.
+
+```bash
+agentgg scan ./src -v -o ./out         # `-v` lists what was gated out and why
+agentgg scan ./src --no-gate -o ./out  # force every selected agent to run regardless
+```
+
+`--no-gate` is the escape hatch for debugging a new agent on a repo where the fingerprinter doesn't yet recognize the stack.
 
 ## Providers
 
@@ -414,21 +432,21 @@ Short reasoning citing the unsafe code element.
 
 ## Commands
 
-| Command | Status |
+| Command | What it does |
 |---|---|
-| `agentgg init` | ✅ Anthropic API key + OAuth, OpenAI, Ollama, Bedrock; merges new providers |
-| `agentgg scan <path>` | ✅ file + walker + hunt mode, `--template`, `--diff`, `--validate`, `--scope`, resume |
-| `agentgg status [output-dir]` | ✅ reads `<output>/state/`, human or `--json` |
-| `agentgg revalidate [output-dir]` | ✅ re-runs validation against persisted findings |
-| `agentgg score [output-dir]` | ✅ standalone CVSS 3.1 scoring pass over persisted findings |
-| `agentgg view [output-dir]` | ✅ serves the bundled Next.js viewer over a local port |
-| `agentgg agents list` | ✅ table or `--json`; official + user-installed |
-| `agentgg agents info <slug>` | ✅ |
-| `agentgg agents add <file-or-dir>` | ✅ installs into `~/.agentgg/agents/custom/` |
-| `agentgg agents remove <slug>` | ✅ |
-| `agentgg agents update` | ✅ downloads / refreshes `~/.agentgg/agentgg-agents/` from the agentgg-agents repo |
-| `agentgg agents lint [path]` | ✅ slug uniqueness + filename == slug for the official tree |
-| `agentgg config` | ✅ secrets masked |
+| `agentgg init` | One-time setup wizard. Pick a provider (Anthropic / OpenAI / Ollama / Bedrock) and paste credentials. Re-run to merge in another provider without overwriting the first. |
+| `agentgg scan <path>` | Run a security scan. Fingerprints the project, dispatches rule / file / walker / hunt agents per each agent's `mode`, and writes findings + state to `--output`. Supports `--diff` for PR review, `--validate` for second-pass classification, `--scope` for SECURITY.md-style rules. Resumes by default. |
+| `agentgg status [output-dir]` | Print a summary of a scan's output dir: file counts (analyzed / validated / pending), finding counts, validation verdicts, recent runs. Pass `--json` for machine-readable. |
+| `agentgg revalidate [output-dir]` | Re-run the validation phase against findings already on disk. Skips detection entirely. Use to validate with a different model, scope, or after editing the validator prompt. |
+| `agentgg score [output-dir]` | Standalone CVSS 3.1 scoring pass over persisted findings. The agent picks the 8 base metrics; the score and severity bucket are computed deterministically. |
+| `agentgg view [output-dir]` | Boot the bundled Next.js viewer on a local port to browse findings in a web UI. |
+| `agentgg agents list` | List installed agents (official + user-installed). Pass `--json` for machine-readable. |
+| `agentgg agents info <slug>` | Print an agent's full frontmatter + prompt body. |
+| `agentgg agents add <file-or-dir>` | Install an agent (or every `.md` in a directory) into `~/.agentgg/agents/custom/`. |
+| `agentgg agents remove <slug>` | Uninstall a custom agent by slug. |
+| `agentgg agents update` | Download / refresh the official catalog at `~/.agentgg/agentgg-agents/` from the [agentgg-agents](https://github.com/agentgg-dev/agentgg-agents) repo. |
+| `agentgg agents lint [path]` | Check slug uniqueness, filename-matches-slug, schema validity, and regex compilation for an agent tree. Pre-commit-friendly. |
+| `agentgg config` | Print the current saved config. Secrets are masked. |
 
 Run `agentgg <command> --help` for the full flag list on any subcommand.
 
@@ -443,6 +461,7 @@ Run `agentgg <command> --help` for the full flag list on any subcommand.
 --rescan                        re-analyze files even if a prior run covered them
 --revalidate-all                re-validate findings that already have a verdict
 --diff <commit>                 scope scan to a commit or range; file/walker agents only see touched files, hunt agents receive the patch as a focus hint (accepts `<ref>`, `a..b`, or `a...b`)
+--no-gate                       disable the tech gate; force every selected agent to run regardless of the project fingerprint (default: agents with a `tech:` field skip when no detected tag matches)
 --concurrency <n>               parallel files per agent (default 5)
 --exclude <pattern>             glob to exclude (repeatable; additive)
 --only <pattern>                restrict scan to matching globs (repeatable)

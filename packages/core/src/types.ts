@@ -37,8 +37,18 @@ export type NoiseTier = z.infer<typeof NoiseTier>;
  *                with line hits, then each candidate gets its own
  *                anchored agentic session with tools. Same depth as
  *                hunt without burning turns on file discovery.
+ *   - `rule`   — regex only, no LLM. Runs the template's `preFilter`
+ *                patterns over files matching `filePatterns` and
+ *                produces candidate hits attached to those files. Hits
+ *                are seeded into the walker pool so any walker agent
+ *                whose `filePatterns` overlap the flagged files picks
+ *                them up automatically. The Agent schema is shared
+ *                because rules reuse every other field (filePatterns,
+ *                tech, slug, source, …); only the dispatch differs.
+ *                Rename to Template if/when a second non-agent mode
+ *                appears.
  */
-export const AgentMode = z.enum(["file", "hunt", "walker"]);
+export const AgentMode = z.enum(["file", "hunt", "walker", "rule"]);
 export type AgentMode = z.infer<typeof AgentMode>;
 
 /**
@@ -82,6 +92,14 @@ export const Agent = z.object({
   noiseTier: NoiseTier.default("normal"),
   /** Glob patterns the agent applies to. Empty = all files. */
   filePatterns: z.array(z.string()).default([]),
+  /**
+   * Optional tech gate. Any-of: the agent only runs if at least one of
+   * these tags appears in `fingerprint(root).tags`. Absent or empty
+   * means the agent always runs — preserves the behavior of every
+   * agent written before this field existed. Bypassed entirely by
+   * `--no-gate`. See `KNOWN_TECH_TAGS` for the full vocabulary.
+   */
+  tech: z.array(z.string()).default([]),
   /**
    * Glob patterns the agent should never touch. Authors use this to
    * declare a permanent skip list (tests, fixtures, e2e, generated

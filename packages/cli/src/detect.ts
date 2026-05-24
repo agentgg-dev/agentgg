@@ -99,9 +99,21 @@ export interface Detector {
   /** Short label for logs: "anthropic-api", "anthropic-oauth", "openai", "ollama". */
   readonly name: string;
 
-  /** Per-file review. The caller picks files; the agent reads what it's given. */
+  /**
+   * Per-file review. The caller picks files; the agent reads what it's given.
+   *
+   * `ruleHits` carries any rule-mode regex hits the runtime already found
+   * for this file. Rendered as a scanner-context block in the prompt so
+   * the model has the same anchor points walker mode gets through the
+   * pool. Empty / undefined means no rule hits for this file.
+   */
   detectFile(
-    args: { agent: Agent; filePath: string; content: string } & AbortableArgs,
+    args: {
+      agent: Agent;
+      filePath: string;
+      content: string;
+      ruleHits?: ReadonlyArray<RuleHitsForFile>;
+    } & AbortableArgs,
   ): Promise<Finding[]>;
 
   /**
@@ -182,6 +194,14 @@ export interface HuntArgs {
    * imports, and related files outside the diff for context.
    */
   diff?: { commit: string; patch: string };
+  /**
+   * Per-file rule-mode hits collected before this hunt session started.
+   * Keyed by repo-relative file path. Rendered in the prompt as a
+   * scanner-context block so the hunter doesn't burn turns Grep'ing
+   * for entry points the regex layer already found. Tools stay
+   * unrestricted — these are starting points, not constraints.
+   */
+  ruleHits?: ReadonlyMap<string, ReadonlyArray<RuleHitsForFile>>;
 }
 
 /**
@@ -193,6 +213,19 @@ export interface InvestigateHit {
   line: number;
   label: string;
   snippet: string;
+}
+
+/**
+ * Rule-mode (regex-only) hits produced before any LLM dispatch ran.
+ * Threaded into hunt and file mode prompts as scanner context so the
+ * model gets the same anchor points walker mode sees through the pool.
+ * Identical shape to `InvestigateHit` — kept distinct because the
+ * source is "a rule template" not "a walker agent's preFilter."
+ */
+export interface RuleHitsForFile {
+  /** Slug of the rule template that produced these hits. */
+  ruleSlug: string;
+  hits: ReadonlyArray<InvestigateHit>;
 }
 
 /**
@@ -250,8 +283,12 @@ export interface InvestigateArgs {
  */
 export function buildHuntPrompt(
   agent: Agent,
-  args: Pick<HuntArgs, "excludePatterns" | "includePatterns" | "maxFileSizeKb" | "diff">,
+  args: Pick<
+    HuntArgs,
+    "excludePatterns" | "includePatterns" | "maxFileSizeKb" | "diff" | "ruleHits"
+  >,
 ): string {
+  const ruleHitsBlock = renderRuleHitsForRepo(args.ruleHits);
   const excludeLines =
     args.excludePatterns.length > 0
       ? args.excludePatterns.map((p) => `  - ${p}`).join("\n")
@@ -292,7 +329,7 @@ ${args.diff.patch}
 \`\`\``
     : "";
 
-  return `${agent.prompt}${diffBlock}
+  return `${agent.prompt}${diffBlock}${ruleHitsBlock}
 
 ---
 
@@ -457,9 +494,20 @@ ${hitsBlock}`;
  * Build the user-message both backends see for a (file, agent) pair.
  * The agent's `prompt` carries the detection criteria; we append the
  * file content with a fenced code block and the anti-fabrication rules.
+ *
+ * `ruleHits` (optional) carries any rule-mode regex hits the runtime
+ * already found for this file. Rendered as anchor points so the model
+ * doesn't have to rediscover what was suspicious. Same hint mechanism
+ * walker mode gets through the pool.
  */
-export function buildDetectPrompt(agent: Agent, filePath: string, content: string): string {
+export function buildDetectPrompt(
+  agent: Agent,
+  filePath: string,
+  content: string,
+  ruleHits?: ReadonlyArray<RuleHitsForFile>,
+): string {
   const lang = languageFromPath(filePath);
+  const ruleBlock = renderRuleHitsForFile(ruleHits);
   return `${agent.prompt}
 
 ---
@@ -471,6 +519,7 @@ File path: ${filePath}
 \`\`\`${lang}
 ${content}
 \`\`\`
+${ruleBlock}
 
 Report ONLY vulnerabilities that match the criteria above. Do NOT
 invent findings to satisfy expectations — false positives erode trust.
@@ -516,6 +565,78 @@ export function hydrateFinding(raw: LlmFinding, agent: Agent, fallbackFilePath: 
     confidence: raw.confidence,
     notifications: [],
   };
+}
+
+/**
+ * Render rule-mode hits for a single file as a prompt block. Returns
+ * "" when there are no hits (caller pastes the result verbatim). Used
+ * by `buildDetectPrompt` to give file-mode agents the same regex
+ * anchors walker mode gets through the pool.
+ */
+function renderRuleHitsForFile(ruleHits?: ReadonlyArray<RuleHitsForFile>): string {
+  if (!ruleHits || ruleHits.length === 0) return "";
+  const lines = ruleHits.flatMap((group) =>
+    group.hits
+      .filter((h) => h.label !== "(no preFilter)")
+      .map((h) => `  - L${h.line} [${h.label}] (${group.ruleSlug}): ${h.snippet || "(line)"}`),
+  );
+  if (lines.length === 0) return "";
+  return `
+
+## Scanner pre-found candidates in this file
+
+These lines were flagged by regex rules before this analysis. Treat
+them as anchors — confirm by reading the surrounding code; ignore them
+if they don't match the criteria above.
+
+${lines.join("\n")}`;
+}
+
+/**
+ * Render rule-mode hits across the whole repo as a prompt block for
+ * hunt mode. Groups hits by file so the hunter can pick which to read
+ * first. Returns "" when there are no hits.
+ */
+function renderRuleHitsForRepo(
+  ruleHits?: ReadonlyMap<string, ReadonlyArray<RuleHitsForFile>>,
+): string {
+  if (!ruleHits || ruleHits.size === 0) return "";
+  const fileBlocks: string[] = [];
+  let totalHits = 0;
+  // Stable order — sort by file path so prompts are deterministic across
+  // runs (helps cache and debugging).
+  const sortedFiles = Array.from(ruleHits.keys()).sort();
+  for (const filePath of sortedFiles) {
+    const groups = ruleHits.get(filePath);
+    if (!groups || groups.length === 0) continue;
+    const fileLines: string[] = [];
+    for (const group of groups) {
+      for (const h of group.hits) {
+        if (h.label === "(no preFilter)") continue;
+        fileLines.push(`  - L${h.line} [${h.label}] (${group.ruleSlug}): ${h.snippet || "(line)"}`);
+        totalHits++;
+      }
+    }
+    if (fileLines.length === 0) continue;
+    fileBlocks.push(`${filePath}\n${fileLines.join("\n")}`);
+  }
+  if (fileBlocks.length === 0) return "";
+  return `
+
+---
+
+## Scanner pre-found entry points
+
+The following candidates were found by regex rules before this hunt
+session started. Use them as starting points — read each file in
+context and decide whether the hit matches your detection brief. Your
+tools are NOT restricted to these files; chase imports/callers as
+needed. Don't burn turns Grep'ing for entry points already listed
+below.
+
+${totalHits} hit(s) across ${fileBlocks.length} file(s):
+
+${fileBlocks.join("\n\n")}`;
 }
 
 export function languageFromPath(filePath: string): string {

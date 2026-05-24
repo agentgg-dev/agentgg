@@ -15,6 +15,9 @@ npm-debug.log*
 
 scan-results/
 
+# Local dev / debug scripts (one-off prompt-builder dumps, etc.)
+scripts/dump-*.ts
+
 .DS_Store
 Thumbs.db
 
