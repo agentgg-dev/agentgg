@@ -44,8 +44,8 @@ interface RevalidateOpts {
   root?: string;
   /** Max tool-use turns per validator call. */
   validateMaxTurns?: number;
-  /** Keep false-positive findings in the markdown report instead of filtering them out. */
-  includeFalsePositives?: boolean;
+  /** Drop false-positive findings from the markdown report instead of keeping them (kept by default). */
+  excludeFalsePositives?: boolean;
 }
 
 /**
@@ -279,7 +279,7 @@ export async function runRevalidate(
     findings: allFindings,
     filesScanned: records.length,
     byAgent,
-    includeFalsePositives: opts.includeFalsePositives,
+    excludeFalsePositives: opts.excludeFalsePositives,
   });
 
   const summary = Object.entries(verdicts)
@@ -333,8 +333,8 @@ export function registerRevalidateCommand(program: Command): void {
       30,
     )
     .option(
-      "--include-false-positives",
-      "Keep false-positive findings in the markdown report (default: skip them). FP findings always stay in state/files/* regardless.",
+      "--exclude-false-positives",
+      "Drop false-positive findings from the markdown report (default: keep them). FP findings always stay in state/files/* regardless.",
     )
     .option("--force", "re-validate findings that already have a verdict (default: skip them)")
     .option("-v, --verbose", "verbose output")

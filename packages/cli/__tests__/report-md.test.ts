@@ -139,6 +139,53 @@ describe("writeMarkdownReport", () => {
     expect(summary).toContain("findings/001-sql-injection-");
   });
 
+  it("renders false-positive findings by default", () => {
+    const out = writeMarkdownReport({
+      outDir: tmp,
+      root: "/fake/project",
+      startedAt: new Date(2026, 0, 1, 12, 0, 0),
+      completedAt: new Date(2026, 0, 1, 12, 1, 30),
+      findings: [
+        makeFinding(),
+        makeFinding({
+          id: "fp",
+          title: "Bogus",
+          validation: { verdict: "false-positive", reasoning: "not exploitable" },
+        }),
+      ],
+      filesScanned: 3,
+      byAgent: { "sql-injection": 2 },
+    });
+    // Both findings — including the false-positive — get a .md.
+    expect(out.findingPaths).toHaveLength(2);
+    expect(readdirSync(join(tmp, "findings"))).toHaveLength(2);
+  });
+
+  it("skips false-positive findings when excludeFalsePositives is set", () => {
+    const out = writeMarkdownReport({
+      outDir: tmp,
+      root: "/fake/project",
+      startedAt: new Date(2026, 0, 1, 12, 0, 0),
+      completedAt: new Date(2026, 0, 1, 12, 1, 30),
+      findings: [
+        makeFinding(),
+        makeFinding({
+          id: "fp",
+          title: "Bogus",
+          validation: { verdict: "false-positive", reasoning: "not exploitable" },
+        }),
+      ],
+      filesScanned: 3,
+      byAgent: { "sql-injection": 2 },
+      excludeFalsePositives: true,
+    });
+    // Only the non-FP finding gets a .md...
+    expect(out.findingPaths).toHaveLength(1);
+    expect(readdirSync(join(tmp, "findings"))).toHaveLength(1);
+    // ...but the summary still counts all findings, FP included.
+    expect(readFileSync(out.summaryPath, "utf8")).toContain("Total findings:** 2");
+  });
+
   it("writes a summary even when there are zero findings", () => {
     const out = writeMarkdownReport({
       outDir: tmp,

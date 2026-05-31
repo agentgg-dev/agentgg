@@ -39,13 +39,14 @@ export interface ScanReportInput {
   /** Per-agent findings count (slug → count). */
   byAgent: Record<string, number>;
   /**
-   * When false (default), findings with `validation.verdict ===
-   * "false-positive"` are skipped when writing per-finding `.md`
-   * files. The summary still reports the FP count so the user can see
-   * how many the validator filtered out. When true, every finding
-   * gets a `.md` regardless of verdict.
+   * When false (default), every finding gets a per-finding `.md`
+   * regardless of verdict — including those with `validation.verdict
+   * === "false-positive"`. When true, false-positive findings are
+   * skipped when writing per-finding `.md` files; the summary still
+   * reports the FP count so the user can see how many were filtered
+   * out.
    */
-  includeFalsePositives?: boolean;
+  excludeFalsePositives?: boolean;
 }
 
 export interface ScanReportOutput {
@@ -73,15 +74,14 @@ export function writeMarkdownReport(input: ScanReportInput): ScanReportOutput {
   rmSync(findingsDir, { recursive: true, force: true });
   mkdirSync(findingsDir, { recursive: true });
 
-  // False-positives stay in the FileRecord state (audit trail + a
-  // future `revalidate --force` can re-evaluate them) but don't get
-  // their own `.md` here unless the caller opted in. The summary
-  // still counts them so the operator sees how many the validator
-  // filtered out.
+  // False-positives get their own `.md` by default (and always stay
+  // in the FileRecord state as an audit trail). The caller can opt out
+  // of rendering them with `excludeFalsePositives`; the summary still
+  // counts them so the operator sees how many the validator flagged.
   const renderable = (
-    input.includeFalsePositives
-      ? [...input.findings]
-      : input.findings.filter((f) => f.validation?.verdict !== "false-positive")
+    input.excludeFalsePositives
+      ? input.findings.filter((f) => f.validation?.verdict !== "false-positive")
+      : [...input.findings]
   )
     .slice()
     .sort(compareForReport);

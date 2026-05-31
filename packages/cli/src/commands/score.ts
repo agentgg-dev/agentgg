@@ -29,8 +29,8 @@ interface ScoreOpts {
    * scoring findings that won't ship.
    */
   includeDisqualified?: boolean;
-  /** Keep false-positive findings in the markdown report. */
-  includeFalsePositives?: boolean;
+  /** Drop false-positive findings from the markdown report (kept by default). */
+  excludeFalsePositives?: boolean;
   verbose?: boolean;
   /** Override the scanned root recorded in scan.json — rare. */
   root?: string;
@@ -216,7 +216,7 @@ export async function runScore(
     findings: allFindings,
     filesScanned: records.length,
     byAgent,
-    includeFalsePositives: opts.includeFalsePositives,
+    excludeFalsePositives: opts.excludeFalsePositives,
   });
 
   const summary = Object.entries(buckets)
@@ -256,8 +256,8 @@ export function registerScoreCommand(program: Command): void {
       "score findings the validator marked false-positive or out-of-scope (default: skip them)",
     )
     .option(
-      "--include-false-positives",
-      "Keep false-positive findings in the markdown report (default: skip them).",
+      "--exclude-false-positives",
+      "Drop false-positive findings from the markdown report (default: keep them).",
     )
     .option("-v, --verbose", "verbose output")
     .action(async (outputDir: string, opts: ScoreOpts) => {

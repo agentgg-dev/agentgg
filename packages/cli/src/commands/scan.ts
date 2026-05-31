@@ -73,8 +73,8 @@ interface ScanOpts {
   effort?: "low" | "medium" | "high" | "max";
   /** SDK thinking mode. `adaptive` lets the model decide per call; `off` skips entirely. */
   thinking?: "off" | "adaptive" | "enabled";
-  /** Keep false-positive findings in the markdown report instead of filtering them out. */
-  includeFalsePositives?: boolean;
+  /** Drop false-positive findings from the markdown report instead of keeping them (kept by default). */
+  excludeFalsePositives?: boolean;
   /**
    * Tech gate. Defaults to true. Disable with `--no-gate` to force
    * every selected template to run regardless of `tech` declarations
@@ -1234,7 +1234,7 @@ export async function runScan(
       findings,
       filesScanned: touchedFiles.size,
       byAgent,
-      includeFalsePositives: opts.includeFalsePositives,
+      excludeFalsePositives: opts.excludeFalsePositives,
     });
 
     completeRun(outDir, runMeta.runId, "done", {
@@ -1412,8 +1412,8 @@ export function registerScanCommand(program: Command): void {
       "SDK thinking mode for tool-using calls. One of: off, adaptive, enabled. `adaptive` matches Claude Code interactive — the model decides per call.",
     )
     .option(
-      "--include-false-positives",
-      "Write per-finding markdown reports for findings the validator marked false-positive (default: skip them). FP findings always stay in state/files/* regardless.",
+      "--exclude-false-positives",
+      "Skip per-finding markdown reports for findings the validator marked false-positive (default: write them). FP findings always stay in state/files/* regardless.",
     )
     .option(
       "--no-gate",
