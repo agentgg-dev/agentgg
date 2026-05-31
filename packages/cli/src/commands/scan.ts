@@ -49,6 +49,7 @@ interface ScanOpts {
   oauthToken?: string;
   baseUrl?: string;
   region?: string;
+  project?: string;
   model?: string;
   concurrency?: number;
   diff?: string;
@@ -1366,7 +1367,7 @@ export function registerScanCommand(program: Command): void {
     )
     .option(
       "--provider <name>",
-      "LLM provider for this run: anthropic | openai | ollama | bedrock (overrides saved default)",
+      "LLM provider for this run: anthropic | openai | ollama | bedrock | vertex (overrides saved default)",
     )
     .option(
       "--api-key <key>",
@@ -1380,6 +1381,10 @@ export function registerScanCommand(program: Command): void {
     .option(
       "--region <name>",
       "AWS region for Bedrock (e.g. us-east-1). Falls back to $AWS_REGION / $AWS_DEFAULT_REGION. Bedrock only.",
+    )
+    .option(
+      "--project <id>",
+      "GCP project ID for Vertex AI. Falls back to $GOOGLE_CLOUD_PROJECT / $GCLOUD_PROJECT. Vertex only.",
     )
     .option("--model <name>", "One-shot model override for the selected provider (not persisted)")
     .option(

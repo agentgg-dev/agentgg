@@ -15,6 +15,7 @@ export interface ScanFlagOpts {
   oauthToken?: string;
   baseUrl?: string;
   region?: string;
+  project?: string;
 }
 
 /**
@@ -29,6 +30,7 @@ export function buildCredentialsFromOpts(opts: ScanFlagOpts): CredentialOverride
     ...(opts.oauthToken ? { anthropicOauthToken: opts.oauthToken } : {}),
     ...(opts.baseUrl ? { ollamaBaseUrl: opts.baseUrl } : {}),
     ...(opts.region ? { bedrockRegion: opts.region } : {}),
+    ...(opts.project ? { vertexProject: opts.project } : {}),
   };
 }
 
@@ -42,6 +44,7 @@ const ALL_BINDINGS: readonly FlagBinding[] = [
   { optKey: "oauthToken", flag: "oauth-token" },
   { optKey: "baseUrl", flag: "base-url" },
   { optKey: "region", flag: "region" },
+  { optKey: "project", flag: "project" },
 ];
 
 /**

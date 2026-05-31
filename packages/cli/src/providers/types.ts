@@ -28,6 +28,7 @@ export interface CredentialOverrides {
   bedrockAccessKeyId?: string;
   bedrockSecretAccessKey?: string;
   bedrockSessionToken?: string;
+  vertexProject?: string;
 }
 
 /**
@@ -62,6 +63,8 @@ export interface InitInputs {
   awsAccessKeyId?: string;
   awsSecretAccessKey?: string;
   awsSessionToken?: string;
+  /** GCP project ID for the Vertex provider. */
+  project?: string;
   model?: string;
 }
 
