@@ -11,45 +11,23 @@ export const NoiseTier = z.enum(["precise", "normal", "noisy"]);
 export type NoiseTier = z.infer<typeof NoiseTier>;
 
 /**
- * Execution shape an agent declares for itself.
+ * Unified agent model. Every agent is a tool-enabled investigation
+ * (Read/Glob/Grep always available) composed of three parts:
  *
- * - `file` — the framework runs the agent once per matching file, passing
- *   the file's content as text. Good for surface-level patterns (hardcoded
- *   secrets, obvious sinks). Cheap, predictable, scales linearly with file
- *   count.
+ *   1. `precondition` — a cheap gate deciding whether the agent is even
+ *      queued for this repo. A `regex` existence check, an LLM `prompt`
+ *      check (which sees the recon brief), both (AND), or neither
+ *      (always run). See `Precondition`.
+ *   2. `where` — the file scope fed into the agent as starting points:
+ *      `filePatterns` + `excludePatterns` narrow the tree, `preFilter`
+ *      regexes anchor specific lines. Empty `where` means "roam the whole
+ *      repo with tools." See `Where`.
+ *   3. the prompt body (markdown after the frontmatter) — the harness +
+ *      detection instructions the model runs with.
  *
- * - `hunt` — the framework runs the agent once for the entire repo with
- *   Read/Glob/Grep tool access. The agent decides which files to read.
- *   Good for cross-file logic (access-control flow, taint chains,
- *   CVE-style pattern hunts). One call per agent regardless of repo size.
+ * There is no `mode`: the old file / walker / hunt / rule split collapsed
+ * into this one shape.
  */
-/**
- * How an agent locates and inspects code:
- *   - `file`   — single-turn, no tools, one LLM call per file matching
- *                `filePatterns`. Cheapest. Used for surface-level
- *                pattern detection that fits in one file's context.
- *   - `hunt`   — agentic session with Read/Glob/Grep across the whole
- *                repo. The agent discovers its own files. Most flexible,
- *                most expensive, hardest to make deterministic.
- *   - `walker` — anchored agentic investigation. Walker enumerates files matching
- *                `filePatterns` (cheap, deterministic), the agent's
- *                `preFilter` regexes narrow further to "candidates"
- *                with line hits, then each candidate gets its own
- *                anchored agentic session with tools. Same depth as
- *                hunt without burning turns on file discovery.
- *   - `rule`   — regex only, no LLM. Runs the template's `preFilter`
- *                patterns over files matching `filePatterns` and
- *                produces candidate hits attached to those files. Hits
- *                are seeded into the walker pool so any walker agent
- *                whose `filePatterns` overlap the flagged files picks
- *                them up automatically. The Agent schema is shared
- *                because rules reuse every other field (filePatterns,
- *                tech, slug, source, …); only the dispatch differs.
- *                Rename to Template if/when a second non-agent mode
- *                appears.
- */
-export const AgentMode = z.enum(["file", "hunt", "walker", "rule"]);
-export type AgentMode = z.infer<typeof AgentMode>;
 
 /**
  * One regex in a walker agent's `preFilter`. Files where any
@@ -80,67 +58,123 @@ export type ValidationVerdict = z.infer<typeof ValidationVerdict>;
 // gray-matter parses it, we validate the frontmatter against this schema
 // and treat the body as the prompt template.
 
+// ---------------------------------------------------------------------------
+// Precondition — the queue/skip gate (part 1 of an agent)
+// ---------------------------------------------------------------------------
+//
+// Evaluated for every selected agent before any detection runs. The
+// orchestrator records which agents were queued vs skipped (and why).
+//
+//   - no prompt, no regex → always queued
+//   - regex only          → queued iff the regex check matches anything
+//   - prompt only         → queued iff the LLM gate (which sees the recon
+//                            brief) answers yes
+//   - both                → queued iff the regex matches AND the LLM says yes
+
+/**
+ * One content regex in a precondition. "Does `regex` match a line in any
+ * file selected by `in` (and not excluded by `notIn`)?" Empty `in` means
+ * "any file." Globs use the same minimatch dialect as `where`.
+ */
+export const PreconditionPattern = z.object({
+  regex: z.string(),
+  in: z.array(z.string()).default([]),
+  notIn: z.array(z.string()).default([]),
+  label: z.string().optional(),
+});
+export type PreconditionPattern = z.infer<typeof PreconditionPattern>;
+
+/**
+ * Static existence check. The agent is queued when ANY declared sub-check
+ * matches (logical OR across `extensions`, `files`, `directories`,
+ * `patterns`). An all-empty block is treated as "no regex constraint."
+ */
+export const PreconditionRegex = z.object({
+  /** Queue if a file with one of these extensions exists (e.g. ".php"). */
+  extensions: z.array(z.string()).default([]),
+  /**
+   * Queue if a file matching one of these path globs exists — e.g.
+   * "artisan", "Dockerfile", "routes/web.php", or a recursive glob.
+   * Use this for sentinel files that signal a stack or feature;
+   * `extensions` is the by-type shorthand, this is the by-path check.
+   * Minimatch dialect.
+   */
+  files: z.array(z.string()).default([]),
+  /** Queue if a directory matching one of these globs exists (e.g. "app/**"). */
+  directories: z.array(z.string()).default([]),
+  /** Queue if one of these content patterns matches within its `in`/`notIn` scope. */
+  patterns: z.array(PreconditionPattern).default([]),
+});
+export type PreconditionRegex = z.infer<typeof PreconditionRegex>;
+
+export const Precondition = z.object({
+  /**
+   * LLM gate. The model sees the recon brief + this prompt and answers
+   * whether the agent is relevant to this repo. Combined with `regex` by
+   * AND when both are present.
+   */
+  prompt: z.string().optional(),
+  /** Static existence check. Combined with `prompt` by AND when both present. */
+  regex: PreconditionRegex.optional(),
+});
+export type Precondition = z.infer<typeof Precondition>;
+
+// ---------------------------------------------------------------------------
+// Where — the file scope fed into an agent (part 2)
+// ---------------------------------------------------------------------------
+
+export const Where = z.object({
+  /**
+   * Globs the agent applies to. Empty = the whole repo: the agent gets no
+   * seeded candidate files and roams via tools (old "hunt" behavior).
+   */
+  filePatterns: z.array(z.string()).default([]),
+  /**
+   * Globs the agent never touches. Combined additively with any CLI
+   * `--exclude` patterns at runtime. Same minimatch dialect as
+   * `filePatterns`.
+   */
+  excludePatterns: z.array(z.string()).default([]),
+  /**
+   * Regexes that narrow `filePatterns`-matching files down to candidates
+   * worth investigating: a file becomes a candidate when at least one
+   * regex matches at least one line, and the matching line numbers +
+   * labels are passed to the model as anchors. Empty = every matching
+   * file is a candidate.
+   */
+  preFilter: z.array(AgentPreFilterPattern).default([]),
+  /** How many candidate files to pack into one investigation session. */
+  maxFilesPerBatch: z.number().int().min(1).default(5),
+  /** Tool-use turn budget per investigation session. */
+  maxTurnsPerBatch: z.number().int().min(1).default(30),
+});
+export type Where = z.infer<typeof Where>;
+
+// ---------------------------------------------------------------------------
+// Agent (parsed markdown file)
+// ---------------------------------------------------------------------------
+//
+// The on-disk representation is a `.md` file with YAML frontmatter. After
+// gray-matter parses it, we validate the frontmatter against this schema
+// and treat the body as the prompt template.
+
 export const Agent = z.object({
-  /** Stable identifier. Used in --only-agents, scope.agents.disable, etc. */
+  /** Stable identifier. Used in -t selection, scope.agents.disable, etc. */
   slug: z.string().regex(/^[a-z0-9][a-z0-9-]*$/),
   name: z.string(),
   description: z.string(),
   version: z.string().default("0.0.1"),
   author: z.string().optional(),
-  /** Per-file review vs whole-repo hunt. See AgentMode docstring. */
-  mode: AgentMode.default("file"),
   noiseTier: NoiseTier.default("normal"),
-  /** Glob patterns the agent applies to. Empty = all files. */
-  filePatterns: z.array(z.string()).default([]),
+  /** Queue/skip gate. Omit entirely = always run. See `Precondition`. */
+  precondition: Precondition.optional(),
+  /** File scope fed into the agent. Omit = roam the whole repo with tools. */
+  where: Where.default({}),
   /**
-   * Optional tech gate. Any-of: the agent only runs if at least one of
-   * these tags appears in `fingerprint(root).tags`. Absent or empty
-   * means the agent always runs — preserves the behavior of every
-   * agent written before this field existed. Bypassed entirely by
-   * `--no-gate`. See `KNOWN_TECH_TAGS` for the full vocabulary.
-   */
-  tech: z.array(z.string()).default([]),
-  /**
-   * Glob patterns the agent should never touch. Authors use this to
-   * declare a permanent skip list (tests, fixtures, e2e, generated
-   * code) so CLI users don't need to remember `--exclude` flags.
-   * Combined additively with any CLI patterns at runtime. Minimatch
-   * dialect — same as `filePatterns`.
-   */
-  excludePatterns: z.array(z.string()).default([]),
-  /**
-   * Walker-mode only: regexes that narrow `filePatterns`-matching
-   * files down to "candidates" worth investigating. A file becomes a
-   * candidate when at least one regex matches at least one line. The
-   * matching line numbers and labels are passed to the LLM as scanner
-   * hits. Ignored in
-   * `file` and `hunt` modes.
-   */
-  preFilter: z.array(AgentPreFilterPattern).default([]),
-  /**
-   * Walker-mode only: tool-use turn budget per batched investigation
-   * session. A batch can contain multiple candidate files; the model
-   * sees all of them at once and uses tools to chase context across
-   * them. Default 30.
-   */
-  maxTurnsPerBatch: z.number().int().min(1).default(30),
-  /**
-   * Walker-mode only: how many candidate files to pack into one
-   * investigation session. Larger batches give the model more
-   * cross-file context per call (and amortize the LLM round-trip
-   * cost) but reduce concurrency. Default 5 — sane middle ground
-   * for most agents.
-   */
-  maxFilesPerBatch: z.number().int().min(1).default(5),
-  /** Optional language gate (e.g. ["typescript", "javascript"]). */
-  languages: z.array(z.string()).default([]),
-  /** Optional pre-filter regexes; if any match, the file is sent to the LLM. */
-  prefilter: z.array(z.string()).default([]),
-  /**
-   * Documentation-only field. CWE / OWASP / GHSA / CVE IDs or URLs
-   * this agent was modeled after. NOT injected into the LLM prompt —
-   * the prompt body is the only thing the model sees. Surfaced by
-   * `agents info` for human readers; otherwise unused at runtime.
+   * Documentation-only field. CWE / OWASP / GHSA / CVE IDs or URLs this
+   * agent was modeled after. NOT injected into the prompt — the prompt
+   * body is the only thing the model sees. Surfaced by `agents info`
+   * for human readers; otherwise unused at runtime.
    */
   references: z.array(z.string()).optional(),
   /** The prompt body (markdown content after the frontmatter). */
@@ -397,6 +431,44 @@ export const ScanMeta = z.object({
 export type ScanMeta = z.infer<typeof ScanMeta>;
 
 // ---------------------------------------------------------------------------
+// ReconReport — high-level project brief (`<outputDir>/state/recon.json`)
+// ---------------------------------------------------------------------------
+//
+// Produced once per scan by the recon agent before any detection runs. It
+// is fed into (a) precondition `prompt` checks and (b) the first
+// bug-finding prompt of every queued agent, so the model starts oriented.
+// Deliberately CONCISE — bounded fields, no file dumps — because it is
+// prepended to many downstream prompts. `summary` is the short prose brief
+// agents actually read; the structured fields support gating and display.
+
+export const ReconReport = z.object({
+  /** 1–3 sentences: what this project is and does. */
+  purpose: z.string(),
+  /** Primary languages (e.g. ["typescript", "go"]). */
+  languages: z.array(z.string()).default([]),
+  /** Frameworks / major libraries (e.g. ["next.js", "express"]). */
+  frameworks: z.array(z.string()).default([]),
+  /** Entry points: HTTP routes, CLI commands, queue/event handlers. Short. */
+  entryPoints: z.array(z.string()).default([]),
+  /** 1–2 sentences on how auth/identity works, if discernible. */
+  authModel: z.string().optional(),
+  /** External services, datastores, and third-party integrations. */
+  integrations: z.array(z.string()).default([]),
+  /** Notable directories worth a security reviewer's attention. */
+  notableDirs: z.array(z.string()).default([]),
+  /**
+   * The concise prose brief injected into downstream prompts. A few short
+   * paragraphs at most — orientation, not an audit.
+   */
+  summary: z.string(),
+  /** Hash of the inputs the brief was derived from (for resume invalidation). */
+  reconHash: z.string(),
+  /** ISO timestamp the brief was generated. */
+  generatedAt: z.string(),
+});
+export type ReconReport = z.infer<typeof ReconReport>;
+
+// ---------------------------------------------------------------------------
 // UserConfig — what `agentgg init` writes to ~/.agentgg/config.json
 // ---------------------------------------------------------------------------
 //
@@ -552,17 +624,19 @@ export type UserConfig = z.infer<typeof UserConfig>;
 // AgentRun — per-agent completion sidecar (`<outputDir>/state/agents/<slug>.json`)
 // ---------------------------------------------------------------------------
 //
-// Hunt and walker agents don't map 1:1 onto a single file the way file-mode
-// agents do, so their resume signal can't live on FileRecord alone. This
-// sidecar records "this agent completed in this output dir, under this
-// scope." On a re-run with the same --output and matching scope, the
-// orchestrator can skip the agent (lifting prior findings from disk) unless
-// --rescan is passed. Scope-aware so a re-run with different --diff /
-// --exclude / --only invalidates the resume and re-runs the agent.
-
+// An agent's run doesn't map 1:1 onto a single file, so its resume signal
+// can't live on FileRecord alone. This sidecar records "this agent
+// completed in this output dir, under this scope." On a re-run with the
+// same --output and matching scope, the orchestrator can skip the agent
+// (lifting prior findings from disk) unless --rescan is passed.
+//
+// `scope` is signed so a re-run under a different scope re-runs the agent.
+// Beyond the file-selection fields it carries:
+//   - `reconHash` — a changed recon brief invalidates prompt-gated agents.
+//   - `precondition` — whether the agent was queued or skipped last time,
+//     so a flipped gate decision re-runs (or newly skips) the agent.
 export const AgentRun = z.object({
   agentSlug: z.string(),
-  mode: AgentMode,
   lastCompletedRunId: z.string(),
   lastCompletedAt: z.string(),
   scope: z.object({
@@ -571,7 +645,16 @@ export const AgentRun = z.object({
     includePatterns: z.array(z.string()).default([]),
     maxFileSizeKb: z.number().int().positive(),
     rootPath: z.string(),
+    /** Hash of the recon brief in effect; absent on pre-recon sidecars. */
+    reconHash: z.string().optional(),
   }),
+  /** Outcome of this agent's precondition on the last run. */
+  precondition: z
+    .object({
+      queued: z.boolean(),
+      reason: z.string().optional(),
+    })
+    .optional(),
   findingCount: z.number().int().nonnegative().default(0),
 });
 export type AgentRun = z.infer<typeof AgentRun>;
