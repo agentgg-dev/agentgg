@@ -62,6 +62,7 @@
     "@inquirer/prompts": "^7.0.0",
     "ai": "^4.0.0",
     "commander": "^13.0.0",
+    "google-auth-library": "^9.0.0",
     "gray-matter": "^4.0.3",
     "minimatch": "^10.0.0",
     "ollama-ai-provider": "^1.0.0",

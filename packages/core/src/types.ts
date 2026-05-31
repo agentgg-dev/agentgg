@@ -410,7 +410,7 @@ export type ScanMeta = z.infer<typeof ScanMeta>;
 // so we don't need a separate family axis. To add a new cloud-hosted
 // provider: append it here, add a typed block + superRefine branch below,
 // register a ProviderModule in packages/cli/src/providers/.
-export const Provider = z.enum(["anthropic", "openai", "ollama", "bedrock"]);
+export const Provider = z.enum(["anthropic", "openai", "ollama", "bedrock", "vertex"]);
 export type Provider = z.infer<typeof Provider>;
 
 export const UserConfig = z
@@ -475,6 +475,24 @@ export const UserConfig = z
         sessionToken: z.string().min(1).optional(),
       })
       .optional(),
+    vertex: z
+      .object({
+        /**
+         * GCP project ID hosting the Vertex AI Model Garden endpoint.
+         * Required: the MaaS chat-completions URL bakes the project ID
+         * into the path. May be omitted at config-save time if the user
+         * relies on `$GOOGLE_CLOUD_PROJECT` / `$GCLOUD_PROJECT` at scan
+         * time — `buildDetector` re-resolves there.
+         */
+        project: z.string().min(1).optional(),
+        /**
+         * Vertex Model Garden model ID. Defaults to `zai-org/glm-5-maas`
+         * (GLM-5 managed, OpenAI-compatible). GLM-5.1 is self-host only
+         * today and not addressable through this block.
+         */
+        model: z.string().optional(),
+      })
+      .optional(),
     /**
      * Stamped on first write. Helps future migrations notice old configs
      * without having to interrogate the shape.
@@ -531,6 +549,16 @@ export const UserConfig = z
         code: z.ZodIssueCode.custom,
         message: "bedrock provider referenced but the bedrock block is missing",
         path: ["bedrock"],
+      });
+    }
+    if (cfg.provider === "vertex" && !cfg.vertex) {
+      // vertex block can be empty (env-var GOOGLE_CLOUD_PROJECT, ambient
+      // ADC) but it must exist — its presence is the user's signal that
+      // they've opted into vertex.
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "vertex provider referenced but the vertex block is missing",
+        path: ["vertex"],
       });
     }
     if (cfg.bedrock) {

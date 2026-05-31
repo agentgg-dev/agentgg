@@ -29,6 +29,7 @@ export interface InitInput {
   anthropicOauthToken?: string;
   openaiKey?: string;
   ollamaUrl?: string;
+  vertexProject?: string;
   model?: string;
 }
 
@@ -82,6 +83,17 @@ export function buildUserConfig(input: InitInput): UserConfig {
       return {
         provider: "bedrock",
         bedrock: { model },
+        schemaVersion: 1,
+      };
+    }
+    case "vertex": {
+      const project = input.vertexProject?.trim();
+      if (!project) {
+        throw new Error("vertex provider selected but no GCP project provided");
+      }
+      return {
+        provider: "vertex",
+        vertex: { project, model },
         schemaVersion: 1,
       };
     }
@@ -197,6 +209,7 @@ export interface InitOpts {
   awsAccessKeyId?: string;
   awsSecretAccessKey?: string;
   awsSessionToken?: string;
+  project?: string;
   model?: string;
 }
 
@@ -268,6 +281,7 @@ export async function runInit(
     awsAccessKeyId: opts.awsAccessKeyId,
     awsSecretAccessKey: opts.awsSecretAccessKey,
     awsSessionToken: opts.awsSessionToken,
+    project: opts.project,
     model: opts.model,
   };
 
@@ -329,6 +343,16 @@ function hasCredentialContext(
           env.AWS_ACCESS_KEY_ID ||
           env.AWS_PROFILE,
       );
+    case "vertex":
+      // Vertex needs a project ID + Google ADC. Project ID can come
+      // from --project, $GOOGLE_CLOUD_PROJECT, or $GCLOUD_PROJECT.
+      // ADC presence we don't check here — if it's missing,
+      // buildDetector surfaces a clear error at scan time.
+      return Boolean(
+        opts.project?.trim() ||
+          env.GOOGLE_CLOUD_PROJECT ||
+          env.GCLOUD_PROJECT,
+      );
   }
 }
 
@@ -338,7 +362,10 @@ export function registerInitCommand(program: Command): void {
     .description(
       "first-run setup wizard, or non-interactive provider add. Pass enough flags (--provider + credential) to skip prompts entirely.",
     )
-    .option("--provider <name>", "Provider to configure: anthropic | openai | ollama | bedrock")
+    .option(
+      "--provider <name>",
+      "Provider to configure: anthropic | openai | ollama | bedrock | vertex",
+    )
     .option(
       "--api-key <key>",
       "API key for the chosen provider (sk-ant-api… / sk-…). For Anthropic, also accepts an sk-ant-oat… OAuth token.",
@@ -361,6 +388,10 @@ export function registerInitCommand(program: Command): void {
       "(Bedrock) explicit AWS secret access key. Must be set together with --aws-access-key-id.",
     )
     .option("--aws-session-token <token>", "(Bedrock) STS session token (optional).")
+    .option(
+      "--project <id>",
+      "(Vertex) GCP project ID hosting the Vertex AI Model Garden endpoint. Falls back to $GOOGLE_CLOUD_PROJECT / $GCLOUD_PROJECT at scan time if unset.",
+    )
     .option("--model <name>", "Default model for the chosen provider")
     .action(async (opts: InitOpts) => {
       try {

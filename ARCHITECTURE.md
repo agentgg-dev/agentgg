@@ -34,6 +34,7 @@ Each `ProviderModule` carries:
 | OpenAI | Vercel AI SDK (tool detector) | Vercel AI SDK (tool detector) | Vercel AI SDK (tool detector) | Vercel AI SDK (tool detector) |
 | Ollama | Vercel AI SDK (generateObject) | Vercel AI SDK (tool detector) | Vercel AI SDK (tool detector) | Vercel AI SDK (generateObject) |
 | AWS Bedrock | Vercel AI SDK (tool detector) | Vercel AI SDK (tool detector) | Vercel AI SDK (tool detector) | Vercel AI SDK (tool detector) |
+| Google Vertex AI (GLM-5 MaaS) | Vercel AI SDK (tool detector) | Vercel AI SDK (tool detector) | Vercel AI SDK (tool detector) | Vercel AI SDK (tool detector) |
 
 Anthropic via the Vercel SDK was dropped: OAuth tokens hitting the API directly get rate-limited, and `mode: "json"` is rejected for structured output. Both Anthropic auth types route through `claude-agent-sdk` for every Detector method.
 
@@ -44,7 +45,7 @@ Ollama splits because `structuredOutputs: true` (required for `generateObject`) 
 Three concrete `Detector` implementations, all in [`detectors/`](packages/cli/src/detectors/):
 
 - **`ClaudeAgentDetector`** ([`detectors/claude-agent.ts`](packages/cli/src/detectors/claude-agent.ts)) — wraps `@anthropic-ai/claude-agent-sdk`. Spawns the `claude` CLI as a child process. Handles every Detector method for both Anthropic auth types.
-- **`VercelAgentDetector`** ([`detectors/vercel-agent.ts`](packages/cli/src/detectors/vercel-agent.ts)) — Vercel AI SDK with a hand-rolled tool loop (`Read`/`Glob`/`Grep` as `tool()` definitions, multi-step `generateText` with TPM-retry). Backs OpenAI / Bedrock / Ollama hunt + walker, plus OpenAI / Bedrock file + validator. Maps `effort` → `providerOptions.openai.reasoningEffort` and `thinking` → `providerOptions.anthropic.thinking` where each provider supports it.
+- **`VercelAgentDetector`** ([`detectors/vercel-agent.ts`](packages/cli/src/detectors/vercel-agent.ts)) — Vercel AI SDK with a hand-rolled tool loop (`Read`/`Glob`/`Grep` as `tool()` definitions, multi-step `generateText` with TPM-retry). Backs OpenAI / Bedrock / Ollama / Vertex hunt + walker, plus OpenAI / Bedrock / Vertex file + validator. Maps `effort` → `providerOptions.openai.reasoningEffort` and `thinking` → `providerOptions.anthropic.thinking` where each provider supports it. Vertex routes through `@ai-sdk/openai` against the Vertex Model Garden OpenAI-compatible endpoint, with a `fetch` middleware that stamps Google ADC access tokens; GLM-5's `message.reasoning_content` field is non-standard and ignored by the JSON extractor.
 - **`MultiProviderDetector`** ([`detectors/multi-provider.ts`](packages/cli/src/detectors/multi-provider.ts)) — Vercel AI SDK's `generateObject` with strict structured-output schema. Used by Ollama for file mode / validate / score (where tool-calling and `structuredOutputs:true` collide). Throws on `hunt` / `investigate`.
 
 The orchestrator ([`scan.ts`](packages/cli/src/commands/scan.ts)) holds one `Detector` for the whole scan and calls `detectFile` / `investigate` / `hunt` / `validateFinding` / `validateFindingByScope` / `scoreFinding` depending on what each agent and phase needs.
@@ -86,8 +87,8 @@ Both run as separate Detector methods, so any provider participates without besp
 | `--max-turns <n>` | file, walker, hunt, validator | Max tool-use turns per LLM session. When set, overrides every per-mode default. When unset, each context uses: file=5, walker=30, hunt=150, validator=30. |
 | `--max-files-per-batch <n>` | walker | Candidate files packed into one investigation batch. Default 5. |
 | `--concurrency <n>` | walker, hunt, file | Parallel sessions in flight. Default 5. |
-| `--effort <level>` | Anthropic (OAuth + API key), OpenAI, Bedrock | Reasoning effort. `low`/`medium`/`high`/`max`. Anthropic via Claude Agent SDK: all four work. OpenAI / Bedrock via Vercel SDK: `max` maps to `high`. Ollama: honest no-op. |
-| `--thinking <mode>` | Anthropic (OAuth + API key), Bedrock (Anthropic-family models) | `off` / `adaptive` / `enabled`. Anthropic OAuth: all three. Anthropic API key / Bedrock via Vercel SDK: `adaptive` maps to `enabled`. OpenAI / Ollama: no equivalent. |
+| `--effort <level>` | Anthropic (OAuth + API key), OpenAI, Bedrock | Reasoning effort. `low`/`medium`/`high`/`max`. Anthropic via Claude Agent SDK: all four work. OpenAI / Bedrock via Vercel SDK: `max` maps to `high`. Ollama / Vertex: honest no-op. |
+| `--thinking <mode>` | Anthropic (OAuth + API key), Bedrock (Anthropic-family models) | `off` / `adaptive` / `enabled`. Anthropic OAuth: all three. Anthropic API key / Bedrock via Vercel SDK: `adaptive` maps to `enabled`. OpenAI / Ollama / Vertex: no equivalent — GLM-5 has its own thinking mode that is always on. |
 | `--diff <commit>` | walker, file, hunt | Walker/file: candidate list is intersected with the changed-file set. Hunt: agent still runs whole-repo but receives `git show <commit>` (message + patch) in the prompt as a focus hint; tools stay unrestricted. Accepts `<ref>`, `a..b`, or `a...b`. |
 | `--exclude <pattern>`, `--only <pattern>`, `--max-file-size <kb>` | walker, file (enumeration) | File-selection filters applied during walker enumeration. Hunt agents see them embedded in their prompt (not enforced by tools). |
 | `--score`, `--rescore` | post-detection | Runs the CVSS scoring pass after detection / validation. `--rescore` re-scores findings that already carry a score. |

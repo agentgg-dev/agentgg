@@ -148,6 +148,7 @@ agentgg scan ./src --no-gate -o ./out  # force every selected agent to run regar
 | **OpenAI** | API key |
 | **Ollama** | local URL |
 | **AWS Bedrock** | AWS credentials (env / `~/.aws/credentials` / IAM role) |
+| **Google Vertex AI (Model Garden)** | Google ADC (`gcloud auth application-default login` / `GOOGLE_APPLICATION_CREDENTIALS` / GCE/Cloud Run service account) + GCP project ID |
 
 All providers support all three agent modes. Hunt and walker are multi-step and tool-using, so finding quality scales with model quality.
 
@@ -159,6 +160,18 @@ Two things to know:
 
 - **Inference profiles are required for newer Claude models.** Default uses a US profile (`us.anthropic.*`); EU/APAC use `eu.*` / `apac.*`. Override at init time.
 - **Bedrock has no free tier.** Set a CloudWatch billing alarm before scanning large repos.
+
+### Google Vertex AI (Model Garden)
+
+`agentgg init --provider vertex --project my-gcp-project` walks you through setup. agentgg uses Google's [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials) — anything that works with `gcloud` (`gcloud auth application-default login`, `GOOGLE_APPLICATION_CREDENTIALS`, GCE/Cloud Run service account) works here. No API key.
+
+Default model is `zai-org/glm-5-maas` (GLM-5 managed, OpenAI-compatible). Pricing and quota are governed by Vertex AI Model Garden, not agentgg.
+
+Three things to know:
+
+- **Enable Vertex AI** on the target GCP project before first scan (`gcloud services enable aiplatform.googleapis.com`) and grant the calling identity `roles/aiplatform.user`.
+- **The MaaS endpoint runs in the `global` region pool only.** Code-under-scan transits a multi-region pool — if data residency matters, use a different provider.
+- **GLM-5 defaults to thinking mode.** Responses include a `message.reasoning_content` field on top of the standard OpenAI shape; with very small `--max-turns` budgets you may see truncated answers.
 
 ---
 
@@ -334,7 +347,7 @@ agentgg scan ./src \
   -o ./out
 ```
 
-`--api-key`, `--oauth-token`, `--base-url`, `--region`, and `--model` all work as one-shot overrides. Each is scoped to its provider; passing one that doesn't apply (e.g. `--region` with `--provider openai`) is a hard error, not a silent ignore.
+`--api-key`, `--oauth-token`, `--base-url`, `--region`, `--project`, and `--model` all work as one-shot overrides. Each is scoped to its provider; passing one that doesn't apply (e.g. `--region` with `--provider openai`) is a hard error, not a silent ignore.
 
 ### Manage agents
 
@@ -386,7 +399,7 @@ jobs:
           path: ./scan-results
 ```
 
-Store your provider credential as a repo secret (`Settings → Secrets and variables → Actions`). The example uses Anthropic. Swap `ANTHROPIC_API_KEY` for `OPENAI_API_KEY` (and add `--provider openai`) for OpenAI, or follow the AWS Bedrock section for Bedrock.
+Store your provider credential as a repo secret (`Settings → Secrets and variables → Actions`). The example uses Anthropic. Swap `ANTHROPIC_API_KEY` for `OPENAI_API_KEY` (and add `--provider openai`) for OpenAI, follow the AWS Bedrock section for Bedrock, or use [google-github-actions/auth](https://github.com/google-github-actions/auth) with `--provider vertex --project <id>` for Vertex AI.
 
 Findings land in the `agentgg-findings` workflow artifact for download. To block merges on confirmed findings, parse `./scan-results/summary.md` (or the per-finding files in `findings/`) and `exit 1` from a follow-up step.
 
@@ -434,7 +447,7 @@ Short reasoning citing the unsafe code element.
 
 | Command | What it does |
 |---|---|
-| `agentgg init` | One-time setup wizard. Pick a provider (Anthropic / OpenAI / Ollama / Bedrock) and paste credentials. Re-run to merge in another provider without overwriting the first. |
+| `agentgg init` | One-time setup wizard. Pick a provider (Anthropic / OpenAI / Ollama / Bedrock / Vertex) and paste credentials. Re-run to merge in another provider without overwriting the first. |
 | `agentgg scan <path>` | Run a security scan. Fingerprints the project, dispatches rule / file / walker / hunt agents per each agent's `mode`, and writes findings + state to `--output`. Supports `--diff` for PR review, `--validate` for second-pass classification, `--scope` for SECURITY.md-style rules. Resumes by default. |
 | `agentgg status [output-dir]` | Print a summary of a scan's output dir: file counts (analyzed / validated / pending), finding counts, validation verdicts, recent runs. Pass `--json` for machine-readable. |
 | `agentgg revalidate [output-dir]` | Re-run the validation phase against findings already on disk. Skips detection entirely. Use to validate with a different model, scope, or after editing the validator prompt. |
@@ -466,11 +479,12 @@ Run `agentgg <command> --help` for the full flag list on any subcommand.
 --exclude <pattern>             glob to exclude (repeatable; additive)
 --only <pattern>                restrict scan to matching globs (repeatable)
 --max-file-size <kb>            skip files larger than this (default 500)
---provider <name>               anthropic | openai | ollama | bedrock (overrides config default)
+--provider <name>               anthropic | openai | ollama | bedrock | vertex (overrides config default)
 --api-key <key>                 one-shot API key for anthropic / openai (not persisted)
 --oauth-token <token>           one-shot Anthropic OAuth token (not persisted)
 --base-url <url>                one-shot Ollama base URL (not persisted)
 --region <name>                 one-shot AWS region for Bedrock (not persisted)
+--project <id>                  one-shot GCP project ID for Vertex AI (not persisted)
 -v, --verbose                   verbose output
 ```
 

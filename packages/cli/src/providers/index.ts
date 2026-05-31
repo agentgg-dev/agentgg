@@ -4,6 +4,7 @@ import { bedrockModule } from "./bedrock.js";
 import { ollamaModule } from "./ollama.js";
 import { openaiModule } from "./openai.js";
 import type { ProviderFlag, ProviderModule } from "./types.js";
+import { vertexModule } from "./vertex.js";
 
 export {
   buildCredentialsFromOpts,
@@ -30,6 +31,7 @@ const MODULES: Record<Provider, ProviderModule> = {
   openai: openaiModule,
   ollama: ollamaModule,
   bedrock: bedrockModule,
+  vertex: vertexModule,
 };
 
 export function getProviderModule(name: Provider): ProviderModule {
