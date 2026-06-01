@@ -463,7 +463,7 @@ export async function runScan(
     );
     if (opts.verbose) {
       for (const d of selection.decisions) {
-        console.log(`  ${d.queued ? "[run] " : "[skip]"} ${d.slug}: ${d.reason}`);
+        console.log(`  ${d.queued ? "[queued] " : "[skipped]"} ${d.slug}: ${d.reason}`);
       }
     }
 
