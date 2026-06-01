@@ -105,5 +105,29 @@ export function lintOfficialAgents(agents: ReadonlyArray<Agent>): string[] {
     }
   }
 
+  // Regex-compilation check. Every regex an agent declares — in
+  // `where.preFilter` and in `precondition.regex.patterns` — must compile
+  // under `new RegExp`, or it silently does nothing at scan time (the
+  // evaluators swallow bad patterns). Catch them here instead.
+  for (const a of agents) {
+    const path = a.source?.path ?? "(unknown path)";
+    const patterns: Array<{ regex: string; field: string }> = [
+      ...a.where.preFilter.map((p) => ({ regex: p.regex, field: "where.preFilter" })),
+      ...(a.precondition?.regex?.patterns ?? []).map((p) => ({
+        regex: p.regex,
+        field: "precondition.regex.patterns",
+      })),
+    ];
+    for (const { regex, field } of patterns) {
+      try {
+        new RegExp(regex);
+      } catch (err) {
+        violations.push(
+          `invalid regex in ${field}: /${regex}/ — ${(err as Error).message}\n    ${path}`,
+        );
+      }
+    }
+  }
+
   return violations;
 }

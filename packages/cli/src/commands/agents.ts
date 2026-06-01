@@ -225,7 +225,7 @@ export function registerAgentsCommand(program: Command): void {
   agents
     .command("lint [path]")
     .description(
-      "lint an agents tree (defaults to the installed official dir) — checks for duplicate slugs and filename != slug. Intended for the agentgg-agents repo's pre-commit hook.",
+      "lint an agents tree (defaults to the installed official dir) — checks for duplicate slugs, filename != slug, and that every preFilter / precondition regex compiles. Intended for the agentgg-agents repo's pre-commit hook.",
     )
     .action((path: string | undefined) => {
       const env = process.env;
