@@ -14,21 +14,24 @@ import {
   writeAgentRun,
   writeFileRecord,
   writeRunMeta,
+  writeScanPlan,
 } from "@agentgg/core";
 import type { Command } from "commander";
 import { loadAllAgents } from "../agent-catalog.js";
 import { installOfficialAgents } from "../agents-install.js";
 import { runConcurrent } from "../concurrent.js";
-import type { RuleHitsForFile } from "../detect.js";
+import type { AgentCandidate } from "../detect.js";
 import { FatalScanError, handleDetectorError } from "../diagnostics.js";
 import { listChangedFiles, loadCommitPatch } from "../diff.js";
 import { loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
-import { evaluatePreFilter, type PreFilterHit } from "../pre-filter.js";
+import { evaluatePreFilter } from "../pre-filter.js";
+import { selectAgents } from "../precondition.js";
 import { buildCredentialsFromOpts, validateProviderFlags } from "../providers/index.js";
+import { renderReconForPrompt, runRecon } from "../recon.js";
 import { findingFilenameSlug, writeMarkdownReport } from "../reporters/md.js";
 import { resolveTemplates } from "../template.js";
 import { DEFAULT_VIEWER_PORT, openBrowser, startViewer } from "../viewer-server.js";
-import { type WalkConfig, walkForAgents } from "../walker.js";
+import { DEFAULT_EXCLUDES, type WalkConfig, walkForAgents } from "../walker.js";
 import { printReady } from "./view.js";
 
 interface ScanOpts {
@@ -58,17 +61,25 @@ interface ScanOpts {
   exclude?: string[];
   only?: string[];
   maxFileSize?: number; // KB
+  /**
+   * Apply the shared `DEFAULT_EXCLUDES` set (node_modules, .git, build
+   * dirs, lockfiles, binaries). Defaults to true. Commander stores
+   * `--no-default-excludes` as `defaultExcludes: false` — pass it to scan
+   * everything (only the CLI `--exclude` deletes still apply). Per-agent
+   * opt-out is `where.useDefaultExcludes`.
+   */
+  defaultExcludes?: boolean;
   /** Re-analyze files even when a prior FileRecord covers them with the same contentHash. */
   rescan?: boolean;
   /** Re-validate findings even when they already have a verdict on disk. */
   revalidateAll?: boolean;
   /**
-   * Max tool-use turns per LLM session. When set, applies uniformly across
-   * every mode (file/walker/hunt) and the validator. When unset, each context
-   * uses its own internal default (file=5, walker=30, hunt=150, validator=30).
+   * Max tool-use turns per LLM session. When set, applies uniformly to every
+   * agent batch, recon, and the validator. When unset, agent runs use the
+   * agent's `where.maxTurnsPerBatch` (default 30), recon uses 30, validator 30.
    */
   maxTurns?: number;
-  /** Walker mode: candidate files per investigation batch. Overrides agent default. */
+  /** Candidate files per agent batch. Overrides the agent's `where.maxFilesPerBatch`. */
   maxFilesPerBatch?: number;
   /** SDK reasoning effort. Maps to `effort` option. */
   effort?: "low" | "medium" | "high" | "max";
@@ -77,15 +88,11 @@ interface ScanOpts {
   /** Drop false-positive findings from the markdown report instead of keeping them (kept by default). */
   excludeFalsePositives?: boolean;
   /**
-   * Tech gate. Defaults to true. Disable with `--no-gate` to force
-   * every selected template to run regardless of `tech` declarations
-   * — useful for debugging a new agent on a repo where the tech
-   * detector doesn't yet recognize the stack.
-   *
-   * Commander stores `--no-gate` as `gate: false` (not `noGate`), so
-   * the field name here intentionally mirrors the flag root.
+   * Re-run recon even when a cached brief exists for this output dir.
+   * Recon is otherwise reused when the root + stack fingerprint are
+   * unchanged. Maps to `--re-recon`.
    */
-  gate?: boolean;
+  reRecon?: boolean;
   /**
    * Run the CVSS 3.1 scoring phase after detection (and after validation
    * when --validate is set). The scoring agent picks the 8 base metrics
@@ -111,26 +118,16 @@ interface ScanOpts {
 }
 
 /**
- * Orchestrate a scan. Each agent's declared `mode` decides its shape:
+ * Orchestrate a scan: recon → preconditions → run queued agents → validate
+ * → score → report.
  *
- *   - `mode: "file"` (default) → walk the repo, route each surviving file
- *     to the agents whose `filePatterns` match it, run one LLM call per
- *     (agent, file).
- *
- *   - `mode: "hunt"` → run one tool-enabled LLM session per agent across
- *     the whole repo. Under `--diff <commit>`, the agent is handed
- *     `git show <commit>` (message + patch) and told to focus its
- *     investigation on that commit; tools stay unrestricted so it can
- *     chase callers / imports / related files outward for context.
- *
- *   - `mode: "walker"` → enumerate by `filePatterns`, narrow with
- *     `preFilter` regexes, then pool matching files across agents into
- *     batched LLM sessions. Under `--diff <commit>`, the candidate file
- *     list is intersected with the files touched in that commit so only
- *     those files are investigated.
- *
- * `--diff <commit>` always means "review just this commit" — its own
- * patch (parent → commit), independent of the working tree state.
+ * Every agent is one unified, tool-enabled shape. Its `where` resolves to a
+ * concrete file set (`extensions` / `filePatterns` narrowed by `preFilter`;
+ * an empty `where` = all files), which is reviewed in batches of
+ * `maxFilesPerBatch`. The agent always has Read/Glob/Grep to read beyond its
+ * seeded files. Under `--diff <commit>`, each agent's candidate list is
+ * intersected with the files touched in that commit (its own patch,
+ * parent → commit, independent of the working tree).
  */
 export async function runScan(
   rootArg: string,
@@ -251,79 +248,40 @@ export async function runScan(
       throw new Error("No agents selected — nothing to scan.");
     }
 
-    // -------- tech gate --------
-    // Fingerprint the project once, then drop templates whose `tech`
-    // doesn't match any detected tag. `--no-gate` bypasses the filter for
-    // every selected template (debugging escape hatch). Templates with
-    // no `tech` declared always run — they're framework-agnostic.
-    //
-    // Done before mode dispatch so gated-out agents never enter the
-    // hunt/walker/file loops below. Logged as a single summary line
-    // (verbose lists the skipped slugs) so users can see what was dropped
-    // without scrolling through per-agent noise.
+    // Fingerprint the project once — its tags seed the recon agent (a
+    // head start on the stack) and are otherwise informational. There is
+    // no tech gate anymore: per-agent `precondition` checks decide what
+    // runs, so a Go-only repo simply fails the regex/prompt gates of
+    // PHP/Python agents instead of being filtered here.
     const project = fingerprint(root);
-    const gateEnabled = opts.gate !== false;
-    const detectedTagSet = new Set(project.tags);
-    const gatedAgents: Agent[] = [];
-    const skippedByGate: { slug: string; required: string[] }[] = [];
-    if (gateEnabled) {
-      for (const a of selectedAgents) {
-        const required = a.tech ?? [];
-        if (required.length === 0 || required.some((t) => detectedTagSet.has(t))) {
-          gatedAgents.push(a);
-        } else {
-          skippedByGate.push({ slug: a.slug, required });
-        }
-      }
-    } else {
-      gatedAgents.push(...selectedAgents);
-    }
-
-    console.log(
-      `Fingerprint: ${project.tags.length > 0 ? project.tags.join(", ") : "(no known tech detected)"}`,
-    );
-    if (skippedByGate.length > 0) {
-      console.log(
-        `Gated out: ${skippedByGate.length} template(s) (tech not present; pass --no-gate to force)`,
-      );
-      if (opts.verbose) {
-        for (const s of skippedByGate) {
-          console.log(`  - ${s.slug} (tech: ${s.required.join(", ")})`);
-        }
-      }
-    } else if (!gateEnabled && selectedAgents.some((a) => (a.tech ?? []).length > 0)) {
-      console.log("Gate: disabled (--no-gate) — running every selected template");
-    }
-
-    if (gatedAgents.length === 0) {
-      throw new Error(
-        "No agents survived the tech gate — every selected template requires tech not present in this repo. " +
-          "Pass --no-gate to force, or `agentgg agents list` to find agents that match this stack.",
-      );
-    }
-
-    // Re-bind so downstream code (hunt/walker/file split, summary printing)
-    // works against the gated set. Reassign rather than mutating because
-    // when `templateInputs.length === 0` and no base dir exists,
-    // `selectedAgents` aliases `catalog.agents` — mutating would corrupt
-    // the loader's catalog.
-    selectedAgents = gatedAgents;
 
     // `--diff <commit>` scopes the scan to a single commit's own changes
-    // (parent → commit), independent of working tree state.
-    //  - file & walker modes: intersect their candidate list with the
-    //    files touched in the commit (`git diff-tree --name-only`).
-    //  - hunt mode: `git show <commit>` (message + patch) is injected
-    //    into the hunter's prompt as a focus hint; tools stay
-    //    unrestricted so it can chase context outward.
+    // (parent → commit), independent of working tree state. Each agent's
+    // candidate list is intersected with the files touched in the commit
+    // (`git diff-tree --name-only`), and the commit patch (`git show`) is
+    // injected into the agent's prompt as a focus hint; tools stay
+    // unrestricted so the agent can chase context outward.
     const diffFiles: Set<string> | undefined = opts.diff
       ? new Set(listChangedFiles(opts.diff, root))
       : undefined;
     const diffPatch: string | undefined = opts.diff ? loadCommitPatch(opts.diff, root) : undefined;
 
+    // CLI `--exclude` paths are treated as DELETED: invisible to recon,
+    // the precondition census, and every agent's file selection. They're
+    // applied everywhere and can't be opted out of by a template.
     const excludePatterns = [...(opts.exclude ?? [])];
     const includePatterns = opts.only ?? [];
     const maxFileSizeBytes = (opts.maxFileSize ?? 500) * 1024;
+
+    // The baseline walk excludes = the shared default set + the deleted
+    // CLI paths. Recon and the precondition census use this. Per-agent
+    // walks below rebuild it so an agent can opt out of the defaults
+    // (`where.useDefaultExcludes: false`) while still honoring CLI deletes.
+    // `--no-default-excludes` drops the shared set globally for this run.
+    const walkExcludes =
+      opts.defaultExcludes === false
+        ? [...excludePatterns]
+        : [...DEFAULT_EXCLUDES, ...excludePatterns];
 
     // Read scope file once if --scope is set. Passed verbatim into the
     // validator prompt so `out-of-scope` becomes a meaningful verdict.
@@ -345,27 +303,15 @@ export async function runScan(
     const scopeOnlyValidate = !opts.validate && !!scopeContent;
 
     const walkCfg: WalkConfig = {
-      excludePatterns,
+      excludePatterns: walkExcludes,
       includePatterns,
       maxFileSizeBytes,
-    };
-
-    // Scope signature stamped on the per-agent resume sidecar. Walker/hunt
-    // agents skip on re-run only when this exact scope is still in effect.
-    // A change to --diff, --exclude, --only, --max-file-size, or root
-    // invalidates resume and re-runs the agent.
-    const currentScope: AgentRun["scope"] = {
-      diff: opts.diff,
-      excludePatterns: [...excludePatterns],
-      includePatterns: [...includePatterns],
-      maxFileSizeKb: opts.maxFileSize ?? 500,
-      rootPath: root,
     };
 
     const startedAt = new Date();
 
     console.log(`Scanning ${root}`);
-    console.log(`Agents: ${selectedAgents.map((a) => `${a.slug}[${a.mode}]`).join(", ")}`);
+    console.log(`Agents selected: ${selectedAgents.length}`);
     console.log(`Provider: ${detector.name}`);
     if (templateInputs.length > 0) {
       console.log(`Template filter: ${templateInputs.join(", ")}`);
@@ -444,83 +390,85 @@ export async function runScan(
       }
     }
 
-    const fileAgents = selectedAgents.filter((a) => a.mode === "file");
-    const huntAgents = selectedAgents.filter((a) => a.mode === "hunt");
-    const walkerAgents = selectedAgents.filter((a) => a.mode === "walker");
-    const ruleAgents = selectedAgents.filter((a) => a.mode === "rule");
+    // -------- PHASE 1 — recon: high-level project brief --------
+    // One tool-enabled survey of the repo, cached/resumed by reconHash.
+    // The brief is injected into precondition prompt gates and into every
+    // queued agent's detection prompt so the model starts oriented.
+    console.log("\n[1/3] Recon — surveying the project…");
+    const recon = await runRecon({
+      rootDir: root,
+      outDir,
+      detector,
+      fingerprintTags: project.tags,
+      excludePatterns: walkExcludes,
+      includePatterns,
+      maxFileSizeKb: opts.maxFileSize ?? 500,
+      maxTurns: opts.maxTurns ?? 30,
+      force: opts.reRecon,
+      signal: scanAbortController.signal,
+      verbose: opts.verbose,
+    });
+    const reconBlock = renderReconForPrompt(recon);
+    console.log(
+      `Recon: ${recon.languages.length > 0 ? recon.languages.join(", ") : "(languages unknown)"}${
+        recon.frameworks.length > 0 ? ` | ${recon.frameworks.join(", ")}` : ""
+      }`,
+    );
 
-    // -------- rule templates (run BEFORE hunt/walker/file) --------
-    // Rules are regex only — no LLM. They scan files matching their
-    // `filePatterns` with `preFilter` regexes and produce candidate
-    // hits attached to the matching files. Hits are seeded into the
-    // walker pool below so any walker agent whose `filePatterns`
-    // overlap a flagged file picks them up automatically, alongside
-    // that agent's own preFilter hits. Same `PreFilterHit` shape;
-    // existing batched-investigation prompt renders them with the
-    // rule slug as the source key.
-    //
-    // Cost: pure regex over `filePatterns`-matching files. ~ms per
-    // file; no LLM calls. Downstream effect is more candidates entering
-    // the walker pool — that adds LLM calls, but only where a consuming
-    // walker agent's file patterns overlap.
-    const ruleHitsByFile = new Map<string, Map<string, PreFilterHit[]>>();
-    if (ruleAgents.length > 0) {
-      const ruleWork = walkForAgents(root, ruleAgents, walkCfg);
-      let totalRuleHits = 0;
-      for (const { agent: rule, files } of ruleWork) {
-        const scopedFiles = diffFiles ? files.filter((f) => diffFiles.has(f)) : files;
-        for (const relPath of scopedFiles) {
-          let content: string;
-          try {
-            content = readFileSync(resolve(root, relPath), "utf8");
-          } catch {
-            continue;
-          }
-          const hits = evaluatePreFilter(content, rule.preFilter ?? []);
-          // `evaluatePreFilter` returns a synthetic single-line hit
-          // when preFilter is empty. For rule mode that would mean
-          // "every file you matched is a hit," which is rarely useful
-          // and almost never what the author intended — skip rules
-          // without explicit patterns.
-          if ((rule.preFilter ?? []).length === 0 || hits.length === 0) continue;
-          let byRule = ruleHitsByFile.get(relPath);
-          if (!byRule) {
-            byRule = new Map();
-            ruleHitsByFile.set(relPath, byRule);
-          }
-          byRule.set(rule.slug, hits);
-          totalRuleHits += hits.length;
-        }
+    // Scope signature stamped on each agent's resume sidecar. A change to
+    // --diff, --exclude, --only, --max-file-size, root, OR the recon brief
+    // invalidates resume and re-runs the agent.
+    const currentScope: AgentRun["scope"] = {
+      diff: opts.diff,
+      excludePatterns: [...excludePatterns],
+      includePatterns: [...includePatterns],
+      maxFileSizeKb: opts.maxFileSize ?? 500,
+      rootPath: root,
+      reconHash: recon.reconHash,
+    };
+
+    // -------- PHASE 2 — precondition: decide which agents run --------
+    // Every selected agent's `precondition` (regex existence checks and/or an
+    // LLM prompt gate that sees the recon brief) is evaluated up front, before
+    // ANY agent runs. No precondition = always queued. Regex checks are pure
+    // filesystem work; only prompt-gated agents incur an LLM call. The result
+    // is persisted to state/plan.json as the durable plan→run hand-off.
+    console.log("\n[2/3] Preconditions — deciding which agents run…");
+    const selection = await selectAgents(selectedAgents, {
+      rootDir: root,
+      walkCfg,
+      detector,
+      recon,
+      concurrency: opts.concurrency,
+      signal: scanAbortController.signal,
+      verbose: opts.verbose,
+    });
+    const queuedAgents = selection.queued;
+    const skippedCount = selection.decisions.length - queuedAgents.length;
+    // Persist the plan BEFORE any agent runs — this is the artifact a
+    // distributed runner consumes to dispatch the queued agents.
+    try {
+      writeScanPlan(outDir, {
+        runId: runMeta.runId,
+        generatedAt: new Date().toISOString(),
+        reconHash: recon.reconHash,
+        rootPath: root,
+        decisions: selection.decisions,
+      });
+    } catch (err) {
+      if (opts.verbose) console.error(`  plan: failed to write: ${(err as Error).message}`);
+    }
+    console.log(
+      `Preconditions: ${queuedAgents.length} queued, ${skippedCount} skipped → ${outDir}\\state\\plan.json`,
+    );
+    if (opts.verbose) {
+      for (const d of selection.decisions) {
+        console.log(`  ${d.queued ? "[run] " : "[skip]"} ${d.slug}: ${d.reason}`);
       }
-      console.log(
-        `  rules: ${ruleAgents.length} template(s) produced ${totalRuleHits} hit(s) across ${ruleHitsByFile.size} file(s)`,
-      );
     }
 
-    // Pre-compute the detector-shaped rule-hits map for hunt mode. Hunt
-    // calls receive the whole repo's rule hits as a scanner-context block
-    // in the prompt. File mode reuses the inner Map directly per file
-    // (converted inline at the dispatch call site below).
-    const huntRuleHits: ReadonlyMap<string, RuleHitsForFile[]> | undefined =
-      ruleHitsByFile.size > 0
-        ? new Map(
-            Array.from(ruleHitsByFile.entries()).map(([filePath, byRule]) => [
-              filePath,
-              Array.from(byRule.entries()).map(([ruleSlug, hits]) => ({ ruleSlug, hits })),
-            ]),
-          )
-        : undefined;
-
-    // -------- hunt-mode agents (run FIRST) --------
-    // Hunt agents are the heavier pass — give them a head start so the
-    // total wall-clock time is dominated by file-mode work that runs
-    // after, not waiting on a long-running hunt to finish.
-    // Under --diff, the hunter still runs but receives the commit patch
-    // in its prompt as a focus hint; tools stay unrestricted so it can
-    // chase context outward beyond the diff.
-    // Cached FileRecords used by both hunt and walker resume to lift prior
-    // findings on agent-level skip. Loaded lazily on first need so a
-    // first scan (state dir empty) doesn't pay the cost.
+    // Cached FileRecords used by agent-level resume to lift prior findings
+    // on skip. Loaded lazily so a first scan (empty state) doesn't pay.
     let allRecordsCache: FileRecord[] | null = null;
     const getAllRecords = (): FileRecord[] => {
       if (allRecordsCache === null) {
@@ -528,14 +476,28 @@ export async function runScan(
       }
       return allRecordsCache;
     };
-    for (const agent of huntAgents) {
-      // Resume path: per-agent sidecar records "this hunt finished in this
-      // output dir under this scope." Mirrors file-mode's per-file resume.
-      // Skip the LLM call entirely and lift prior findings from disk so the
-      // report still reflects them. `--rescan` bypasses the check.
+    // -------- run queued agents --------
+    // One unified path: every agent is a tool-enabled investigation over a
+    // concrete file set. Its `where` resolves to seeded candidate files
+    // (extensions/filePatterns + preFilter, intersected with --diff; empty
+    // `where` = all files), reviewed in batches. The agent has tools to read
+    // beyond its seeds. Findings are stamped with the agent's slug.
+    //
+    // Resume is per-agent: a completed agent with a matching scope
+    // (including reconHash) is skipped and its findings lifted from disk.
+    // An interrupted agent (no sidecar) re-runs in full. Agents run one at
+    // a time; their batches run concurrently.
+    const concurrency = Math.max(1, opts.concurrency ?? 5);
+    let cachedAgentCount = 0;
+    if (queuedAgents.length > 0) {
+      console.log(
+        `\n[3/3] Agents — ${queuedAgents.length} queued (completed agents are reused from prior runs; only new/changed work calls the LLM)…`,
+      );
+    }
+    for (const agent of queuedAgents) {
       if (!opts.rescan) {
         const prior = readAgentRun(outDir, agent.slug);
-        if (prior && prior.mode === "hunt" && scopeMatches(prior.scope, currentScope)) {
+        if (prior && scopeMatches(prior.scope, currentScope)) {
           const cached = getAllRecords()
             .flatMap((r) => r.findings)
             .filter((f) => f.agentSlug === agent.slug);
@@ -544,428 +506,187 @@ export async function runScan(
           for (const f of cached) {
             if (f.filePath && f.filePath !== "(unknown)") touchedFiles.add(f.filePath);
           }
+          cachedAgentCount++;
           console.log(
-            `  ${agent.slug}[hunt]: cached (${cached.length} finding(s) from prior run; pass --rescan to force)`,
+            `  ${agent.slug}: cached (${cached.length} finding(s) from prior run; pass --rescan to force)`,
           );
           continue;
         }
         if (opts.verbose && prior) {
-          const reason = !scopeMatches(prior.scope, currentScope)
-            ? scopeMismatchReason(prior.scope, currentScope)
-            : `prior mode was ${prior.mode}, expected hunt`;
           console.log(
-            `  ${agent.slug}[hunt]: sidecar present but ignored (${reason}) — re-running`,
+            `  ${agent.slug}: sidecar ignored (${scopeMismatchReason(prior.scope, currentScope)}) — re-running`,
           );
         }
       }
-      console.log(
-        opts.diff
-          ? `  ${agent.slug}[hunt]: reviewing commit ${opts.diff} (Read/Glob/Grep)`
-          : `  ${agent.slug}[hunt]: scanning whole repo (Read/Glob/Grep)`,
-      );
-      try {
-        // Merge the agent's declared `excludePatterns` (from
-        // frontmatter) with the CLI's --exclude list, deduped.
-        // Either alone is honored; both compose additively.
-        const agentExcludes = Array.from(
-          new Set([...excludePatterns, ...(agent.excludePatterns ?? [])]),
-        );
-        const huntFindings = await detector.hunt({
-          agent,
-          rootDir: root,
-          excludePatterns: agentExcludes,
-          includePatterns,
-          maxFileSizeKb: opts.maxFileSize ?? 500,
-          maxTurns: opts.maxTurns ?? 150,
-          diff:
-            opts.diff && diffPatch !== undefined
-              ? { commit: opts.diff, patch: diffPatch }
-              : undefined,
-          ruleHits: huntRuleHits,
-          signal: scanAbortController.signal,
-        });
-        // Drop findings where the model invented a path that doesn't exist on
-        // disk — common with smaller models that copy the example filePath from
-        // the output-format instruction instead of using a real path.
-        const validHuntFindings = huntFindings.filter((f) => {
-          if (!f.filePath || f.filePath === "(unknown)") return true;
-          if (existsSync(resolve(root, f.filePath))) return true;
-          if (opts.verbose) {
-            console.log(
-              `    ${agent.slug}: dropping finding with non-existent path: ${f.filePath}`,
-            );
-          }
-          return false;
-        });
-        findings.push(...validHuntFindings);
-        byAgent[agent.slug] = (byAgent[agent.slug] ?? 0) + validHuntFindings.length;
-        for (const f of validHuntFindings) touchedFiles.add(f.filePath);
-        const droppedCount = huntFindings.length - validHuntFindings.length;
-        console.log(
-          `    ${agent.slug}: ${validHuntFindings.length} finding(s) across ${
-            new Set(validHuntFindings.map((f) => f.filePath)).size
-          } file(s)${droppedCount > 0 ? ` (${droppedCount} dropped: path not found in repo)` : ""}`,
-        );
 
-        // Persist hunt findings per-file. We need each file's content to
-        // stamp a contentHash on the FileRecord; skip files that won't
-        // read (e.g. the model invented a path, or the file is binary).
-        const byFile = new Map<string, Finding[]>();
-        for (const f of validHuntFindings) {
-          if (!f.filePath || f.filePath === "(unknown)") continue;
-          const list = byFile.get(f.filePath) ?? [];
-          list.push(f);
-          byFile.set(f.filePath, list);
+      // Effective excludes for this agent: the default set (unless the
+      // agent opted out) + the deleted CLI paths + the agent's own
+      // declared excludes. CLI deletes always apply; defaults are
+      // overridable per template via `where.useDefaultExcludes`.
+      const agentBaseExcludes =
+        agent.where.useDefaultExcludes === false ? excludePatterns : walkExcludes;
+      const agentExcludes = Array.from(
+        new Set([...agentBaseExcludes, ...agent.where.excludePatterns]),
+      );
+      const agentWalkCfg: WalkConfig = {
+        excludePatterns: agentBaseExcludes,
+        includePatterns,
+        maxFileSizeBytes,
+      };
+      // Resolve `where` → seeded candidate files. The walker enumerates every
+      // file the `where` includes (`extensions` / `filePatterns`; an empty
+      // `where` includes ALL files), then `preFilter` narrows to anchor-
+      // carrying files (empty preFilter = every included file is a candidate).
+      // Under --diff, the list is intersected with the changed-file set.
+      // There is no "roam" mode: an agent always reviews a concrete file set
+      // in batches, and uses its tools to read beyond it when needed.
+      const candidates: AgentCandidate[] = [];
+      const [work] = walkForAgents(root, [agent], agentWalkCfg);
+      const files = work ? work.files : [];
+      const scopedFiles = diffFiles ? files.filter((f) => diffFiles.has(f)) : files;
+      for (const relPath of scopedFiles) {
+        let content: string;
+        try {
+          content = readFileSync(resolve(root, relPath), "utf8");
+        } catch {
+          continue;
         }
-        for (const [relPath, group] of byFile) {
-          let content: string;
-          try {
-            content = readFileSync(resolve(root, relPath), "utf8");
-          } catch {
-            continue;
-          }
-          persistDetection(relPath, agent, content, group);
-        }
-        // Mark the agent as completed in this output dir under this scope so
-        // the next re-run can skip it. The cache is invalidated naturally if
-        // any scope field differs (see `scopeMatches`). Only written on the
-        // happy path — a thrown hunt leaves no sidecar and re-runs next time.
+        const hits = evaluatePreFilter(content, agent.where.preFilter);
+        if (hits.length === 0) continue;
+        candidates.push({ filePath: relPath, content, hits });
+        touchedFiles.add(relPath);
+      }
+      if (candidates.length === 0) {
+        if (opts.verbose) console.log(`  ${agent.slug}: no candidate files`);
         try {
           writeAgentRun(outDir, {
             agentSlug: agent.slug,
-            mode: "hunt",
             lastCompletedRunId: runMeta.runId,
             lastCompletedAt: new Date().toISOString(),
             scope: currentScope,
-            findingCount: validHuntFindings.length,
+            precondition: { queued: true },
+            findingCount: 0,
           });
-          // Invalidate the records cache — a subsequent walker resume in the
-          // same scan run shouldn't miss findings we just persisted.
           allRecordsCache = null;
-        } catch (err) {
-          if (opts.verbose) {
-            console.error(
-              `    hunt:${agent.slug}: failed to write resume sidecar: ${(err as Error).message}`,
-            );
-          }
+        } catch {
+          // best-effort
         }
-      } catch (err) {
-        handleDetectorError(opts, `hunt:${agent.slug}`, err, scanAbortController);
-      }
-    }
-
-    // -------- walker-mode agents (run AFTER hunts, BEFORE file mode) --------
-    // Walker enumerates by filePatterns, each agent's preFilter regexes
-    // narrow to candidates, then matching candidates are POOLED ACROSS
-    // AGENTS by file. A file flagged by N agents is investigated ONCE
-    // in a session that carries all N agents' detection briefs + all N
-    // agents' hits, then findings are attributed back per-agent. The
-    // same file is never paid for twice.
-    // Under --diff, each agent's file list is intersected with the diff
-    // before pooling so unchanged files never enter the candidate set.
-    if (walkerAgents.length > 0) {
-      const walkerWork = walkForAgents(root, walkerAgents, walkCfg);
-
-      // file → { content, agentSlug → hits } — the cross-agent pool.
-      // Reading each file at most once even when many agents match.
-      type PooledFile = {
-        relPath: string;
-        content: string;
-        hitsByAgent: Map<string, { line: number; label: string; snippet: string }[]>;
-      };
-      const pool = new Map<string, PooledFile>();
-      const agentsBySlug = new Map(walkerAgents.map((a) => [a.slug, a]));
-
-      // Per-(file, agent) cached pairs we lifted from disk instead of
-      // queuing for the LLM. Only used for the verbose log line below.
-      let walkerCachedPairs = 0;
-      for (const { agent, files } of walkerWork) {
-        const scopedFiles = diffFiles ? files.filter((f) => diffFiles.has(f)) : files;
-        for (const relPath of scopedFiles) {
-          let entry = pool.get(relPath);
-          if (!entry) {
-            let content: string;
-            try {
-              content = readFileSync(resolve(root, relPath), "utf8");
-            } catch {
-              continue;
-            }
-            entry = { relPath, content, hitsByAgent: new Map() };
-            pool.set(relPath, entry);
-          }
-          const hits = evaluatePreFilter(entry.content, agent.preFilter ?? []);
-          if (hits.length === 0) continue;
-          // Resume path (per-(file, agent), mirrors file mode). When the
-          // FileRecord shows this agent already ran a `detect` on this file
-          // with the same contentHash, skip queuing the hit for the batch
-          // and lift the prior findings into memory so they appear in the
-          // report. `--rescan` bypasses the check.
-          if (!opts.rescan) {
-            const normalized = relPath.replace(/\\/g, "/");
-            let existing: FileRecord | null;
-            try {
-              existing = readFileRecord(outDir, normalized);
-            } catch {
-              existing = null;
-            }
-            const fileHash = hashContent(entry.content);
-            const ranBefore =
-              !!existing &&
-              existing.contentHash === fileHash &&
-              existing.analysisHistory.some(
-                (a) => a.phase === "detect" && a.agentSlugs.includes(agent.slug),
-              );
-            if (ranBefore && existing) {
-              const cached = existing.findings.filter((f) => f.agentSlug === agent.slug);
-              findings.push(...cached);
-              byAgent[agent.slug] = (byAgent[agent.slug] ?? 0) + cached.length;
-              touchedFiles.add(relPath);
-              walkerCachedPairs++;
-              continue;
-            }
-          }
-          entry.hitsByAgent.set(agent.slug, hits);
-          touchedFiles.add(relPath);
-        }
+        continue;
       }
 
-      // Seed rule hits into the pool. For every file already in the pool
-      // (i.e. matching at least one walker agent's filePatterns), attach
-      // any rule's hits under the rule's slug as another entry in
-      // `hitsByAgent`. The investigation prompt renders these the same
-      // way it renders walker-agent preFilter hits — the rule's slug
-      // and labels appear in context, but no LLM session runs for the
-      // rule itself.
-      //
-      // Files where a rule fired but no walker agent's filePatterns
-      // overlap are NOT pulled into the pool — that would require
-      // assigning the file to a specific agent's investigation, which
-      // we have no signal for in MVP.
-      if (ruleHitsByFile.size > 0) {
-        let ruleSeededFiles = 0;
-        for (const [relPath, byRule] of ruleHitsByFile) {
-          const entry = pool.get(relPath);
-          if (!entry) continue;
-          for (const [ruleSlug, hits] of byRule) {
-            entry.hitsByAgent.set(ruleSlug, hits);
-          }
-          ruleSeededFiles++;
-          touchedFiles.add(relPath);
-        }
-        if (opts.verbose && ruleSeededFiles > 0) {
-          console.log(
-            `    rules seeded ${ruleSeededFiles} file(s) into the walker pool with regex hits`,
-          );
-        }
-      }
+      const maxTurns = opts.maxTurns ?? agent.where.maxTurnsPerBatch;
+      const batchSize = Math.max(1, opts.maxFilesPerBatch ?? agent.where.maxFilesPerBatch);
+      const diffArg =
+        opts.diff && diffPatch !== undefined ? { commit: opts.diff, patch: diffPatch } : undefined;
 
-      // Drop files with no hits from any agent — they were walked but
-      // nothing flagged them. Files with at least one agent's hits
-      // become the candidates for batched investigation.
-      const candidates: PooledFile[] = [];
-      for (const entry of pool.values()) {
-        if (entry.hitsByAgent.size > 0) candidates.push(entry);
-      }
-
-      // Use the largest declared maxFilesPerBatch / maxTurnsPerBatch
-      // across participating agents as the batch sizing. The unified
-      // --max-turns CLI flag overrides per-batch turns when set; agents
-      // with smaller declared budgets implicitly benefit from the larger
-      // value when pooled with others.
-      const concurrency = Math.max(1, opts.concurrency ?? 5);
-      const declaredBatchSize = Math.max(...walkerAgents.map((a) => a.maxFilesPerBatch ?? 5));
-      const batchSize = Math.max(1, opts.maxFilesPerBatch ?? declaredBatchSize);
-      const declaredMaxTurns = Math.max(...walkerAgents.map((a) => a.maxTurnsPerBatch ?? 30));
-      const maxTurnsPerBatch = opts.maxTurns ?? declaredMaxTurns;
-
-      const batches: PooledFile[][] = [];
+      // Candidates are reviewed in batches of `batchSize`, run concurrently.
+      const batches: AgentCandidate[][] = [];
       for (let i = 0; i < candidates.length; i += batchSize) {
         batches.push(candidates.slice(i, i + batchSize));
       }
 
-      const totalAgentHits = candidates.reduce((n, c) => n + c.hitsByAgent.size, 0);
       console.log(
-        `  walker: ${walkerAgents.length} agent(s), ${candidates.length} candidate file(s), ${totalAgentHits} (file × agent) hit pair(s) → ${batches.length} batch(es) of up to ${batchSize} (concurrency ${concurrency})${
-          walkerCachedPairs > 0
-            ? ` — ${walkerCachedPairs} pair(s) reused from prior run (pass --rescan to force)`
-            : ""
-        }`,
+        `  ${agent.slug}: ${candidates.length} candidate file(s) → ${batches.length} batch(es) of up to ${batchSize} (concurrency ${concurrency})`,
       );
 
+      let agentFailed = false;
       await runConcurrent(batches, concurrency, async (batch) => {
-        // Union of agents that flagged any file in this batch — those
-        // are the briefs the investigator needs.
-        const agentSlugsInBatch = new Set<string>();
-        for (const c of batch) {
-          for (const slug of c.hitsByAgent.keys()) agentSlugsInBatch.add(slug);
-        }
-        const agentsInBatch = Array.from(agentSlugsInBatch)
-          .map((s) => agentsBySlug.get(s))
-          .filter((a): a is NonNullable<typeof a> => Boolean(a));
-
-        const labels = batch.map((c) => c.relPath).join(", ");
         try {
-          const batchFindings = await detector.investigate({
-            agents: agentsInBatch,
+          const batchFindings = await detector.runAgent({
+            agent,
             rootDir: root,
-            candidates: batch.map((c) => ({
-              filePath: c.relPath,
-              content: c.content,
-              hitsByAgent: Array.from(c.hitsByAgent.entries()).map(([agentSlug, hits]) => ({
-                agentSlug,
-                hits,
-              })),
-            })),
-            maxTurns: maxTurnsPerBatch,
+            recon: reconBlock,
+            candidates: batch,
+            excludePatterns: agentExcludes,
+            maxFileSizeKb: opts.maxFileSize ?? 500,
+            maxTurns,
+            diff: diffArg,
             signal: scanAbortController.signal,
           });
-          findings.push(...batchFindings);
-          for (const f of batchFindings) {
-            byAgent[f.agentSlug] = (byAgent[f.agentSlug] ?? 0) + 1;
+          // Drop findings whose filePath doesn't exist on disk (model
+          // invented a path — common with smaller models).
+          const valid = batchFindings.filter((f) => {
+            if (!f.filePath || f.filePath === "(unknown)") return true;
+            if (existsSync(resolve(root, f.filePath))) return true;
+            if (opts.verbose) {
+              console.log(
+                `    ${agent.slug}: dropping finding with non-existent path: ${f.filePath}`,
+              );
+            }
+            return false;
+          });
+          findings.push(...valid);
+          byAgent[agent.slug] = (byAgent[agent.slug] ?? 0) + valid.length;
+          for (const f of valid) {
+            if (f.filePath && f.filePath !== "(unknown)") touchedFiles.add(f.filePath);
           }
-          if (opts.verbose || batchFindings.length > 0) {
-            console.log(
-              `    batch [${labels}]: ${batchFindings.length} finding(s) across ${agentsInBatch.length} agent(s)`,
-            );
+          if (opts.verbose || valid.length > 0) {
+            const label = batch.map((c) => c.filePath).join(", ");
+            console.log(`    [${label}]: ${valid.length} finding(s)`);
           }
-          // Persist per (file, agent) pair: each finding goes to its
-          // owning agent's record on its filePath. A finding whose
-          // filePath is outside the batch (model followed an import)
-          // still gets routed to the right FileRecord.
-          for (const f of batchFindings) {
+          // Persist findings grouped by file.
+          const byFile = new Map<string, Finding[]>();
+          for (const f of valid) {
             if (!f.filePath || f.filePath === "(unknown)") continue;
-            const owningAgent = agentsBySlug.get(f.agentSlug);
-            if (!owningAgent) continue;
-            const inBatch = batch.find((c) => c.relPath === f.filePath);
+            const list = byFile.get(f.filePath) ?? [];
+            list.push(f);
+            byFile.set(f.filePath, list);
+          }
+          for (const [relPath, group] of byFile) {
+            const inBatch = batch.find((c) => c.filePath === relPath);
             let content: string;
             if (inBatch) {
               content = inBatch.content;
             } else {
               try {
-                content = readFileSync(resolve(root, f.filePath), "utf8");
+                content = readFileSync(resolve(root, relPath), "utf8");
               } catch {
                 continue;
               }
             }
-            persistDetection(f.filePath, owningAgent, content, [f]);
+            persistDetection(relPath, agent, content, group);
           }
-          // Stamp empty AnalysisRun for (batch member, agent) pairs
-          // that produced zero findings so status reports "analyzed".
+          // Stamp an empty record for candidate files with no findings so
+          // `status` reports candidate files with no findings as analyzed.
           for (const c of batch) {
-            for (const slug of c.hitsByAgent.keys()) {
-              const fHere = batchFindings.some(
-                (f) => f.filePath === c.relPath && f.agentSlug === slug,
-              );
-              if (fHere) continue;
-              const owningAgent = agentsBySlug.get(slug);
-              if (!owningAgent) continue;
-              persistDetection(c.relPath, owningAgent, c.content, []);
-            }
+            if (byFile.has(c.filePath)) continue;
+            persistDetection(c.filePath, agent, c.content, []);
           }
         } catch (err) {
-          handleDetectorError(opts, `walker:batch[${labels}]`, err, scanAbortController);
+          agentFailed = true;
+          handleDetectorError(opts, `agent:${agent.slug}`, err, scanAbortController);
         }
       });
-    }
 
-    // -------- file-mode agents (run AFTER hunts) --------
-    if (fileAgents.length > 0) {
-      const work = walkForAgents(root, fileAgents, walkCfg);
-      for (const f of work.flatMap((w) => w.files)) touchedFiles.add(f);
-
-      for (const { agent, files } of work) {
-        // When --diff is on, intersect the agent's file list with the
-        // set of files git says changed since the given commit. This is
-        // the whole point of --diff: only spend LLM calls on what moved.
-        const filteredFiles = diffFiles ? files.filter((f) => diffFiles.has(f)) : files;
-
-        if (filteredFiles.length === 0) {
-          if (opts.verbose) console.log(`  ${agent.slug}[file]: no matching files`);
-          continue;
-        }
-        const concurrency = Math.max(1, opts.concurrency ?? 5);
-        console.log(
-          `  ${agent.slug}[file]: ${filteredFiles.length} file(s) (concurrency ${concurrency})`,
-        );
-        // Parallel within an agent, sequential across agents. JS is
-        // single-threaded so the array/object mutations between awaits
-        // are race-free; runConcurrent just decides which task runs next.
-        let cachedCount = 0;
-        await runConcurrent(filteredFiles, concurrency, async (relPath) => {
-          const absPath = resolve(root, relPath);
-          let content: string;
-          try {
-            content = readFileSync(absPath, "utf8");
-          } catch (err) {
-            if (opts.verbose) {
-              console.log(`    skip ${relPath}: ${(err as Error).message}`);
-            }
-            return;
+      // Write the resume sidecar only when every batch succeeded — a
+      // failed agent leaves no sidecar and re-runs next time.
+      if (!agentFailed) {
+        try {
+          writeAgentRun(outDir, {
+            agentSlug: agent.slug,
+            lastCompletedRunId: runMeta.runId,
+            lastCompletedAt: new Date().toISOString(),
+            scope: currentScope,
+            precondition: { queued: true },
+            findingCount: byAgent[agent.slug] ?? 0,
+          });
+          allRecordsCache = null;
+        } catch (err) {
+          if (opts.verbose) {
+            console.error(
+              `    ${agent.slug}: failed to write resume sidecar: ${(err as Error).message}`,
+            );
           }
-          // Resume path: if a prior run already analyzed this exact
-          // content with this agent, lift the persisted findings into
-          // memory and skip the LLM call. `--rescan` bypasses the check.
-          const normalized = relPath.replace(/\\/g, "/");
-          if (!opts.rescan) {
-            const fileHash = hashContent(content);
-            let existing: FileRecord | null = null;
-            try {
-              existing = readFileRecord(outDir, normalized);
-            } catch {
-              existing = null;
-            }
-            const ranBefore =
-              !!existing &&
-              existing.contentHash === fileHash &&
-              existing.analysisHistory.some(
-                (a) => a.phase === "detect" && a.agentSlugs.includes(agent.slug),
-              );
-            if (ranBefore && existing) {
-              const cached = existing.findings.filter((f) => f.agentSlug === agent.slug);
-              findings.push(...cached);
-              byAgent[agent.slug] = (byAgent[agent.slug] ?? 0) + cached.length;
-              cachedCount++;
-              if (opts.verbose) {
-                console.log(`    ${relPath}: cached (${cached.length} finding(s) from disk)`);
-              }
-              return;
-            }
-          }
-          try {
-            // Per-file rule hits: convert this file's inner map to the
-            // detector-shaped array. Cheap (one Map.get + a small spread);
-            // undefined when no rule fired on this file.
-            const fileRuleHitsMap = ruleHitsByFile.get(relPath);
-            const fileRuleHits: RuleHitsForFile[] | undefined = fileRuleHitsMap
-              ? Array.from(fileRuleHitsMap.entries()).map(([ruleSlug, hits]) => ({
-                  ruleSlug,
-                  hits,
-                }))
-              : undefined;
-            const fileFindings = await detector.detectFile({
-              agent,
-              filePath: relPath,
-              content,
-              ruleHits: fileRuleHits,
-              signal: scanAbortController.signal,
-            });
-            findings.push(...fileFindings);
-            byAgent[agent.slug] = (byAgent[agent.slug] ?? 0) + fileFindings.length;
-            if (opts.verbose || fileFindings.length > 0) {
-              console.log(`    ${relPath}: ${fileFindings.length} finding(s)`);
-            }
-            // Always upsert the FileRecord even when no findings — that
-            // way `status` reports "analyzed" for clean files, not
-            // "pending."
-            persistDetection(relPath, agent, content, fileFindings);
-          } catch (err) {
-            handleDetectorError(opts, relPath, err, scanAbortController);
-          }
-        });
-        if (cachedCount > 0) {
-          console.log(`    ${cachedCount} file(s) reused from prior run (pass --rescan to force).`);
         }
       }
+    }
+    if (queuedAgents.length > 0) {
+      const ranCount = queuedAgents.length - cachedAgentCount;
+      console.log(
+        `  Agents: ${ranCount} ran, ${cachedAgentCount} reused from prior run${
+          cachedAgentCount > 0 ? " (pass --rescan to force a full re-run)" : ""
+        }`,
+      );
     }
 
     // -------- validation phase --------
@@ -1304,6 +1025,7 @@ function scopeMatches(prior: AgentRun["scope"], current: AgentRun["scope"]): boo
   if (prior.diff !== current.diff) return false;
   if (prior.rootPath !== current.rootPath) return false;
   if (prior.maxFileSizeKb !== current.maxFileSizeKb) return false;
+  if (prior.reconHash !== current.reconHash) return false;
   if (!sameSet(prior.excludePatterns, current.excludePatterns)) return false;
   if (!sameSet(prior.includePatterns, current.includePatterns)) return false;
   return true;
@@ -1333,6 +1055,9 @@ function scopeMismatchReason(prior: AgentRun["scope"], current: AgentRun["scope"
   }
   if (prior.maxFileSizeKb !== current.maxFileSizeKb) {
     return `maxFileSizeKb: ${prior.maxFileSizeKb} → ${current.maxFileSizeKb}`;
+  }
+  if (prior.reconHash !== current.reconHash) {
+    return `reconHash: ${prior.reconHash ?? "(none)"} → ${current.reconHash ?? "(none)"}`;
   }
   if (!sameSet(prior.excludePatterns, current.excludePatterns)) {
     return `excludePatterns: [${prior.excludePatterns.join(",")}] → [${current.excludePatterns.join(",")}]`;
@@ -1395,12 +1120,12 @@ export function registerScanCommand(program: Command): void {
     )
     .option(
       "--diff <commit>",
-      "Restrict the scan to a single commit's own changes (parent → commit), independent of the working tree. File- and walker-mode agents only see files touched in <commit>; hunt-mode agents receive `git show <commit>` (message + patch) in their prompt as a focus hint, with tools unrestricted so they can chase context outward.",
+      "Restrict the scan to a single commit's own changes (parent → commit), independent of the working tree. Each agent's candidate files are intersected with the files touched in <commit>, and the commit patch is injected into the agent's prompt as a focus hint (tools stay unrestricted so it can chase context outward).",
     )
     .option("--concurrency <n>", "parallel file processing", (v) => parseInt(v, 10), 5)
     .option(
       "--max-turns <n>",
-      "Max tool-use turns per LLM session. Overrides all per-mode defaults: file=5, walker=30, hunt=150, validator=30. When set, applies uniformly across every mode in this run.",
+      "Max tool-use turns per LLM session. When set, applies uniformly to every agent batch, recon, and the validator. When unset: agent batches use the agent's `where.maxTurnsPerBatch` (default 30), recon 30, validator 30.",
       (v) => parseInt(v, 10),
     )
     .option(
@@ -1410,7 +1135,7 @@ export function registerScanCommand(program: Command): void {
     )
     .option(
       "--effort <level>",
-      "SDK reasoning effort for tool-using calls (hunt / walker / validate). One of: low, medium, high, max. Default: SDK default (no override).",
+      "SDK reasoning effort for tool-using calls (recon, agent runs, validate). One of: low, medium, high, max. Default: SDK default (no override).",
     )
     .option(
       "--thinking <mode>",
@@ -1421,8 +1146,8 @@ export function registerScanCommand(program: Command): void {
       "Skip per-finding markdown reports for findings the validator marked false-positive (default: write them). FP findings always stay in state/files/* regardless.",
     )
     .option(
-      "--no-gate",
-      "Disable the tech gate. By default, agents/rules declaring `tech` skip on repos that don't match (e.g. PHP agents on a Go repo). Pass this to force every selected template to run regardless — useful when the tech detector doesn't yet recognize your stack, or when debugging a new agent.",
+      "--re-recon",
+      "Re-run the recon pass even if a cached brief exists for this output dir (default: reuse it when the project root + stack fingerprint are unchanged).",
     )
     .option(
       "--score",
@@ -1453,6 +1178,10 @@ export function registerScanCommand(program: Command): void {
       "skip files larger than this in KB (default 500)",
       (v) => parseInt(v, 10),
       500,
+    )
+    .option(
+      "--no-default-excludes",
+      "Don't apply the shared default exclude set (node_modules, .git, build dirs, lockfiles, binaries). Scans everything except your explicit --exclude paths. Per-agent opt-out is `where.useDefaultExcludes: false`.",
     )
     .option("-v, --verbose", "verbose output")
     .action(async (path: string, opts: ScanOpts) => {

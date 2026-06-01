@@ -1,20 +1,22 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
-import type { Agent, CvssScore, Finding } from "@agentgg/core";
+import type { CvssScore, Finding } from "@agentgg/core";
 import { generateObject, generateText, type LanguageModelV1, tool } from "ai";
 import { minimatch } from "minimatch";
 import { z } from "zod";
 import {
-  buildDetectPrompt,
-  buildHuntPrompt,
-  buildInvestigatePrompt,
+  buildAgentPrompt,
+  buildPreconditionPrompt,
+  buildReconPrompt,
   DetectionResult,
   type DetectionResult as DetectionResultType,
   type Detector,
-  type HuntArgs,
   hydrateFinding,
-  type InvestigateArgs,
-  type RuleHitsForFile,
+  PreconditionCheck,
+  type PreconditionCheckArgs,
+  type ReconArgs,
+  ReconResult,
+  type RunAgentArgs,
 } from "../detect.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import {
@@ -155,114 +157,89 @@ export class VercelAgentDetector implements Detector {
     this.verbose = opts.verbose ?? false;
   }
 
-  async detectFile(args: {
-    agent: Agent;
-    filePath: string;
-    content: string;
-    ruleHits?: ReadonlyArray<RuleHitsForFile>;
-    signal?: AbortSignal;
-  }): Promise<Finding[]> {
-    const { agent, filePath, content, ruleHits, signal } = args;
-    try {
-      const { object } = await withTpmRetry(
-        () =>
-          generateObject({
-            model: this.model,
-            schema: DetectionResult,
-            mode: "json",
-            prompt: buildDetectPrompt(agent, filePath, content, ruleHits),
-            providerOptions: this.providerOptionsArg(),
-            abortSignal: signal,
-          }),
-        signal,
-      );
-      // In file mode the caller provides the real path — ignore whatever
-      // the model put in `filePath` (models often emit placeholders here).
-      return object.findings.map((f) => hydrateFinding({ ...f, filePath: null }, agent, filePath));
-    } catch (err) {
-      debugLog("VercelAgentDetector.detectFile", err);
-      throw err;
-    }
-  }
-
-  async hunt(args: HuntArgs & { signal?: AbortSignal }): Promise<Finding[]> {
-    const {
-      agent,
-      rootDir,
-      excludePatterns,
-      includePatterns,
-      maxFileSizeKb,
-      maxTurns,
-      diff,
-      ruleHits,
-    } = args;
-    const basePrompt = buildHuntPrompt(agent, {
-      excludePatterns,
-      includePatterns,
-      maxFileSizeKb,
-      diff,
-      ruleHits,
+  async recon(args: ReconArgs & { signal?: AbortSignal }): Promise<ReconResult> {
+    const basePrompt = buildReconPrompt({
+      instructions: args.instructions,
+      fingerprintTags: args.fingerprintTags,
+      excludePatterns: args.excludePatterns,
+      includePatterns: args.includePatterns,
+      maxFileSizeKb: args.maxFileSizeKb,
     });
-    const prompt = `${basePrompt}\n\n${jsonOutputInstruction(false)}`;
-
+    const prompt = `${basePrompt}\n\n${reconJsonInstruction()}`;
     try {
       const { text } = await withTpmRetry(
         () =>
           generateText({
             model: this.model,
             prompt,
-            tools: buildTools(resolve(rootDir), maxFileSizeKb, this.verbose),
-            maxSteps: maxTurns + 1,
+            tools: buildTools(
+              resolve(args.rootDir),
+              args.maxFileSizeKb,
+              this.verbose,
+              args.excludePatterns,
+            ),
+            maxSteps: args.maxTurns + 1,
+            providerOptions: this.providerOptionsArg(),
+            abortSignal: args.signal,
+          }),
+        args.signal,
+      );
+      return await this.parseRecon(text, args.signal);
+    } catch (err) {
+      debugLog("VercelAgentDetector.recon", err);
+      throw err;
+    }
+  }
+
+  async runAgent(args: RunAgentArgs & { signal?: AbortSignal }): Promise<Finding[]> {
+    const base = buildAgentPrompt(args);
+    const prompt = `${base}\n\n${jsonOutputInstruction(false)}`;
+    try {
+      const { text } = await withTpmRetry(
+        () =>
+          generateText({
+            model: this.model,
+            prompt,
+            tools: buildTools(
+              resolve(args.rootDir),
+              args.maxFileSizeKb,
+              this.verbose,
+              args.excludePatterns,
+            ),
+            maxSteps: args.maxTurns + 1,
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
           }),
         args.signal,
       );
       const result = await this.parseOrReformat(text, false, args.signal);
-      return result.findings.map((f) => hydrateFinding(f, agent, f.filePath ?? "(unknown)"));
+      const fallback = args.candidates[0]?.filePath ?? "(unknown)";
+      return result.findings.map((f) => hydrateFinding(f, args.agent, f.filePath ?? fallback));
     } catch (err) {
-      debugLog("VercelAgentDetector.hunt", err);
+      debugLog("VercelAgentDetector.runAgent", err);
       throw err;
     }
   }
 
-  async investigate(args: InvestigateArgs & { signal?: AbortSignal }): Promise<Finding[]> {
-    const { agents, rootDir, candidates, maxTurns } = args;
-    const basePrompt = buildInvestigatePrompt(agents, candidates);
-    const multi = agents.length > 1;
-    const prompt = `${basePrompt}\n\n${jsonOutputInstruction(multi)}`;
-
+  async checkPrecondition(
+    args: PreconditionCheckArgs & { signal?: AbortSignal },
+  ): Promise<PreconditionCheck> {
     try {
-      const { text } = await withTpmRetry(
+      const { object } = await withTpmRetry(
         () =>
-          generateText({
+          generateObject({
             model: this.model,
-            prompt,
-            tools: buildTools(resolve(rootDir), undefined, this.verbose),
-            maxSteps: maxTurns + 1,
+            schema: PreconditionCheck,
+            mode: "json",
+            prompt: buildPreconditionPrompt(args),
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
           }),
         args.signal,
       );
-
-      const result = await this.parseOrReformat(text, multi, args.signal);
-
-      const agentsBySlug = new Map(agents.map((a) => [a.slug, a]));
-      const fallbackFilePath = candidates[0]?.filePath ?? "(unknown)";
-      const findings: Finding[] = [];
-      for (const f of result.findings) {
-        const owningAgent = (() => {
-          if (agents.length === 1) return agents[0];
-          if (f.agentSlug && agentsBySlug.has(f.agentSlug)) return agentsBySlug.get(f.agentSlug)!;
-          return undefined;
-        })();
-        if (!owningAgent) continue;
-        findings.push(hydrateFinding(f, owningAgent, f.filePath ?? fallbackFilePath));
-      }
-      return findings;
+      return object;
     } catch (err) {
-      debugLog("VercelAgentDetector.investigate", err);
+      debugLog("VercelAgentDetector.checkPrecondition", err);
       throw err;
     }
   }
@@ -363,6 +340,24 @@ export class VercelAgentDetector implements Detector {
     }
   }
 
+  /** Parse a ReconResult from the tool-loop's final text, with a
+   *  structuredModel reformat fallback (Ollama best-effort). */
+  private async parseRecon(text: string, signal?: AbortSignal): Promise<ReconResult> {
+    try {
+      return ReconResult.parse(extractJSON(text));
+    } catch (extractErr) {
+      if (!this.structuredModel) throw extractErr;
+      const { object } = await generateObject({
+        model: this.structuredModel,
+        schema: ReconResult,
+        mode: "json",
+        prompt: `The following is a completed recon survey of a codebase. Extract it into structured JSON.\n\n${text}\n\n${reconJsonInstruction()}`,
+        abortSignal: signal,
+      });
+      return object;
+    }
+  }
+
   private providerOptionsArg(): ProviderOptionsArg | undefined {
     if (!this.providerKey) return undefined;
 
@@ -387,7 +382,12 @@ export class VercelAgentDetector implements Detector {
 // Tool implementations
 // ---------------------------------------------------------------------------
 
-function buildTools(cwd: string, maxFileSizeKb: number | undefined, verbose: boolean) {
+function buildTools(
+  cwd: string,
+  maxFileSizeKb: number | undefined,
+  verbose: boolean,
+  exclude: string[] = [],
+) {
   const logTool = verbose
     ? (name: string, arg: string) => console.log(`    ${name} ${arg.slice(0, 100)}`)
     : () => undefined;
@@ -400,7 +400,7 @@ function buildTools(cwd: string, maxFileSizeKb: number | undefined, verbose: boo
       }),
       execute: async ({ path }) => {
         logTool("Read", path);
-        return readToolExecute(path, cwd, maxFileSizeKb);
+        return readToolExecute(path, cwd, maxFileSizeKb, exclude);
       },
     }),
     Glob: tool({
@@ -411,7 +411,7 @@ function buildTools(cwd: string, maxFileSizeKb: number | undefined, verbose: boo
       }),
       execute: async ({ pattern }) => {
         logTool("Glob", pattern);
-        return globToolExecute(pattern, cwd);
+        return globToolExecute(pattern, cwd, exclude);
       },
     }),
     Grep: tool({
@@ -427,21 +427,36 @@ function buildTools(cwd: string, maxFileSizeKb: number | undefined, verbose: boo
       }),
       execute: async ({ pattern, glob }) => {
         logTool("Grep", pattern);
-        return grepToolExecute(pattern, glob || undefined, cwd);
+        return grepToolExecute(pattern, glob || undefined, cwd, exclude);
       },
     }),
   };
+}
+
+/** A path is excluded (treated as deleted) when it matches any exclude
+ *  glob. Directory globs are also tested with a trailing `/**` stripped so
+ *  the directory itself and its contents are both blocked. */
+function isExcludedPath(rel: string, exclude: string[]): boolean {
+  return exclude.some((p) => {
+    if (minimatch(rel, p, { dot: true })) return true;
+    const base = p.replace(/\/\*\*?$/, "").replace(/\/+$/, "");
+    return base !== p && (rel === base || minimatch(rel, `${base}/**`, { dot: true }));
+  });
 }
 
 async function readToolExecute(
   path: string,
   cwd: string,
   maxFileSizeKb: number | undefined,
+  exclude: string[] = [],
 ): Promise<string> {
   try {
     const absolutePath = resolve(cwd, path);
     if (!isSafe(absolutePath, cwd)) {
       return "Error: Access denied. Path must be within the repository root.";
+    }
+    if (isExcludedPath(normalizeSep(relative(cwd, absolutePath)), exclude)) {
+      return "Error: This path is excluded from the scan (treated as not present).";
     }
     if (maxFileSizeKb !== undefined) {
       const { stat } = await import("node:fs/promises");
@@ -456,9 +471,13 @@ async function readToolExecute(
   }
 }
 
-async function globToolExecute(pattern: string, cwd: string): Promise<string> {
+async function globToolExecute(
+  pattern: string,
+  cwd: string,
+  exclude: string[] = [],
+): Promise<string> {
   try {
-    const results = await walkAndMatch(cwd, pattern, GLOB_MAX_RESULTS);
+    const results = await walkAndMatch(cwd, pattern, GLOB_MAX_RESULTS, exclude);
     if (results.length === 0) return "(no matches)";
     const out = results.join("\n");
     return results.length >= GLOB_MAX_RESULTS
@@ -473,6 +492,7 @@ async function grepToolExecute(
   pattern: string,
   glob: string | undefined,
   cwd: string,
+  exclude: string[] = [],
 ): Promise<string> {
   let regex: RegExp;
   try {
@@ -482,7 +502,7 @@ async function grepToolExecute(
   }
 
   try {
-    const files = await walkAndMatch(cwd, glob ?? "**/*", GLOB_MAX_RESULTS);
+    const files = await walkAndMatch(cwd, glob ?? "**/*", GLOB_MAX_RESULTS, exclude);
     const results: string[] = [];
 
     for (const file of files) {
@@ -515,6 +535,7 @@ async function walkAndMatch(
   rootDir: string,
   pattern: string,
   maxResults: number,
+  exclude: string[] = [],
 ): Promise<string[]> {
   const results: string[] = [];
 
@@ -527,6 +548,8 @@ async function walkAndMatch(
       if (entry.name.startsWith(".") || SKIP_DIRS.has(entry.name)) continue;
       const fullPath = join(dir, entry.name);
       const relPath = normalizeSep(relative(rootDir, fullPath));
+      // Excluded paths are treated as deleted — never descended or matched.
+      if (isExcludedPath(relPath, exclude)) continue;
       if (entry.isDirectory()) {
         await walk(fullPath);
       } else {
@@ -576,6 +599,16 @@ After your investigation, output ALL findings as a single JSON object matching E
 IMPORTANT: Every \`filePath\` must be a real file path you actually read or located with tools during this session. Do NOT copy the example path above — replace it with the actual path from your investigation. If no findings, output exactly: {"findings":[]}
 
 ${agentSlugNote}`;
+}
+
+function reconJsonInstruction(): string {
+  return `## Output format
+
+After your survey, output the brief as a single JSON object matching EXACTLY this shape — no prose, no markdown fences, no trailing text:
+
+{"purpose":"What this project is and does, 1-3 sentences.","languages":["typescript"],"frameworks":["next.js"],"authModel":"How auth works, or null.","integrations":["postgres","stripe"],"notableDirs":["src/api"],"summary":"A few short paragraphs orienting a security reviewer."}
+
+Keep every field short. Use [] for empty lists and null for an unknown authModel. Do NOT report vulnerabilities — this is orientation only.`;
 }
 
 function extractJSON(text: string): unknown {

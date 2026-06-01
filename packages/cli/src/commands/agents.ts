@@ -30,7 +30,10 @@ export function formatAgentsTable(
   const rows = agents.map((a) => ({
     slug: a.slug,
     category: getCategory(a, env),
-    mode: a.mode,
+    // "all" = empty where (every file); "scoped" = extensions/patterns set.
+    // Replaces the old `mode` column.
+    mode:
+      a.where.filePatterns.length === 0 && a.where.extensions.length === 0 ? "all" : "scoped",
     noise: a.noiseTier,
     description: truncate(a.description, 56),
   }));
@@ -47,7 +50,7 @@ export function formatAgentsTable(
     "  " +
     pad("CATEGORY", widths.category) +
     "  " +
-    pad("MODE", widths.mode) +
+    pad("SCOPE", widths.mode) +
     "  " +
     pad("NOISE", widths.noise) +
     "  DESCRIPTION";
@@ -124,7 +127,7 @@ export function registerAgentsCommand(program: Command): void {
     .option("--json", "emit raw JSON instead of a table")
     .option("--all", "show full table even when no filters are applied")
     .option("--category <names>", "filter by category, comma-separated (e.g. auth,injection)")
-    .option("--mode <modes>", "filter by mode, comma-separated (file, hunt, walker)")
+    .option("--mode <scopes>", "filter by scope, comma-separated (all, scoped)")
     .option("--noise <tiers>", "filter by noise tier, comma-separated (precise, normal, loud)")
     .action(
       (opts: {
@@ -147,7 +150,12 @@ export function registerAgentsCommand(program: Command): void {
         const filtered = all.filter(
           (a) =>
             matches(categories, getCategory(a)) &&
-            matches(modes, a.mode) &&
+            matches(
+              modes,
+              a.where.filePatterns.length === 0 && a.where.extensions.length === 0
+                ? "all"
+                : "scoped",
+            ) &&
             matches(noises, a.noiseTier),
         );
 

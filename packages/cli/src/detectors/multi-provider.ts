@@ -1,13 +1,17 @@
-import type { Agent, CvssScore, Finding } from "@agentgg/core";
+import type { CvssScore, Finding } from "@agentgg/core";
 import { generateObject, type LanguageModelV1 } from "ai";
 import {
-  buildDetectPrompt,
+  buildAgentPrompt,
+  buildPreconditionPrompt,
+  buildReconPrompt,
   DetectionResult,
   type Detector,
-  type HuntArgs,
   hydrateFinding,
-  type InvestigateArgs,
-  type RuleHitsForFile,
+  PreconditionCheck,
+  type PreconditionCheckArgs,
+  type ReconArgs,
+  ReconResult,
+  type RunAgentArgs,
 } from "../detect.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import {
@@ -92,53 +96,87 @@ export class MultiProviderDetector implements Detector {
     this.thinking = opts.thinking;
   }
 
-  async detectFile(args: {
-    agent: Agent;
-    filePath: string;
-    content: string;
-    ruleHits?: ReadonlyArray<RuleHitsForFile>;
-    signal?: AbortSignal;
-  }): Promise<Finding[]> {
-    const { agent, filePath, content, ruleHits, signal } = args;
+  async recon(args: ReconArgs & { signal?: AbortSignal }): Promise<ReconResult> {
+    // Best-effort: this detector has no tools, so the model can't browse
+    // the repo. It produces a brief from the fingerprint tags + its own
+    // priors. The resolver routes tool-capable providers to a detector
+    // that can actually read files; this is the degraded fallback.
     try {
       const { object } = await generateObject({
         model: this.model,
-        schema: DetectionResult,
+        schema: ReconResult,
         mode: "json",
-        prompt: buildDetectPrompt(agent, filePath, content, ruleHits),
+        prompt: buildReconPrompt({
+          instructions: args.instructions,
+          fingerprintTags: args.fingerprintTags,
+          excludePatterns: args.excludePatterns,
+          includePatterns: args.includePatterns,
+          maxFileSizeKb: args.maxFileSizeKb,
+        }),
         providerOptions: this.providerOptionsArg(),
-        abortSignal: signal,
+        abortSignal: args.signal,
       });
-      // In file mode the caller provides the real path — ignore whatever
-      // the model put in `filePath` (models often emit placeholders here).
-      return object.findings.map((f) => hydrateFinding({ ...f, filePath: null }, agent, filePath));
+      return object;
     } catch (err) {
       if (process.env.AGENTGG_DEBUG) {
         const util = await import("node:util");
-        console.error("---- MultiProviderDetector raw error ----");
+        console.error("---- MultiProviderDetector recon error ----");
         console.error(util.inspect(err, { depth: 5, colors: false }));
-        console.error("-----------------------------------------");
+        console.error("-------------------------------------------");
       }
       throw err;
     }
   }
 
-  async hunt(_args: HuntArgs & { signal?: AbortSignal }): Promise<Finding[]> {
-    throw new Error(
-      `Hunt mode is not supported by the MultiProviderDetector (provider: ${this.name}). ` +
-        "Hunt-mode agents are routed through the Claude Agent SDK. " +
-        "Use `--provider anthropic` (API key or OAuth) for hunt agents, " +
-        "or change the agent's mode to 'file'.",
-    );
+  async runAgent(args: RunAgentArgs & { signal?: AbortSignal }): Promise<Finding[]> {
+    // Best-effort, no tools: the model can't browse the repo, so it works
+    // from the seeded candidate file contents embedded in the prompt.
+    // Roam-mode agents (no candidates) will find little here — tool-capable
+    // providers are routed to a detector that can actually read files.
+    try {
+      const { object } = await generateObject({
+        model: this.model,
+        schema: DetectionResult,
+        mode: "json",
+        prompt: buildAgentPrompt(args),
+        providerOptions: this.providerOptionsArg(),
+        abortSignal: args.signal,
+      });
+      const fallback = args.candidates[0]?.filePath ?? "(unknown)";
+      return object.findings.map((f) => hydrateFinding(f, args.agent, f.filePath ?? fallback));
+    } catch (err) {
+      if (process.env.AGENTGG_DEBUG) {
+        const util = await import("node:util");
+        console.error("---- MultiProviderDetector runAgent error ----");
+        console.error(util.inspect(err, { depth: 5, colors: false }));
+        console.error("----------------------------------------------");
+      }
+      throw err;
+    }
   }
 
-  async investigate(_args: InvestigateArgs & { signal?: AbortSignal }): Promise<Finding[]> {
-    throw new Error(
-      `Walker mode is not supported by the MultiProviderDetector (provider: ${this.name}). ` +
-        "Walker-mode per-file investigation needs tool access; route through " +
-        "the Claude Agent SDK by using `--provider anthropic` (API key or OAuth), " +
-        "or change the agent's mode to 'file'.",
-    );
+  async checkPrecondition(
+    args: PreconditionCheckArgs & { signal?: AbortSignal },
+  ): Promise<PreconditionCheck> {
+    try {
+      const { object } = await generateObject({
+        model: this.model,
+        schema: PreconditionCheck,
+        mode: "json",
+        prompt: buildPreconditionPrompt(args),
+        providerOptions: this.providerOptionsArg(),
+        abortSignal: args.signal,
+      });
+      return object;
+    } catch (err) {
+      if (process.env.AGENTGG_DEBUG) {
+        const util = await import("node:util");
+        console.error("---- MultiProviderDetector checkPrecondition error ----");
+        console.error(util.inspect(err, { depth: 5, colors: false }));
+        console.error("-------------------------------------------------------");
+      }
+      throw err;
+    }
   }
 
   async validateFinding(args: {

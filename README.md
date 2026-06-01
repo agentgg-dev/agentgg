@@ -6,7 +6,7 @@
 
 **Agentic SAST. White box. CI ready.**
 
-`agentgg` is an agentic SAST scanner. Its agents reason about your code. They follow imports, check the call graph, and confirm findings before flagging, instead of pattern-matching the way traditional SAST does. 200+ official agents and rule templates cover security vulnerabilities, coding anti-patterns, and codebase recon; the catalog auto-downloads on first scan from [agentgg-dev/agentgg-agents](https://github.com/agentgg-dev/agentgg-agents). Run on your full repo or on a git diff for PR reviews. Each agent runs in one of four modes: **file**, **walker**, **hunt** (all LLM-driven), or **rule** (regex only, no LLM cost). agentgg fingerprints the project on each scan and skips agents whose tech declaration doesn't match the stack. PHP agents never run on Go-only repos. Interrupted scans resume on re-run: only new or changed files hit the LLM again.
+`agentgg` is an agentic SAST scanner. Its agents reason about your code — they follow imports, check the call graph, and confirm findings before flagging, instead of pattern-matching the way traditional SAST does. The catalog auto-downloads on first scan from [agentgg-dev/agentgg-agents](https://github.com/agentgg-dev/agentgg-agents). Run on your full repo or on a git diff for PR reviews. There's **one kind of agent**: a tool-enabled investigation (Read/Glob/Grep) that declares **where** to look (file types, paths, content regex) and an optional **precondition** that decides whether it's even worth running on this repo. Every scan opens with a fast **recon** pass that briefs the agents on what the project is. Interrupted scans resume on re-run: completed agents are skipped, only new or changed work hits the LLM again.
 
 **[agentgg.dev](https://agentgg.dev)** · [Agents catalog](https://github.com/agentgg-dev/agentgg-agents) · [Report a bug](https://github.com/agentgg-dev/agentgg/issues/new/choose) · [Report a security issue](https://github.com/agentgg-dev/agentgg/security)
 
@@ -20,9 +20,8 @@
 
 - [Install](#install)
 - [Quick start](#quick-start)
-- [How agents work](#how-agents-work)
-- [Four execution modes](#four-execution-modes)
-- [Tech gating](#tech-gating)
+- [How a scan runs](#how-a-scan-runs)
+- [Agent templates](#agent-templates)
 - [Providers](#providers)
 - [Examples](#examples)
 - [GitHub Actions](#github-actions)
@@ -44,8 +43,10 @@ git clone https://github.com/agentgg-dev/agentgg
 cd agentgg
 pnpm install
 pnpm --filter agentgg build:bundle
-pnpm --filter agentgg link --global
+cd packages/cli && pnpm link --global   # exposes the `agentgg` command (run `pnpm setup` once if it has no global bin dir)
 ```
+
+The global command is a link to `packages/cli`, so a later `pnpm --filter agentgg build` is picked up automatically — no re-link needed.
 
 Requires Node.js 20+ and pnpm 9+. See [CONTRIBUTING.md](https://github.com/agentgg-dev/agentgg/blob/main/CONTRIBUTING.md) for the dev workflow.
 
@@ -68,75 +69,59 @@ out/
 ├── findings/...          ← one .md per finding (GHSA-shaped)
 └── state/                ← what `status` and `revalidate` read
     ├── scan.json         ← root path + timestamps
+    ├── recon.json        ← the recon brief (phase 1)
+    ├── plan.json         ← which agents queued / skipped + why (phase 2)
     ├── runs/<id>.json    ← one per scan / revalidate
+    ├── agents/<slug>.json← per-agent resume sidecar
     └── files/<path>.json ← FileRecord per scanned source file
 ```
 
 The `state/` directory is what makes resume, status, and revalidate work. Re-running `scan` with the same `-o` skips files that haven't changed. Different `-o` = fresh scan.
 
-## How agents work
+## How a scan runs
 
-Every agent is a self-contained markdown file with YAML frontmatter:
+A scan is three phases, and each writes a durable artifact under `state/` so the steps are inspectable (and, later, distributable):
+
+1. **Recon** — a fast, tool-enabled survey runs once and writes a concise project brief to `state/recon.json`: what the project is, languages, frameworks, auth model, integrations. The brief is fed into the next phases so agents start oriented. Cached across runs; force a refresh with `--re-recon`.
+2. **Preconditions** — every selected agent is checked to decide whether it's worth running on *this* repo, and the queued/skipped decisions (with reasons) are written to `state/plan.json` **before any agent runs**.
+3. **Run → validate → score** — each queued agent runs over its file set in batches; then the optional validation and scoring passes classify and rate the findings.
+
+Interrupted scans resume: a completed agent is skipped on re-run (its findings lifted from disk); only new or changed work hits the LLM. Changing scope (`--diff`, `--exclude`, …) or the recon brief invalidates and re-runs the affected agents.
+
+## Agent templates
+
+Every agent is one kind of thing — a markdown file (YAML frontmatter + prompt body) with three parts: a **precondition**, a **where**, and the **instructions**. There are no execution modes.
 
 ```markdown
 ---
 slug: sql-injection
 name: SQL Injection
-description: String-concatenated SQL queries.
-mode: file                  # or "hunt"
+description: SQL built from untrusted input instead of parameterized queries.
 noiseTier: normal
-filePatterns:
-  - "**/*.{ts,js,py,rb,go}"
-references:
-  - CWE-89
+precondition:                      # 1. should this agent run on THIS repo?
+  regex:
+    patterns:
+      - regex: "\\.(query|execute)\\s*\\("
+        in: ["**/*.{ts,js,py,go,php}"]
+  # prompt: "Run only if this project talks to a SQL database."   # optional LLM gate
+where:                             # 2. which files to run on
+  extensions: [ts, js, py, go, php]
+  excludePatterns: ["**/*.{test,spec}.*"]
+  preFilter:                       # narrow to files containing a match (regex)
+    - { regex: "\\.(query|execute)\\s*\\(", label: "raw SQL call" }
+references: [CWE-89]
 ---
 
-You are reviewing source code for SQL injection. Look for queries
-built by string concatenation, template interpolation, or unescaped
-substitution. ...
+You are reviewing source for SQL injection. ...   # 3. the instructions
 ```
 
-The same schema applies whether the agent lives in:
+**Precondition** (optional) decides whether the agent is queued. `regex` is a cheap, no-LLM filesystem check — file `extensions`, sentinel `files`, `directories`, or content `patterns`. `prompt` is a one-shot LLM check that sees the recon brief. Both present = AND; omit it = always run. (This replaces the old per-stack tech gate: a PHP agent simply preconditions on `.php` existing, so it skips a Go-only repo on its own.)
 
-- **Official catalog** (`~/.agentgg/agentgg-agents/`): downloaded on first scan from [agentgg-dev/agentgg-agents](https://github.com/agentgg-dev/agentgg-agents); refresh with `agentgg agents update`
-- **User-installed** (`~/.agentgg/agents/custom/`): `agentgg agents add ./my-agent.md`
-- **Per-scan**: pass a `.md` file, directory, or `.txt` list to `-t/--template`
+**Where** is the file set the agent runs on. Use plain `extensions` (nuclei-style — `ts`, `php`), plus optional `filePatterns`/`excludePatterns` for complex include/exclude rules (globs, or a bare directory/file path — a directory matches everything under it), and a `preFilter` regex that narrows to files containing a match (and hands the model those lines as anchors). Empty `where` = all files. The matching files are reviewed in batches of `maxFilesPerBatch` (default 5).
 
-## Four execution modes
+**Instructions** are the prompt body. Every agent is tool-enabled (Read/Glob/Grep), so although it's seeded with specific files, it can follow imports and chase callers into other files to confirm a finding.
 
-Each agent declares its own `mode`. The framework dispatches accordingly.
-
-**`mode: rule`**: regex only. No LLM, no cost. The rule's `preFilter` patterns run against files matching `filePatterns` and produce candidate hits attached to those files. Hits flow into walker pool sessions, hunt prompts, and file prompts as scanner context, so other agents use them as anchors without rediscovering what's already known. Tech-gated by convention (e.g. only fires on Laravel repos):
-
-- `php-laravel-route`, `py-django-view`, `go-gin-route`, `jvm-spring-controller`, … (75+ framework entry-point finders)
-
-**`mode: file`**: one LLM call per (agent, matching file). No tools. Cheap, predictable:
-
-- `sql-injection`, `command-injection`, `hardcoded-secrets`, …
-
-**`mode: walker`**: anchored agentic investigation. The walker enumerates files matching the agent's `filePatterns`, the agent's `preFilter` regexes narrow to "candidates" with line hits, then each batch of candidates gets one tool-enabled session:
-
-- `openclaw-audit-allowlist-identity-walker`: anchored allowlist-bypass investigation
-
-**`mode: hunt`**: one tool-enabled session per agent across the whole repo. The agent uses Read/Glob/Grep to discover its own files. Good for cross-file logic and CVE-pattern hunts:
-
-- `missing-access-control`: IDOR / auth-middleware coverage across handlers
-- `openclaw-audit-allowlist-identity-hunter`: project-specific mutable-identity allowlist bypass
-
-All four modes run side-by-side in one scan. Rules run first (no LLM), then hunt agents (heaviest), then walker, then file agents.
-
-## Tech gating
-
-agentgg fingerprints the project on each scan (`package.json` deps, `composer.json`, `go.mod`, `Gemfile`, `pyproject.toml`, `Cargo.toml`, `.csproj`, etc.) and produces a set of tech tags (`nextjs`, `laravel`, `django`, `go`, `spring`, …). Agents and rules with a `tech:` field only run when at least one of their declared tags is present.
-
-A scan against a Go-only repo silently skips PHP/Python/Ruby/.NET agents; a Laravel scan silently skips Django/Rails/Spring agents. Generic agents (no `tech:` field) always run.
-
-```bash
-agentgg scan ./src -v -o ./out         # `-v` lists what was gated out and why
-agentgg scan ./src --no-gate -o ./out  # force every selected agent to run regardless
-```
-
-`--no-gate` is the escape hatch for debugging a new agent on a repo where the fingerprinter doesn't yet recognize the stack.
+Templates live in the **official catalog** (`~/.agentgg/agentgg-agents/`; refresh with `agentgg agents update`), are **user-installed** (`agentgg agents add ./my-agent.md`), or passed **per-scan** via `-t` — a slug, a `.md` file, a directory of `.md` files, or a `.txt` list.
 
 ## Providers
 
@@ -150,7 +135,7 @@ agentgg scan ./src --no-gate -o ./out  # force every selected agent to run regar
 | **AWS Bedrock** | AWS credentials (env / `~/.aws/credentials` / IAM role) |
 | **Google Vertex AI (Model Garden)** | Google ADC (`gcloud auth application-default login` / `GOOGLE_APPLICATION_CREDENTIALS` / GCE/Cloud Run service account) + GCP project ID |
 
-All providers support all three agent modes. Hunt and walker are multi-step and tool-using, so finding quality scales with model quality.
+Every agent is multi-step and tool-using (Read/Glob/Grep), so finding quality scales with model quality.
 
 ### AWS Bedrock
 
@@ -269,8 +254,8 @@ agentgg scan ./src -t sql-injection --validate --revalidate-all -o ./out
 
 How agents behave under `--diff`:
 
-- **file- and walker-mode agents**: candidate file lists are intersected with the changed-file set, so unchanged files cost zero LLM calls.
-- **hunt-mode agents**: still run whole-repo, but the commit message + patch is injected into the prompt as a focus hint. Tools stay unrestricted so the hunter can chase callers and imports outward for context.
+- Each agent's candidate file list is **intersected with the changed-file set**, so unchanged files cost zero LLM calls.
+- The commit message + patch is **injected into the agent's prompt as a focus hint**. Tools stay unrestricted, so the agent can chase callers and imports outward for context.
 
 ```bash
 # Review just the latest commit
@@ -291,7 +276,7 @@ agentgg scan ./src -t sql-injection --diff origin/main...HEAD -o ./out
 
 The `--diff` value is part of each agent's resume scope. Changing it (or rebasing so the merge base moves) invalidates resume and re-runs the agent.
 
-Patches larger than 64 MB (typically vendored-code or generated-file commits) are rejected for hunt agents. Narrow the scan or review them manually.
+Patches larger than 64 MB (typically vendored-code or generated-file commits) are rejected. Narrow the scan or review them manually.
 
 ### Inspect scan state
 
@@ -333,7 +318,7 @@ agentgg scan ./src --only "src/api/**/*.ts" --only "src/handlers/**/*.ts" -o ./o
 agentgg scan ./src --max-file-size 200 -o ./out      # skip files larger than 200 KB
 ```
 
-The walker auto-skips lockfiles, minified bundles, binary assets, `node_modules`, `dist`, `.git`, and the scan-results directory regardless of flags.
+By default the scan skips a built-in exclude set — lockfiles, minified bundles, binary assets, `node_modules`, `dist`, `.git`, and the scan-results directory. Pass `--no-default-excludes` to scan everything, or set `where.useDefaultExcludes: false` on a single agent. CLI `--exclude` paths are always treated as deleted (invisible to every agent).
 
 ### Use a one-off credential or model without saving it
 
@@ -448,7 +433,7 @@ Short reasoning citing the unsafe code element.
 | Command | What it does |
 |---|---|
 | `agentgg init` | One-time setup wizard. Pick a provider (Anthropic / OpenAI / Ollama / Bedrock / Vertex) and paste credentials. Re-run to merge in another provider without overwriting the first. |
-| `agentgg scan <path>` | Run a security scan. Fingerprints the project, dispatches rule / file / walker / hunt agents per each agent's `mode`, and writes findings + state to `--output`. Supports `--diff` for PR review, `--validate` for second-pass classification, `--scope` for SECURITY.md-style rules. Resumes by default. |
+| `agentgg scan <path>` | Run a security scan: recon → precondition gating → run queued agents → validate → score, writing findings + state to `--output`. Supports `--diff` for PR review, `--validate` for second-pass classification, `--scope` for SECURITY.md-style rules. Resumes by default. |
 | `agentgg status [output-dir]` | Print a summary of a scan's output dir: file counts (analyzed / validated / pending), finding counts, validation verdicts, recent runs. Pass `--json` for machine-readable. |
 | `agentgg revalidate [output-dir]` | Re-run the validation phase against findings already on disk. Skips detection entirely. Use to validate with a different model, scope, or after editing the validator prompt. |
 | `agentgg score [output-dir]` | Standalone CVSS 3.1 scoring pass over persisted findings. The agent picks the 8 base metrics; the score and severity bucket are computed deterministically. |
@@ -473,12 +458,14 @@ Run `agentgg <command> --help` for the full flag list on any subcommand.
 --scope <path>                  scope file the validator consults (enables `out-of-scope`)
 --rescan                        re-analyze files even if a prior run covered them
 --revalidate-all                re-validate findings that already have a verdict
---diff <commit>                 scope scan to a commit or range; file/walker agents only see touched files, hunt agents receive the patch as a focus hint (accepts `<ref>`, `a..b`, or `a...b`)
---no-gate                       disable the tech gate; force every selected agent to run regardless of the project fingerprint (default: agents with a `tech:` field skip when no detected tag matches)
---concurrency <n>               parallel files per agent (default 5)
---exclude <pattern>             glob to exclude (repeatable; additive)
+--diff <commit>                 scope scan to a commit or range; each agent's candidate files are intersected with the touched files and the patch is injected as a focus hint (accepts `<ref>`, `a..b`, or `a...b`)
+--re-recon                      re-run the recon pass instead of reusing the cached brief
+--max-files-per-batch <n>       candidate files per agent batch (overrides the agent's where.maxFilesPerBatch)
+--concurrency <n>               parallel batches per agent (default 5)
+--exclude <pattern>             path/glob to exclude — treated as deleted (repeatable; additive)
 --only <pattern>                restrict scan to matching globs (repeatable)
 --max-file-size <kb>            skip files larger than this (default 500)
+--no-default-excludes           don't apply the built-in excludes (node_modules, .git, lockfiles, binaries)
 --provider <name>               anthropic | openai | ollama | bedrock | vertex (overrides config default)
 --api-key <key>                 one-shot API key for anthropic / openai (not persisted)
 --oauth-token <token>           one-shot Anthropic OAuth token (not persisted)

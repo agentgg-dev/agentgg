@@ -1,17 +1,19 @@
-import type { Agent, CvssScore, Finding } from "@agentgg/core";
+import type { CvssScore, Finding } from "@agentgg/core";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import {
-  buildDetectPrompt,
-  buildHuntPrompt,
-  buildInvestigatePrompt,
+  buildAgentPrompt,
+  buildPreconditionPrompt,
+  buildReconPrompt,
   DetectionResult,
   type Detector,
-  type HuntArgs,
   hydrateFinding,
-  type InvestigateArgs,
-  type RuleHitsForFile,
+  PreconditionCheck,
+  type PreconditionCheckArgs,
+  type ReconArgs,
+  ReconResult,
+  type RunAgentArgs,
 } from "../detect.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import {
@@ -98,106 +100,56 @@ export class ClaudeAgentDetector implements Detector {
     this.name = opts.oauthToken ? "anthropic-oauth" : "anthropic-api";
   }
 
-  async detectFile(args: {
-    agent: Agent;
-    filePath: string;
-    content: string;
-    ruleHits?: ReadonlyArray<RuleHitsForFile>;
-    signal?: AbortSignal;
-  }): Promise<Finding[]> {
-    const { agent, filePath, content, ruleHits, signal } = args;
-    const prompt = buildDetectPrompt(agent, filePath, content, ruleHits);
-    // Single-turn: no tools needed — the file content is already in the
-    // prompt. `tools: []` removes all built-in tools from the model's
-    // context, so it can't burn turns on speculative tool calls.
-    // maxTurns kept at 5 as a safety margin pending separate revert.
-    const result = await this.runStructured({
+  async recon(args: ReconArgs & { signal?: AbortSignal }): Promise<ReconResult> {
+    const prompt = buildReconPrompt({
+      instructions: args.instructions,
+      fingerprintTags: args.fingerprintTags,
+      excludePatterns: args.excludePatterns,
+      includePatterns: args.includePatterns,
+      maxFileSizeKb: args.maxFileSizeKb,
+    });
+    // Tool-enabled survey with SDK-enforced structured output. Same
+    // mechanism as hunt — the model explores with Read/Glob/Grep and the
+    // final answer is constrained to the ReconResult schema.
+    return this.runStructured({
       prompt,
+      tools: ["Read", "Glob", "Grep"],
+      maxTurns: args.maxTurns,
+      cwd: args.rootDir,
+      schema: ReconResult,
+      signal: args.signal,
+    });
+  }
+
+  async checkPrecondition(
+    args: PreconditionCheckArgs & { signal?: AbortSignal },
+  ): Promise<PreconditionCheck> {
+    // Cheap single call, no tools — the recon brief is already in the
+    // prompt, so the model just judges relevance.
+    return this.runStructured({
+      prompt: buildPreconditionPrompt(args),
       tools: [],
-      maxTurns: 5,
-      schema: DetectionResult,
-      signal,
+      maxTurns: 3,
+      schema: PreconditionCheck,
+      signal: args.signal,
     });
-    return result.findings.map((f) => hydrateFinding(f, agent, filePath));
   }
 
-  async hunt(args: HuntArgs & { signal?: AbortSignal }): Promise<Finding[]> {
-    const {
-      agent,
-      rootDir,
-      excludePatterns,
-      includePatterns,
-      maxFileSizeKb,
-      maxTurns,
-      diff,
-      ruleHits,
-    } = args;
-    const prompt = buildHuntPrompt(agent, {
-      excludePatterns,
-      includePatterns,
-      maxFileSizeKb,
-      diff,
-      ruleHits,
-    });
-
-    // Single agentic run with SDK-enforced structured output. The
-    // model can chat in any narrative form during the session; the
-    // SDK constrains the *final* output to match the JSON schema
-    // generated from `DetectionResult`. No fence parsing, no string
-    // escapes, no shape conflicts — the typed object arrives as
-    // `msg.structured_output` and is Zod-validated defensively.
+  async runAgent(args: RunAgentArgs & { signal?: AbortSignal }): Promise<Finding[]> {
+    const prompt = buildAgentPrompt(args);
+    // Always tool-enabled. The model investigates the seeded candidate
+    // files (or roams the repo when there are none), with SDK-enforced
+    // structured output.
     const result = await this.runStructured({
       prompt,
       tools: ["Read", "Glob", "Grep"],
-      maxTurns,
-      cwd: rootDir,
+      maxTurns: args.maxTurns,
+      cwd: args.rootDir,
       schema: DetectionResult,
       signal: args.signal,
     });
-
-    return result.findings.map((f) => hydrateFinding(f, agent, f.filePath ?? "(unknown)"));
-  }
-
-  async investigate(args: InvestigateArgs & { signal?: AbortSignal }): Promise<Finding[]> {
-    const { agents, rootDir, candidates, maxTurns } = args;
-    const prompt = buildInvestigatePrompt(agents, candidates);
-
-    // Walker-mode batched flow: the model sees N candidate files in
-    // one session — possibly with hits from multiple agents pooled
-    // per file — and can cross-reference between them, with tools
-    // to chase context outside the batch. Same SDK structured output
-    // guarantee as hunt — final output is schema-validated by the
-    // SDK, no fence parsing.
-    const result = await this.runStructured({
-      prompt,
-      tools: ["Read", "Glob", "Grep"],
-      maxTurns,
-      cwd: rootDir,
-      schema: DetectionResult,
-      signal: args.signal,
-    });
-
-    // Attribution rules:
-    // - Single-agent batch: every finding is stamped with that agent.
-    // - Multi-agent batch: the model is told to set `agentSlug` per
-    //   finding; we trust that tag. Findings without a recognized
-    //   agentSlug in a multi-agent batch are dropped (they're either
-    //   model-invented or unattributable).
-    const agentsBySlug = new Map(agents.map((a) => [a.slug, a]));
-    const fallbackFilePath = candidates[0]?.filePath ?? "(unknown)";
-    const findings: Finding[] = [];
-    for (const f of result.findings) {
-      const owningAgent = (() => {
-        if (agents.length === 1) return agents[0];
-        if (f.agentSlug && agentsBySlug.has(f.agentSlug)) {
-          return agentsBySlug.get(f.agentSlug)!;
-        }
-        return undefined;
-      })();
-      if (!owningAgent) continue;
-      findings.push(hydrateFinding(f, owningAgent, f.filePath ?? fallbackFilePath));
-    }
-    return findings;
+    const fallback = args.candidates[0]?.filePath ?? "(unknown)";
+    return result.findings.map((f) => hydrateFinding(f, args.agent, f.filePath ?? fallback));
   }
 
   async validateFinding(args: {

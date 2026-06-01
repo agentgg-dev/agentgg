@@ -33,12 +33,14 @@ import { dirname, join, resolve } from "node:path";
 import {
   getAgentRunPath,
   getFileRecordPath,
+  getPlanPath,
+  getReconPath,
   getRunMetaPath,
   getScanMetaPath,
   getStateFilesDir,
   getStateRunsDir,
 } from "./paths.js";
-import { AgentRun, FileRecord, RunMeta, ScanMeta } from "./types.js";
+import { AgentRun, FileRecord, ReconReport, RunMeta, ScanMeta, ScanPlan } from "./types.js";
 
 export function generateRunId(): string {
   const now = new Date();
@@ -80,6 +82,46 @@ export function readScanMeta(outputDir: string): ScanMeta | null {
   if (!existsSync(path)) return null;
   try {
     return ScanMeta.parse(JSON.parse(readFileSync(path, "utf8")));
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ReconReport sidecar — one per output dir
+// ---------------------------------------------------------------------------
+
+/** Persist the recon brief to `<outputDir>/state/recon.json`. */
+export function writeReconReport(outputDir: string, report: ReconReport): void {
+  writeFileAtomic(getReconPath(outputDir), `${JSON.stringify(report, null, 2)}\n`);
+}
+
+/** Read the recon brief, or null when absent / corrupt. */
+export function readReconReport(outputDir: string): ReconReport | null {
+  const path = getReconPath(outputDir);
+  if (!existsSync(path)) return null;
+  try {
+    return ReconReport.parse(JSON.parse(readFileSync(path, "utf8")));
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ScanPlan sidecar — precondition decisions, one per output dir
+// ---------------------------------------------------------------------------
+
+/** Persist the precondition plan to `<outputDir>/state/plan.json`. */
+export function writeScanPlan(outputDir: string, plan: ScanPlan): void {
+  writeFileAtomic(getPlanPath(outputDir), `${JSON.stringify(plan, null, 2)}\n`);
+}
+
+/** Read the precondition plan, or null when absent / corrupt. */
+export function readScanPlan(outputDir: string): ScanPlan | null {
+  const path = getPlanPath(outputDir);
+  if (!existsSync(path)) return null;
+  try {
+    return ScanPlan.parse(JSON.parse(readFileSync(path, "utf8")));
   } catch {
     return null;
   }
@@ -200,7 +242,7 @@ function walk(dir: string, visit: (filePath: string) => void): void {
 }
 
 // ---------------------------------------------------------------------------
-// AgentRun (hunt/walker resume sidecar)
+// AgentRun (per-agent resume sidecar)
 // ---------------------------------------------------------------------------
 
 export function readAgentRun(outputDir: string, agentSlug: string): AgentRun | null {

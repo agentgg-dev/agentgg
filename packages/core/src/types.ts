@@ -19,9 +19,10 @@ export type NoiseTier = z.infer<typeof NoiseTier>;
  *      check (which sees the recon brief), both (AND), or neither
  *      (always run). See `Precondition`.
  *   2. `where` — the file scope fed into the agent as starting points:
- *      `filePatterns` + `excludePatterns` narrow the tree, `preFilter`
- *      regexes anchor specific lines. Empty `where` means "roam the whole
- *      repo with tools." See `Where`.
+ *      `extensions` / `filePatterns` + `excludePatterns` narrow the tree,
+ *      `preFilter` regexes anchor specific lines. An empty `where` includes
+ *      ALL files. Either way the agent gets a concrete file set (reviewed in
+ *      batches) and uses its tools to read beyond it. See `Where`.
  *   3. the prompt body (markdown after the frontmatter) — the harness +
  *      detection instructions the model runs with.
  *
@@ -125,8 +126,18 @@ export type Precondition = z.infer<typeof Precondition>;
 
 export const Where = z.object({
   /**
-   * Globs the agent applies to. Empty = the whole repo: the agent gets no
-   * seeded candidate files and roams via tools (old "hunt" behavior).
+   * File types to include, as plain extensions — `["ts", "php"]` (leading
+   * dot optional). The nuclei-style way to scope by file type: a file is
+   * included when its name ends with one of these. This is the primary
+   * knob; most agents only need `extensions` + `preFilter`.
+   */
+  extensions: z.array(z.string()).default([]),
+  /**
+   * Optional include patterns for cases `extensions` can't express — a
+   * specific file, a directory, or a glob (e.g. "src/legacy", "**​/*.proto").
+   * A bare path/dir matches everything under it. OR'd with `extensions`.
+   * When BOTH `extensions` and `filePatterns` are empty, the agent's scope is
+   * ALL files (reviewed in batches) — there is no file-less "roam" mode.
    */
   filePatterns: z.array(z.string()).default([]),
   /**
@@ -135,6 +146,14 @@ export const Where = z.object({
    * `filePatterns`.
    */
   excludePatterns: z.array(z.string()).default([]),
+  /**
+   * Whether to apply the shared default exclude set (node_modules, .git,
+   * build dirs, lockfiles, binary/asset files — see `DEFAULT_EXCLUDES`).
+   * Defaults to true so templates stay clean. Set to false for an agent
+   * that genuinely needs to look inside those paths (e.g. auditing a
+   * vendored dependency); CLI `--exclude` paths still apply regardless.
+   */
+  useDefaultExcludes: z.boolean().default(true),
   /**
    * Regexes that narrow `filePatterns`-matching files down to candidates
    * worth investigating: a file becomes a candidate when at least one
@@ -168,7 +187,7 @@ export const Agent = z.object({
   noiseTier: NoiseTier.default("normal"),
   /** Queue/skip gate. Omit entirely = always run. See `Precondition`. */
   precondition: Precondition.optional(),
-  /** File scope fed into the agent. Omit = roam the whole repo with tools. */
+  /** File scope fed into the agent. Omit = all files (reviewed in batches). */
   where: Where.default({}),
   /**
    * Documentation-only field. CWE / OWASP / GHSA / CVE IDs or URLs this
@@ -448,8 +467,6 @@ export const ReconReport = z.object({
   languages: z.array(z.string()).default([]),
   /** Frameworks / major libraries (e.g. ["next.js", "express"]). */
   frameworks: z.array(z.string()).default([]),
-  /** Entry points: HTTP routes, CLI commands, queue/event handlers. Short. */
-  entryPoints: z.array(z.string()).default([]),
   /** 1–2 sentences on how auth/identity works, if discernible. */
   authModel: z.string().optional(),
   /** External services, datastores, and third-party integrations. */
@@ -467,6 +484,36 @@ export const ReconReport = z.object({
   generatedAt: z.string(),
 });
 export type ReconReport = z.infer<typeof ReconReport>;
+
+// ---------------------------------------------------------------------------
+// ScanPlan — the precondition decision set (`<outputDir>/state/plan.json`)
+// ---------------------------------------------------------------------------
+//
+// Written once, after recon and after every agent's precondition has been
+// evaluated, but BEFORE any agent runs. It is the durable hand-off between
+// the "plan" phase and the "run" phase: a distributed runner can compute the
+// plan on one worker and dispatch the queued agents to others. Each decision
+// records whether the agent was queued and the human-readable reason.
+
+export const PreconditionDecisionRecord = z.object({
+  slug: z.string(),
+  queued: z.boolean(),
+  reason: z.string(),
+});
+export type PreconditionDecisionRecord = z.infer<typeof PreconditionDecisionRecord>;
+
+export const ScanPlan = z.object({
+  /** Run that produced this plan. */
+  runId: z.string(),
+  generatedAt: z.string(),
+  /** Hash of the recon brief the plan was computed against. */
+  reconHash: z.string(),
+  /** Absolute scanned root. */
+  rootPath: z.string(),
+  /** One entry per selected agent, in selection order. */
+  decisions: z.array(PreconditionDecisionRecord),
+});
+export type ScanPlan = z.infer<typeof ScanPlan>;
 
 // ---------------------------------------------------------------------------
 // UserConfig — what `agentgg init` writes to ~/.agentgg/config.json

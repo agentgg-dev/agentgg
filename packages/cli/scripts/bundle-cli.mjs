@@ -15,7 +15,7 @@
  * hook in cli/package.json.
  */
 
-import { chmodSync, readFileSync } from "node:fs";
+import { chmodSync, cpSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -62,6 +62,18 @@ await build({
   legalComments: "inline",
   logLevel: "info",
 });
+
+// Built-in agent files (recon.md, etc.) are read at runtime relative to
+// the bundle via import.meta.url, so they must be copied next to it.
+// esbuild only bundles JS — these markdown assets need an explicit copy.
+const agentsSrc = resolve(cliRoot, "src", "agents");
+const agentsDest = resolve(cliRoot, "dist", "agents");
+try {
+  cpSync(agentsSrc, agentsDest, { recursive: true });
+  log(`Copied built-in agents → ${agentsDest}`);
+} catch (err) {
+  log(`WARNING: failed to copy built-in agents: ${err.message}`);
+}
 
 // chmod +x is a no-op on Windows but matters on macOS/Linux installs.
 try {

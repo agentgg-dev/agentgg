@@ -115,6 +115,16 @@ export function getScanMetaPath(outputDir: string): string {
   return join(getStateDir(outputDir), "scan.json");
 }
 
+/** `<outputDir>/state/recon.json` — `ReconReport` (concise project brief, one per scan). */
+export function getReconPath(outputDir: string): string {
+  return join(getStateDir(outputDir), "recon.json");
+}
+
+/** `<outputDir>/state/plan.json` — `ScanPlan` (precondition queue/skip decisions). */
+export function getPlanPath(outputDir: string): string {
+  return join(getStateDir(outputDir), "plan.json");
+}
+
 /** `<outputDir>/state/files/` — mirrors the scan root, one `.json` per file. */
 export function getStateFilesDir(outputDir: string): string {
   return join(getStateDir(outputDir), "files");
@@ -137,12 +147,12 @@ export function getRunMetaPath(outputDir: string, runId: string): string {
   return join(getStateRunsDir(outputDir), `${runId}.json`);
 }
 
-/** `<outputDir>/state/agents/` — one `AgentRun` `.json` per hunt/walker agent. */
+/** `<outputDir>/state/agents/` — one `AgentRun` `.json` per agent. */
 export function getStateAgentsDir(outputDir: string): string {
   return join(getStateDir(outputDir), "agents");
 }
 
-/** `<outputDir>/state/agents/<slug>.json` — `AgentRun` sidecar (hunt/walker resume). */
+/** `<outputDir>/state/agents/<slug>.json` — `AgentRun` sidecar (per-agent resume). */
 export function getAgentRunPath(outputDir: string, agentSlug: string): string {
   assertSafeSegment(agentSlug, "agentSlug");
   return join(getStateAgentsDir(outputDir), `${agentSlug}.json`);

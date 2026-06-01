@@ -36,9 +36,12 @@ function buildDetector(config: UserConfig, options: ResolveOptions): Detector {
   });
   return {
     name: "ollama",
-    detectFile: (args) => fileDetector.detectFile(args),
-    hunt: (args) => agentDetector.hunt(args),
-    investigate: (args) => agentDetector.investigate(args),
+    // Tool-using work (recon survey, agent runs) goes through the Vercel
+    // tool-loop detector (best-effort JSON); tool-less work (precondition
+    // gate, validate, score) uses generateObject for strict output.
+    recon: (args) => agentDetector.recon(args),
+    checkPrecondition: (args) => fileDetector.checkPrecondition(args),
+    runAgent: (args) => agentDetector.runAgent(args),
     validateFinding: (args) => fileDetector.validateFinding(args),
     validateFindingByScope: (args) => fileDetector.validateFindingByScope(args),
     scoreFinding: (args) => fileDetector.scoreFinding(args),

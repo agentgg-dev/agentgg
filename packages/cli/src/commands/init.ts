@@ -153,9 +153,10 @@ async function pickModel(
     }
     if (provider === "ollama") {
       console.log(
-        "\nNote: hunt and walker agents need strong tool-calling and instruction\n" +
-          "following. Models ≥14B are recommended (qwen2.5:32b, llama3.1:70b,\n" +
-          "deepseek-r1:14b…). Smaller models are reliable for file-mode only.\n",
+        "\nNote: agents are tool-using (Read/Glob/Grep), so they need strong\n" +
+          "tool-calling and instruction following. Models ≥14B are recommended\n" +
+          "(qwen2.5:32b, llama3.1:70b, deepseek-r1:14b…). Smaller models are less\n" +
+          "reliable at driving the tool loop.\n",
       );
       const capable = installed.filter(isHuntCapable);
       const rest = installed.filter((m) => !isHuntCapable(m));
