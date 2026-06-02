@@ -162,13 +162,12 @@ Two things to know:
 
 `agentgg init --provider vertex --project my-gcp-project` walks you through setup. agentgg uses Google's [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials) — anything that works with `gcloud` (`gcloud auth application-default login`, `GOOGLE_APPLICATION_CREDENTIALS`, GCE/Cloud Run service account) works here. No API key.
 
-Default model is `zai-org/glm-5-maas` (GLM-5 managed, OpenAI-compatible). Pricing and quota are governed by Vertex AI Model Garden, not agentgg.
+Default model is `zai-org/glm-5-maas` (GLM-5 managed, OpenAI-compatible). The `init` picker also surfaces Llama 4 Scout and Maverick; pass `--model <id>` to use any other Model Garden MaaS model reachable through the OpenAI-compatible endpoint. Pricing and quota are governed by Vertex AI Model Garden, not agentgg.
 
-Three things to know:
+Things to know:
 
-- **Enable Vertex AI** on the target GCP project before first scan (`gcloud services enable aiplatform.googleapis.com`) and grant the calling identity `roles/aiplatform.user`.
-- **The MaaS endpoint runs in the `global` region pool only.** Code-under-scan transits a multi-region pool — if data residency matters, use a different provider.
-- **GLM-5 defaults to thinking mode.** Responses include a `message.reasoning_content` field on top of the standard OpenAI shape; with very small `--max-turns` budgets you may see truncated answers.
+- **Enable the specific Model Garden publisher model** in your GCP project before first scan (each one is gated separately) and grant the calling identity `roles/aiplatform.user`. `aiplatform.googleapis.com` itself must be enabled too: `gcloud services enable aiplatform.googleapis.com`.
+- **Pass `--region <name>` matching the model.** Each Vertex MaaS model is published to a specific region pool (check the model's Model Garden page in the GCP console). Defaults to `global`. The `init` wizard suggests the right region per curated model.
 
 ---
 
@@ -514,7 +513,7 @@ Run `agentgg <command> --help` for the full flag list on any subcommand.
 --api-key <key>                 one-shot API key for anthropic / openai (not persisted)
 --oauth-token <token>           one-shot Anthropic OAuth token (not persisted)
 --base-url <url>                one-shot Ollama base URL (not persisted)
---region <name>                 one-shot AWS region for Bedrock (not persisted)
+--region <name>                 one-shot region: AWS region (Bedrock) or Vertex publisher region pool (e.g. global, us-central1)
 --project <id>                  one-shot GCP project ID for Vertex AI (not persisted)
 -v, --verbose                   verbose output
 ```

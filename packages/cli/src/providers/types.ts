@@ -29,6 +29,7 @@ export interface CredentialOverrides {
   bedrockSecretAccessKey?: string;
   bedrockSessionToken?: string;
   vertexProject?: string;
+  vertexRegion?: string;
 }
 
 /**

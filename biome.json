@@ -12,6 +12,8 @@
       "!**/dist",
       "!**/node_modules",
       "!**/scan-results",
+      "!**/state/files",
+      "!**/state/runs",
       "!**/coverage",
       "!**/pnpm-lock.yaml"
     ]

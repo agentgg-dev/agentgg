@@ -29,7 +29,7 @@ export function buildCredentialsFromOpts(opts: ScanFlagOpts): CredentialOverride
     ...(opts.apiKey ? { anthropicApiKey: opts.apiKey, openaiApiKey: opts.apiKey } : {}),
     ...(opts.oauthToken ? { anthropicOauthToken: opts.oauthToken } : {}),
     ...(opts.baseUrl ? { ollamaBaseUrl: opts.baseUrl } : {}),
-    ...(opts.region ? { bedrockRegion: opts.region } : {}),
+    ...(opts.region ? { bedrockRegion: opts.region, vertexRegion: opts.region } : {}),
     ...(opts.project ? { vertexProject: opts.project } : {}),
   };
 }

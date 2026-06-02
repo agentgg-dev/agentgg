@@ -621,6 +621,15 @@ export const UserConfig = z
          */
         project: z.string().min(1).optional(),
         /**
+         * Vertex AI region pool the model is published to. `global` for
+         * GLM-5 (Z.ai publishes there); `us-central1` / `europe-west4`
+         * / etc. for Meta's Llama and Mistral MaaS. The hostname AND the
+         * URL's `locations/<x>` segment swap together — see
+         * `buildBaseURL` in providers/vertex.ts. Defaults to `global`
+         * when omitted (preserves GLM-5 behavior).
+         */
+        region: z.string().min(1).optional(),
+        /**
          * Vertex Model Garden model ID. Defaults to `zai-org/glm-5-maas`
          * (GLM-5 managed, OpenAI-compatible). GLM-5.1 is self-host only
          * today and not addressable through this block.
