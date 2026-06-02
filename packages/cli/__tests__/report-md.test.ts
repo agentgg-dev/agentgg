@@ -41,20 +41,26 @@ function makeFinding(overrides: Partial<Finding> = {}): Finding {
 }
 
 describe("findingFilename", () => {
-  it("includes a zero-padded sequence, slug, and short title", () => {
-    expect(findingFilename(makeFinding(), 0)).toMatch(
-      /^001-sql-injection-sqli-in-login-handler\.md$/,
-    );
+  it("is <agentSlug>-<title-slug>-<id>.md, no sequence prefix", () => {
+    expect(findingFilename(makeFinding())).toBe("sql-injection-sqli-in-login-handler-abc123.md");
   });
 
-  it("zero-pads the sequence", () => {
-    expect(findingFilename(makeFinding(), 9)).toMatch(/^010-/);
+  it("ends in the finding id so independent runs merge without collision", () => {
+    const a = findingFilename(makeFinding({ id: "aaa111" }));
+    const b = findingFilename(makeFinding({ id: "bbb222" }));
+    expect(a).not.toBe(b);
+    expect(a.endsWith("-aaa111.md")).toBe(true);
+    expect(b.endsWith("-bbb222.md")).toBe(true);
+  });
+
+  it("is stable for the same finding (idempotent overwrite on retry)", () => {
+    expect(findingFilename(makeFinding())).toBe(findingFilename(makeFinding()));
   });
 
   it("truncates extremely long titles", () => {
     const f = makeFinding({ title: "a".repeat(200) });
-    const name = findingFilename(f, 0);
-    // 3 (seq) + 1 (-) + slug + 1 (-) + max 40 char title slug + ".md"
+    const name = findingFilename(f);
+    // agentSlug + "-" + max 40 char title slug + "-" + id + ".md"
     expect(name.length).toBeLessThan(80);
   });
 });
@@ -136,7 +142,7 @@ describe("writeMarkdownReport", () => {
     expect(summary).toContain("# Scan summary");
     expect(summary).toContain("Total findings:** 2");
     expect(summary).toContain("`sql-injection`: 2");
-    expect(summary).toContain("findings/001-sql-injection-");
+    expect(summary).toContain("findings/sql-injection-sqli-in-login-handler-abc123.md");
   });
 
   it("renders false-positive findings by default", () => {

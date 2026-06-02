@@ -80,6 +80,11 @@ export function loadViewerState(): ViewerState {
   const statusCounts = { analyzed: 0, validated: 0, pending: 0 };
   for (const r of files) statusCounts[r.status]++;
 
+  // `files` holds one record per (agent, file) since the state is
+  // sharded by agent — so a source file scanned by N agents appears N
+  // times. Report distinct source paths, not raw record count.
+  const distinctFiles = new Set(files.map((r) => r.filePath)).size;
+
   return {
     outputDir,
     scan,
@@ -87,7 +92,7 @@ export function loadViewerState(): ViewerState {
     runs,
     findings,
     counts: {
-      files: files.length,
+      files: distinctFiles,
       analyzed: statusCounts.analyzed,
       validated: statusCounts.validated,
       pending: statusCounts.pending,

@@ -15,6 +15,7 @@ import { handleDetectorError } from "../diagnostics.js";
 import { loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
 import { buildCredentialsFromOpts, validateProviderFlags } from "../providers/index.js";
 import { writeMarkdownReport } from "../reporters/md.js";
+import { buildInvocation } from "./invocation.js";
 
 interface RevalidateOpts {
   /**
@@ -46,6 +47,13 @@ interface RevalidateOpts {
   validateMaxTurns?: number;
   /** Drop false-positive findings from the markdown report instead of keeping them (kept by default). */
   excludeFalsePositives?: boolean;
+  /**
+   * `--no-summary` → `summary: false`. Skip re-rendering the markdown report
+   * (`summary.md` + `findings/*.md`) after validation. Verdicts are still
+   * persisted to `state/files/*`; render later with `agentgg summary`.
+   * Commander defaults this to `true`; the bare flag sets it `false`.
+   */
+  summary?: boolean;
 }
 
 /**
@@ -149,7 +157,10 @@ export async function runRevalidate(
   if (opts.force) console.log(`  Force:       re-classifying everything`);
   console.log("");
 
-  const runMeta = createRunMeta({ type: "validate" });
+  const runMeta = createRunMeta({
+    type: "validate",
+    invocation: buildInvocation({ command: "revalidate" }),
+  });
   writeRunMeta(outputDir, runMeta);
 
   const startedAt = new Date();
@@ -168,11 +179,11 @@ export async function runRevalidate(
     // verdict is `out-of-scope`. In-scope/uncertain results are logged
     // but the finding's validation field is left untouched so a
     // follow-up full `revalidate` can still assess technical merit.
-    if (scopeOnlyValidate) {
+    if (scopeOnlyValidate && scopeContent !== undefined) {
       try {
         const result = await detector.validateFindingByScope({
           finding,
-          scope: scopeContent!,
+          scope: scopeContent,
           signal: revalidateAbortController.signal,
         });
         verdicts[result.verdict] = (verdicts[result.verdict] ?? 0) + 1;
@@ -265,22 +276,26 @@ export async function runRevalidate(
   // Re-render the per-finding markdown + summary so the on-disk
   // reports reflect the new verdicts. Without this, `findings/*.md`
   // keeps showing "Validation: _not run_" even though the underlying
-  // FileRecord has the verdict.
-  const allFindings = records.flatMap((r) => r.findings);
-  const byAgent: Record<string, number> = {};
-  for (const f of allFindings) {
-    byAgent[f.agentSlug] = (byAgent[f.agentSlug] ?? 0) + 1;
+  // FileRecord has the verdict. `--no-summary` skips this render — the
+  // verdicts are already persisted to state/files/*, so `agentgg summary`
+  // can produce the report later.
+  if (opts.summary !== false) {
+    const allFindings = records.flatMap((r) => r.findings);
+    const byAgent: Record<string, number> = {};
+    for (const f of allFindings) {
+      byAgent[f.agentSlug] = (byAgent[f.agentSlug] ?? 0) + 1;
+    }
+    writeMarkdownReport({
+      outDir: outputDir,
+      root: rootPath,
+      startedAt,
+      completedAt,
+      findings: allFindings,
+      filesScanned: records.length,
+      byAgent,
+      excludeFalsePositives: opts.excludeFalsePositives,
+    });
   }
-  writeMarkdownReport({
-    outDir: outputDir,
-    root: rootPath,
-    startedAt,
-    completedAt,
-    findings: allFindings,
-    filesScanned: records.length,
-    byAgent,
-    excludeFalsePositives: opts.excludeFalsePositives,
-  });
 
   const summary = Object.entries(verdicts)
     .sort()
@@ -288,6 +303,9 @@ export async function runRevalidate(
     .join(", ");
   console.log(`Done. Verdicts: ${summary || "(none)"}`);
   console.log(`  Rewrote ${dirtyRecords.size} FileRecord(s).`);
+  if (opts.summary === false) {
+    console.log("  Summary: skipped (--no-summary). Run `agentgg summary` to render it.");
+  }
 }
 
 export function registerRevalidateCommand(program: Command): void {
@@ -335,6 +353,10 @@ export function registerRevalidateCommand(program: Command): void {
     .option(
       "--exclude-false-positives",
       "Drop false-positive findings from the markdown report (default: keep them). FP findings always stay in state/files/* regardless.",
+    )
+    .option(
+      "--no-summary",
+      "Skip re-rendering the markdown report (summary.md + findings/*.md) after validation. Verdicts still persist to state/files/*; render later with `agentgg summary`.",
     )
     .option("--force", "re-validate findings that already have a verdict (default: skip them)")
     .option("-v, --verbose", "verbose output")

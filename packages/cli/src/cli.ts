@@ -5,10 +5,12 @@ import { Command } from "commander";
 import { registerAgentsCommand } from "./commands/agents.js";
 import { registerConfigCommand } from "./commands/config.js";
 import { registerInitCommand } from "./commands/init.js";
+import { registerReconCommand } from "./commands/recon.js";
 import { registerRevalidateCommand } from "./commands/revalidate.js";
 import { registerScanCommand } from "./commands/scan.js";
 import { registerScoreCommand } from "./commands/score.js";
 import { registerStatusCommand } from "./commands/status.js";
+import { registerSummaryCommand } from "./commands/summary.js";
 import { registerViewCommand } from "./commands/view.js";
 import { VERSION } from "./version.js";
 
@@ -21,10 +23,12 @@ program
   .helpOption("-h, --help", "show help");
 
 registerInitCommand(program);
+registerReconCommand(program);
 registerScanCommand(program);
 registerStatusCommand(program);
 registerRevalidateCommand(program);
 registerScoreCommand(program);
+registerSummaryCommand(program);
 registerViewCommand(program);
 registerAgentsCommand(program);
 registerConfigCommand(program);

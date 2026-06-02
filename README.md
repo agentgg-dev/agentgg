@@ -71,7 +71,7 @@ out/
     ├── scan.json         ← root path + timestamps
     ├── recon.json        ← the recon brief (phase 1)
     ├── plan.json         ← which agents queued / skipped + why (phase 2)
-    ├── runs/<id>.json    ← one per scan / revalidate
+    ├── runs/<id>.json    ← one per scan / recon / revalidate / score / summary
     ├── agents/<slug>.json← per-agent resume sidecar
     └── files/<path>.json ← FileRecord per scanned source file
 ```
@@ -84,9 +84,21 @@ A scan is three phases, and each writes a durable artifact under `state/` so the
 
 1. **Recon** — a fast, tool-enabled survey runs once and writes a concise project brief to `state/recon.json`: what the project is, languages, frameworks, auth model, integrations. The brief is fed into the next phases so agents start oriented. Cached across runs; force a refresh with `--re-recon`.
 2. **Preconditions** — every selected agent is checked to decide whether it's worth running on *this* repo, and the queued/skipped decisions (with reasons) are written to `state/plan.json` **before any agent runs**.
-3. **Run → validate → score** — each queued agent runs over its file set in batches; then the optional validation and scoring passes classify and rate the findings.
+3. **Run → validate → score → report** — each queued agent runs over its file set in batches; then the optional validation and scoring passes classify and rate the findings; finally `summary.md` + `findings/*.md` are rendered.
 
 Interrupted scans resume: a completed agent is skipped on re-run (its findings lifted from disk); only new or changed work hits the LLM. Changing scope (`--diff`, `--exclude`, …) or the recon brief invalidates and re-runs the affected agents.
+
+**Recon and the plan are reused, not just resumed.** When a `state/recon.json` already covers the project (same root + stack fingerprint), the survey is skipped; and when a matching `state/plan.json` already covers your `-t` selection, the precondition loop is skipped too — the scan just runs the agents the plan already queued. `--re-recon` forces both to be recomputed.
+
+**The phases can also run on their own**, each operating on the same `--output` dir:
+
+- `agentgg recon <path> -o <dir>` runs phases 1–2 only (writes `recon.json` + `plan.json`, no detection) — a cheap preview of what a scan would run, and a durable plan→run hand-off.
+- `agentgg revalidate <dir>` / `agentgg score <dir>` / `agentgg summary <dir>` run the validate / score / report steps on already-persisted findings.
+
+And the two phases can be skipped inline on a `scan`:
+
+- `--no-recon` skips the survey **and** the precondition loop, running every `-t` agent unconditionally with no project brief.
+- `--no-summary` skips the report render (findings still persist to `state/files/*`); render later with `agentgg summary`. `revalidate` and `score` accept `--no-summary` too, so you can defer the report to a single explicit render at the end.
 
 ## Agent templates
 
@@ -232,6 +244,34 @@ agentgg revalidate ./out                              # validate everything pend
 agentgg revalidate ./out --scope ./scope.md          # re-classify with scope
 agentgg revalidate ./out --force                     # re-classify everything
 ```
+
+### Plan first, then run
+
+Run recon + precondition planning on its own to preview what a scan would execute. The brief and plan are written to `--output`, and a follow-up `scan` reuses both — no second survey, no second precondition pass:
+
+```bash
+agentgg recon ./src -t base -o ./out     # phase 1–2 only: writes recon.json + plan.json
+agentgg scan  ./src -t base -o ./out     # reuses the brief + plan, runs the queued agents
+```
+
+To skip recon and gating entirely and run exactly the agents you pass (no project brief, no precondition filtering):
+
+```bash
+agentgg scan ./src -t sql-injection --no-recon -o ./out
+```
+
+### Defer the report to the end
+
+Each of `scan` / `revalidate` / `score` re-renders `summary.md` when it finishes. Pass `--no-summary` to skip those intermediate renders and produce the report once, explicitly, at the end:
+
+```bash
+agentgg scan       ./src -t base -o ./out --no-summary
+agentgg revalidate ./out --no-summary
+agentgg score      ./out --no-summary
+agentgg summary    ./out                   # render summary.md + findings/*.md once
+```
+
+Findings persist to `state/files/*` regardless, so `agentgg summary` can rebuild the report at any time.
 
 ### Force a fresh run
 
@@ -433,10 +473,12 @@ Short reasoning citing the unsafe code element.
 | Command | What it does |
 |---|---|
 | `agentgg init` | One-time setup wizard. Pick a provider (Anthropic / OpenAI / Ollama / Bedrock / Vertex) and paste credentials. Re-run to merge in another provider without overwriting the first. |
-| `agentgg scan <path>` | Run a security scan: recon → precondition gating → run queued agents → validate → score, writing findings + state to `--output`. Supports `--diff` for PR review, `--validate` for second-pass classification, `--scope` for SECURITY.md-style rules. Resumes by default. |
+| `agentgg recon <path>` | Run only phases 1–2 — the recon survey + precondition planning — writing `recon.json` + `plan.json` to `--output`. No detection. A cheap preview of what a scan would run; a later `scan` on the same `--output` reuses the brief and plan. |
+| `agentgg scan <path>` | Run a security scan: recon → precondition gating → run queued agents → validate → score → report, writing findings + state to `--output`. Supports `--diff` for PR review, `--validate` for second-pass classification, `--scope` for SECURITY.md-style rules, `--no-recon` to run every `-t` agent without gating, and `--no-summary` to defer the report. Reuses a cached recon brief + plan; resumes by default. |
 | `agentgg status [output-dir]` | Print a summary of a scan's output dir: file counts (analyzed / validated / pending), finding counts, validation verdicts, recent runs. Pass `--json` for machine-readable. |
-| `agentgg revalidate [output-dir]` | Re-run the validation phase against findings already on disk. Skips detection entirely. Use to validate with a different model, scope, or after editing the validator prompt. |
-| `agentgg score [output-dir]` | Standalone CVSS 3.1 scoring pass over persisted findings. The agent picks the 8 base metrics; the score and severity bucket are computed deterministically. |
+| `agentgg revalidate [output-dir]` | Re-run the validation phase against findings already on disk. Skips detection entirely. Use to validate with a different model, scope, or after editing the validator prompt. `--no-summary` defers the report render. |
+| `agentgg score [output-dir]` | Standalone CVSS 3.1 scoring pass over persisted findings. The agent picks the 8 base metrics; the score and severity bucket are computed deterministically. `--no-summary` defers the report render. |
+| `agentgg summary [output-dir]` | Render `summary.md` + `findings/*.md` from persisted findings. No LLM, no detection. Pairs with `scan/revalidate/score --no-summary` to render the report once, at the end. |
 | `agentgg view [output-dir]` | Boot the bundled Next.js viewer on a local port to browse findings in a web UI. |
 | `agentgg agents list` | List installed agents (official + user-installed). Pass `--json` for machine-readable. |
 | `agentgg agents info <slug>` | Print an agent's full frontmatter + prompt body. |
@@ -459,7 +501,9 @@ Run `agentgg <command> --help` for the full flag list on any subcommand.
 --rescan                        re-analyze files even if a prior run covered them
 --revalidate-all                re-validate findings that already have a verdict
 --diff <commit>                 scope scan to a commit or range; each agent's candidate files are intersected with the touched files and the patch is injected as a focus hint (accepts `<ref>`, `a..b`, or `a...b`)
---re-recon                      re-run the recon pass instead of reusing the cached brief
+--re-recon                      re-run the recon pass + precondition plan instead of reusing the cached brief/plan
+--no-recon                      skip the recon survey AND precondition gating; run every -t agent unconditionally
+--no-summary                    skip writing the markdown report (summary.md + findings/*.md); state still persists
 --max-files-per-batch <n>       candidate files per agent batch (overrides the agent's where.maxFilesPerBatch)
 --concurrency <n>               parallel batches per agent (default 5)
 --exclude <pattern>             path/glob to exclude — treated as deleted (repeatable; additive)

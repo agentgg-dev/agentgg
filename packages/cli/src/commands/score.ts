@@ -14,6 +14,7 @@ import { runConcurrent } from "../concurrent.js";
 import { handleDetectorError } from "../diagnostics.js";
 import { type CredentialOverrides, loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
 import { findingFilenameSlug, writeMarkdownReport } from "../reporters/md.js";
+import { buildInvocation } from "./invocation.js";
 
 interface ScoreOpts {
   provider?: string;
@@ -34,6 +35,13 @@ interface ScoreOpts {
   verbose?: boolean;
   /** Override the scanned root recorded in scan.json — rare. */
   root?: string;
+  /**
+   * `--no-summary` → `summary: false`. Skip re-rendering the markdown report
+   * (`summary.md` + `findings/*.md`) after scoring. Scores are still persisted
+   * to `state/files/*`; render later with `agentgg summary`. Commander
+   * defaults this to `true`; the bare flag sets it `false`.
+   */
+  summary?: boolean;
 }
 
 /**
@@ -128,7 +136,10 @@ export async function runScore(
   if (opts.force) console.log(`  Force:       re-scoring everything`);
   console.log("");
 
-  const runMeta = createRunMeta({ type: "scan" });
+  const runMeta = createRunMeta({
+    type: "scan",
+    invocation: buildInvocation({ command: "score" }),
+  });
   writeRunMeta(outputDir, runMeta);
 
   const startedAt = new Date();
@@ -202,22 +213,26 @@ export async function runScore(
   });
 
   // Re-render reports so `findings/*.md` and `summary.md` reflect the
-  // new scores. Mirrors the post-revalidate re-render.
-  const allFindings = records.flatMap((r) => r.findings);
-  const byAgent: Record<string, number> = {};
-  for (const f of allFindings) {
-    byAgent[f.agentSlug] = (byAgent[f.agentSlug] ?? 0) + 1;
+  // new scores. Mirrors the post-revalidate re-render. `--no-summary`
+  // skips it — scores are already persisted to state/files/*, so
+  // `agentgg summary` can render the report later.
+  if (opts.summary !== false) {
+    const allFindings = records.flatMap((r) => r.findings);
+    const byAgent: Record<string, number> = {};
+    for (const f of allFindings) {
+      byAgent[f.agentSlug] = (byAgent[f.agentSlug] ?? 0) + 1;
+    }
+    writeMarkdownReport({
+      outDir: outputDir,
+      root: rootPath,
+      startedAt,
+      completedAt,
+      findings: allFindings,
+      filesScanned: records.length,
+      byAgent,
+      excludeFalsePositives: opts.excludeFalsePositives,
+    });
   }
-  writeMarkdownReport({
-    outDir: outputDir,
-    root: rootPath,
-    startedAt,
-    completedAt,
-    findings: allFindings,
-    filesScanned: records.length,
-    byAgent,
-    excludeFalsePositives: opts.excludeFalsePositives,
-  });
 
   const summary = Object.entries(buckets)
     .sort()
@@ -225,6 +240,9 @@ export async function runScore(
     .join(", ");
   console.log(`Done. Severity: ${summary || "(none)"}`);
   console.log(`  Rewrote ${dirtyRecords.size} FileRecord(s).`);
+  if (opts.summary === false) {
+    console.log("  Summary: skipped (--no-summary). Run `agentgg summary` to render it.");
+  }
 }
 
 export function registerScoreCommand(program: Command): void {
@@ -258,6 +276,10 @@ export function registerScoreCommand(program: Command): void {
     .option(
       "--exclude-false-positives",
       "Drop false-positive findings from the markdown report (default: keep them).",
+    )
+    .option(
+      "--no-summary",
+      "Skip re-rendering the markdown report (summary.md + findings/*.md) after scoring. Scores still persist to state/files/*; render later with `agentgg summary`.",
     )
     .option("-v, --verbose", "verbose output")
     .action(async (outputDir: string, opts: ScoreOpts) => {

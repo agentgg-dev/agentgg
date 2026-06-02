@@ -64,13 +64,16 @@ export function writeMarkdownReport(input: ScanReportInput): ScanReportOutput {
   const outDir = resolve(input.outDir);
   const findingsDir = join(outDir, "findings");
   // Clear any stale finding `.md` files from a prior run before
-  // re-rendering. Filenames are index-prefixed and the index ordering
-  // can differ between scan (detector emission order) and revalidate
-  // (alphabetical FileRecord order). Without this, a re-run would
-  // leave both the old and new files on disk, and a reader could open
-  // a stale one still showing "Validation: _not run_" alongside the
-  // fresh one with a verdict. `findings/` is fully generated — nothing
-  // user-authored lives here.
+  // re-rendering. Filenames are stable per finding `id`, so a finding
+  // that disappears between runs (e.g. revalidate drops a
+  // false-positive, or a code change removes the issue) would otherwise
+  // leave its orphaned `.md` behind. `findings/` is fully generated —
+  // nothing user-authored lives here.
+  //
+  // NB: this full clear is correct for a single all-in-one render. When
+  // the distributed `summary` step lands, it must render every agent's
+  // findings in ONE pass over the merged shards (not once per agent),
+  // or each agent would wipe the previous agent's files.
   rmSync(findingsDir, { recursive: true, force: true });
   mkdirSync(findingsDir, { recursive: true });
 
@@ -87,12 +90,11 @@ export function writeMarkdownReport(input: ScanReportInput): ScanReportOutput {
     .sort(compareForReport);
 
   const findingPaths: string[] = [];
-  renderable.forEach((f, i) => {
-    const filename = findingFilename(f, i);
-    const fullPath = join(findingsDir, filename);
+  for (const f of renderable) {
+    const fullPath = join(findingsDir, findingFilename(f));
     writeFileSync(fullPath, renderFindingMd(f), "utf8");
     findingPaths.push(fullPath);
-  });
+  }
 
   const summaryPath = join(outDir, "summary.md");
   writeFileSync(summaryPath, renderSummaryMd(input, findingPaths, renderable), "utf8");
@@ -101,24 +103,28 @@ export function writeMarkdownReport(input: ScanReportInput): ScanReportOutput {
 }
 
 /**
- * Filename convention: `<NNN>-<agentSlug>-<short-title-slug>.md`. The
- * numeric prefix preserves the order findings came in; the slugs make
- * the filename greppable.
+ * Filename convention: `<agentSlug>-<short-title-slug>-<id>.md`. No
+ * sequence prefix — the `id` suffix (a content hash of
+ * agentSlug|filePath|title|lineRange, see `hydrateFinding`) makes the
+ * name globally unique AND stable, so:
+ *   - findings from N independently-run agents merge into one
+ *     `findings/` dir by plain copy, with zero collisions;
+ *   - a retried/duplicated worker regenerates the SAME filename and
+ *     idempotently overwrites, instead of leaving a uuid-suffixed dupe.
+ * UIs sort by score (then title), so on-disk ordering is irrelevant.
  */
-export function findingFilename(f: Finding, index: number): string {
-  const seq = String(index + 1).padStart(3, "0");
-  return `${seq}-${findingFilenameSlug(f)}`;
+export function findingFilename(f: Finding): string {
+  return findingFilenameSlug(f);
 }
 
 /**
- * Index-less form of `findingFilename`. Used in streaming logs (e.g.
- * the scoring phase) where we don't yet know which sequence number a
- * finding will get after the post-scoring severity sort. Tab-completing
- * the slug in `findings/` reliably lands on the indexed `.md` file.
+ * Canonical per-finding filename. Same value used in streaming logs
+ * (e.g. the scoring phase) and as the written `.md` filename, so a
+ * slug printed mid-scan tab-completes to the real file in `findings/`.
  */
 export function findingFilenameSlug(f: Finding): string {
   const titleSlug = slugify(f.title).slice(0, 40);
-  return `${f.agentSlug}-${titleSlug}.md`;
+  return `${f.agentSlug}-${titleSlug}-${f.id}.md`;
 }
 
 export function renderFindingMd(f: Finding): string {
@@ -271,8 +277,8 @@ export function renderSummaryMd(
   if (renderedList.length > 0) {
     lines.push("## All findings");
     lines.push("");
-    renderedList.forEach((f, i) => {
-      const rel = `findings/${findingFilename(f, i)}`;
+    renderedList.forEach((f) => {
+      const rel = `findings/${findingFilename(f)}`;
       const loc = f.lineRange ? `:${f.lineRange[0]}` : "";
       const sevTag = f.severity
         ? ` \`${f.severity}${f.cvss ? ` ${f.cvss.baseScore.toFixed(1)}` : ""}\``

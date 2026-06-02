@@ -32,8 +32,7 @@ export function formatAgentsTable(
     category: getCategory(a, env),
     // "all" = empty where (every file); "scoped" = extensions/patterns set.
     // Replaces the old `mode` column.
-    mode:
-      a.where.filePatterns.length === 0 && a.where.extensions.length === 0 ? "all" : "scoped",
+    mode: a.where.filePatterns.length === 0 && a.where.extensions.length === 0 ? "all" : "scoped",
     noise: a.noiseTier,
     description: truncate(a.description, 56),
   }));

@@ -149,19 +149,19 @@ export function parseVector(vector: string): CvssMetrics {
     if (!map.has(key)) throw new Error(`Missing CVSS metric ${key} in ${vector}`);
   }
   return {
-    attackVector: requireEnum(map.get("AV")!, ["N", "A", "L", "P"]) as AttackVector,
-    attackComplexity: requireEnum(map.get("AC")!, ["L", "H"]) as AttackComplexity,
-    privilegesRequired: requireEnum(map.get("PR")!, ["N", "L", "H"]) as PrivilegesRequired,
-    userInteraction: requireEnum(map.get("UI")!, ["N", "R"]) as UserInteraction,
-    scope: requireEnum(map.get("S")!, ["U", "C"]) as Scope,
-    confidentiality: requireEnum(map.get("C")!, ["H", "L", "N"]) as Impact,
-    integrity: requireEnum(map.get("I")!, ["H", "L", "N"]) as Impact,
-    availability: requireEnum(map.get("A")!, ["H", "L", "N"]) as Impact,
+    attackVector: requireEnum(map.get("AV"), ["N", "A", "L", "P"]) as AttackVector,
+    attackComplexity: requireEnum(map.get("AC"), ["L", "H"]) as AttackComplexity,
+    privilegesRequired: requireEnum(map.get("PR"), ["N", "L", "H"]) as PrivilegesRequired,
+    userInteraction: requireEnum(map.get("UI"), ["N", "R"]) as UserInteraction,
+    scope: requireEnum(map.get("S"), ["U", "C"]) as Scope,
+    confidentiality: requireEnum(map.get("C"), ["H", "L", "N"]) as Impact,
+    integrity: requireEnum(map.get("I"), ["H", "L", "N"]) as Impact,
+    availability: requireEnum(map.get("A"), ["H", "L", "N"]) as Impact,
   };
 }
 
-function requireEnum<T extends string>(value: string, allowed: T[]): T {
-  if (!allowed.includes(value as T)) {
+function requireEnum<T extends string>(value: string | undefined, allowed: T[]): T {
+  if (value === undefined || !allowed.includes(value as T)) {
     throw new Error(`CVSS metric value "${value}" not in ${allowed.join("|")}`);
   }
   return value as T;

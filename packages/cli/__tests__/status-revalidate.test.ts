@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { FileRecord, Finding, UserConfig } from "@agentgg/core";
@@ -90,6 +90,7 @@ function makeFinding(overrides: Partial<Finding> = {}): Finding {
 
 function makeRecord(filePath: string, findings: Finding[] = []): FileRecord {
   return {
+    agentSlug: findings[0]?.agentSlug ?? "sql-injection",
     filePath,
     contentHash: hashContent("dummy"),
     candidates: [],
@@ -247,7 +248,7 @@ describe("runRevalidate", () => {
 
     await runRevalidate(outputDir, { concurrency: 1 }, env);
 
-    const reloaded = readFileRecord(outputDir, "server.js");
+    const reloaded = readFileRecord(outputDir, "sql-injection", "server.js");
     expect(reloaded?.findings[0].validation?.verdict).toBe("false-positive");
     expect(reloaded?.findings[0].validation?.reasoning).toBe("stub said so");
     expect(reloaded?.status).toBe("validated");
@@ -272,7 +273,7 @@ describe("runRevalidate", () => {
 
     await runRevalidate(outputDir, { force: true, concurrency: 1 }, env);
 
-    const reloaded = readFileRecord(outputDir, "server.js");
+    const reloaded = readFileRecord(outputDir, "sql-injection", "server.js");
     expect(reloaded?.findings[0].validation?.verdict).toBe("confirmed");
     expect(reloaded?.findings[0].validation?.reasoning).toBe("new");
   });
@@ -304,7 +305,7 @@ describe("runRevalidate", () => {
     await runRevalidate(outputDir, { concurrency: 1 }, env);
 
     expect(detectorMock.validateFinding).not.toHaveBeenCalled();
-    const reloaded = readFileRecord(outputDir, "vanished.ts");
+    const reloaded = readFileRecord(outputDir, "sql-injection", "vanished.ts");
     expect(reloaded?.findings[0].validation).toBeUndefined();
   });
 
@@ -328,7 +329,39 @@ describe("runRevalidate", () => {
 
     await runRevalidate(outputDir, { root: projectRoot, concurrency: 1 }, env);
 
-    const reloaded = readFileRecord(outputDir, "server.js");
+    const reloaded = readFileRecord(outputDir, "sql-injection", "server.js");
     expect(reloaded?.findings[0].validation?.verdict).toBe("confirmed");
+  });
+
+  it("re-renders summary.md by default after validation", async () => {
+    saveAnthropicConfig();
+    upsertScanMeta(outputDir, projectRoot);
+    writeFile("server.js", "const x = 1;");
+    writeFileRecord(outputDir, makeRecord("server.js", [makeFinding()]));
+    vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await runRevalidate(outputDir, { concurrency: 1 }, env);
+
+    expect(existsSync(join(outputDir, "summary.md"))).toBe(true);
+  });
+
+  it("--no-summary skips the report render but still persists verdicts", async () => {
+    saveAnthropicConfig();
+    upsertScanMeta(outputDir, projectRoot);
+    writeFile("server.js", "const x = 1;");
+    writeFileRecord(outputDir, makeRecord("server.js", [makeFinding()]));
+    detectorMock.validateFinding.mockImplementation(async () => ({
+      verdict: "false-positive",
+      reasoning: "stub",
+    }));
+    vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await runRevalidate(outputDir, { concurrency: 1, summary: false }, env);
+
+    // No report file written…
+    expect(existsSync(join(outputDir, "summary.md"))).toBe(false);
+    // …but the verdict landed on disk.
+    const reloaded = readFileRecord(outputDir, "sql-injection", "server.js");
+    expect(reloaded?.findings[0].validation?.verdict).toBe("false-positive");
   });
 });

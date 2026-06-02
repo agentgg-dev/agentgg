@@ -65,7 +65,14 @@ export async function selectAgents(
   const decisionBySlug = new Map<string, PreconditionDecision>();
 
   await runConcurrent(agents, Math.max(1, opts.concurrency ?? 5), async (agent) => {
-    const decision = await evaluateAgent(agent, files, opts.rootDir, opts.detector, reconBlock, opts.signal);
+    const decision = await evaluateAgent(
+      agent,
+      files,
+      opts.rootDir,
+      opts.detector,
+      reconBlock,
+      opts.signal,
+    );
     decisionBySlug.set(agent.slug, decision);
   });
 
@@ -119,7 +126,8 @@ async function evaluateAgent(
   return {
     slug: agent.slug,
     queued: check.relevant,
-    reason: check.reason || (check.relevant ? "prompt gate: relevant" : "prompt gate: not relevant"),
+    reason:
+      check.reason || (check.relevant ? "prompt gate: relevant" : "prompt gate: not relevant"),
   };
 }
 
@@ -183,7 +191,8 @@ export function evaluateRegex(
     } catch {
       continue; // bad regex in the template — skip rather than crash
     }
-    const inScope = p.in.length > 0 ? files.filter((f) => p.in.some((g) => matchGlob(f, g))) : files;
+    const inScope =
+      p.in.length > 0 ? files.filter((f) => p.in.some((g) => matchGlob(f, g))) : files;
     const scoped =
       p.notIn.length > 0 ? inScope.filter((f) => !p.notIn.some((g) => matchGlob(f, g))) : inScope;
     for (const f of scoped) {

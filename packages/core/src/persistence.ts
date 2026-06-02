@@ -131,12 +131,16 @@ export function readScanPlan(outputDir: string): ScanPlan | null {
 // RunMeta
 // ---------------------------------------------------------------------------
 
-export function createRunMeta(params: { type: RunMeta["type"] }): RunMeta {
+export function createRunMeta(params: {
+  type: RunMeta["type"];
+  invocation?: RunMeta["invocation"];
+}): RunMeta {
   return {
     runId: generateRunId(),
     type: params.type,
     phase: "running",
     startedAt: new Date().toISOString(),
+    ...(params.invocation ? { invocation: params.invocation } : {}),
     stats: {},
   };
 }
@@ -195,8 +199,12 @@ export function listRuns(outputDir: string): RunMeta[] {
 // FileRecord
 // ---------------------------------------------------------------------------
 
-export function readFileRecord(outputDir: string, filePath: string): FileRecord | null {
-  const p = getFileRecordPath(outputDir, filePath);
+export function readFileRecord(
+  outputDir: string,
+  agentSlug: string,
+  filePath: string,
+): FileRecord | null {
+  const p = getFileRecordPath(outputDir, agentSlug, filePath);
   if (!existsSync(p)) return null;
   try {
     return FileRecord.parse(JSON.parse(readFileSync(p, "utf8")));
@@ -206,7 +214,7 @@ export function readFileRecord(outputDir: string, filePath: string): FileRecord 
 }
 
 export function writeFileRecord(outputDir: string, record: FileRecord): void {
-  const p = getFileRecordPath(outputDir, record.filePath);
+  const p = getFileRecordPath(outputDir, record.agentSlug, record.filePath);
   writeFileAtomic(p, `${JSON.stringify(record, null, 2)}\n`);
 }
 

@@ -93,7 +93,8 @@ describe("Agent schema", () => {
     });
     expect(agent.slug).toBe("sql-injection");
     expect(agent.noiseTier).toBe("normal");
-    expect(agent.filePatterns).toEqual([]);
+    expect(agent.where.filePatterns).toEqual([]);
+    expect(agent.where.extensions).toEqual([]);
   });
 
   it("does not carry a severity field (scoring is per-finding)", () => {
@@ -252,11 +253,13 @@ describe("ScopeConfig schema", () => {
 });
 
 describe("FileRecord schema", () => {
-  it("requires filePath and contentHash; fills the rest", () => {
+  it("requires agentSlug, filePath and contentHash; fills the rest", () => {
     const fr = FileRecord.parse({
+      agentSlug: "sql-injection",
       filePath: "src/foo.ts",
       contentHash: "abc123",
     });
+    expect(fr.agentSlug).toBe("sql-injection");
     expect(fr.candidates).toEqual([]);
     expect(fr.findings).toEqual([]);
     expect(fr.analysisHistory).toEqual([]);

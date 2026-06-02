@@ -130,10 +130,16 @@ export function getStateFilesDir(outputDir: string): string {
   return join(getStateDir(outputDir), "files");
 }
 
-/** `<outputDir>/state/files/<filePath>.json` — one `FileRecord` per source file. */
-export function getFileRecordPath(outputDir: string, filePath: string): string {
+/**
+ * `<outputDir>/state/files/<agentSlug>/<filePath>.json` — one `FileRecord`
+ * per (agent, source file). Sharding by agent means two agents (or two
+ * concurrent `scan` processes) writing the same source file land in
+ * different files, so there's no shared read-modify-write to race on.
+ */
+export function getFileRecordPath(outputDir: string, agentSlug: string, filePath: string): string {
+  assertSafeSegment(agentSlug, "agentSlug");
   assertSafeFilePath(filePath);
-  return join(getStateFilesDir(outputDir), `${filePath}.json`);
+  return join(getStateFilesDir(outputDir), agentSlug, `${filePath}.json`);
 }
 
 /** `<outputDir>/state/runs/` — one `RunMeta` `.json` per run. */

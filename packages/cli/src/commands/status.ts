@@ -35,6 +35,10 @@ export async function runStatus(outputArg: string, opts: StatusOpts): Promise<vo
   const statusCounts = { pending: 0, analyzed: 0, validated: 0 };
   for (const r of records) statusCounts[r.status]++;
 
+  // Records are sharded per (agent, file), so the same source file shows
+  // up once per agent that analyzed it. Report distinct source paths.
+  const distinctFiles = new Set(records.map((r) => r.filePath)).size;
+
   const allFindings = records.flatMap((r) => r.findings);
   const validated = allFindings.filter((f) => f.validation);
   const verdictCounts: Record<string, number> = {};
@@ -51,7 +55,8 @@ export async function runStatus(outputArg: string, opts: StatusOpts): Promise<vo
           root: scanMeta.root,
           createdAt: scanMeta.createdAt,
           updatedAt: scanMeta.updatedAt,
-          filesTracked: records.length,
+          filesTracked: distinctFiles,
+          recordsTracked: records.length,
           statusCounts,
           findings: {
             total: allFindings.length,
@@ -78,7 +83,7 @@ export async function runStatus(outputArg: string, opts: StatusOpts): Promise<vo
   console.log(`  Root:           ${scanMeta.root}`);
   console.log(`  Created:        ${scanMeta.createdAt}`);
   console.log(`  Last updated:   ${scanMeta.updatedAt}`);
-  console.log(`  Files tracked:  ${records.length}`);
+  console.log(`  Files tracked:  ${distinctFiles} (${records.length} agent-file records)`);
   console.log("");
 
   console.log("Status");

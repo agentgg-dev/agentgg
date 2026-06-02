@@ -20,7 +20,7 @@ This repo contains the `agentgg` CLI, a Node.js tool that orchestrates LLM scans
 
 - Code execution or arbitrary-file-write issues in the CLI (e.g. path traversal in `--output`, command injection in `--diff` parsing, prototype pollution in config loading).
 - Credential mishandling such as secrets logged to disk in plaintext, leaked in error messages, or sent to the wrong provider.
-- Tool sandbox escapes. Hunt and walker modes give the model `Read` / `Glob` / `Grep` tools scoped to the scanned root; any way to break out and access files outside that root is a vulnerability.
+- Tool sandbox escapes. Every agent is tool-enabled — the model gets `Read` / `Glob` / `Grep` scoped to the scanned root; any way to break out and access files outside that root is a vulnerability.
 - Supply chain integrity, including tampering with npm releases, GitHub tags, or release workflows.
 
 **Out of scope, not security issues here:**

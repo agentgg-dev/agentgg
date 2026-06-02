@@ -3,7 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Agent } from "@agentgg/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { collectAllFiles, matchesAnyPattern, walkForAgents } from "../src/walker.js";
+import {
+  collectAllFiles,
+  DEFAULT_EXCLUDES,
+  includedByWhere,
+  walkForAgents,
+} from "../src/walker.js";
 
 let tmp: string;
 
@@ -21,41 +26,52 @@ function touch(rel: string, content = "x"): void {
   writeFileSync(full, content, "utf8");
 }
 
+// New unified `where` shape: `filePatterns` scopes files; an empty
+// `extensions` + empty `filePatterns` means "all files."
 function makeAgent(slug: string, filePatterns: string[]): Agent {
   return {
     slug,
     name: slug,
     description: "x",
     version: "0.0.1",
-    mode: "file",
     noiseTier: "normal",
-    filePatterns,
-    languages: [],
-    prefilter: [],
-    references: [],
+    where: {
+      extensions: [],
+      filePatterns,
+      excludePatterns: [],
+      useDefaultExcludes: true,
+      preFilter: [],
+      maxFilesPerBatch: 5,
+      maxTurnsPerBatch: 30,
+    },
     prompt: "x",
   };
 }
 
-describe("matchesAnyPattern", () => {
-  it("returns true when patterns are empty (treat as 'all files')", () => {
-    expect(matchesAnyPattern("any/path.ts", [])).toBe(true);
+describe("includedByWhere", () => {
+  it("returns true when both extensions and filePatterns are empty (all files)", () => {
+    expect(includedByWhere("any/path.ts", [], [])).toBe(true);
   });
 
-  it("matches against a single glob", () => {
-    expect(matchesAnyPattern("src/foo.ts", ["**/*.ts"])).toBe(true);
-    expect(matchesAnyPattern("src/foo.py", ["**/*.ts"])).toBe(false);
+  it("matches against a single filePattern glob", () => {
+    expect(includedByWhere("src/foo.ts", [], ["**/*.ts"])).toBe(true);
+    expect(includedByWhere("src/foo.py", [], ["**/*.ts"])).toBe(false);
   });
 
-  it("matches against any of several globs", () => {
-    expect(matchesAnyPattern("src/a.py", ["**/*.ts", "**/*.py"])).toBe(true);
-    expect(matchesAnyPattern("src/a.go", ["**/*.ts", "**/*.py"])).toBe(false);
+  it("matches against any of several filePattern globs", () => {
+    expect(includedByWhere("src/a.py", [], ["**/*.ts", "**/*.py"])).toBe(true);
+    expect(includedByWhere("src/a.go", [], ["**/*.ts", "**/*.py"])).toBe(false);
   });
 
   it("supports brace expansion", () => {
-    expect(matchesAnyPattern("a.ts", ["**/*.{ts,tsx,js}"])).toBe(true);
-    expect(matchesAnyPattern("a.tsx", ["**/*.{ts,tsx,js}"])).toBe(true);
-    expect(matchesAnyPattern("a.rb", ["**/*.{ts,tsx,js}"])).toBe(false);
+    expect(includedByWhere("a.ts", [], ["**/*.{ts,tsx,js}"])).toBe(true);
+    expect(includedByWhere("a.tsx", [], ["**/*.{ts,tsx,js}"])).toBe(true);
+    expect(includedByWhere("a.rb", [], ["**/*.{ts,tsx,js}"])).toBe(false);
+  });
+
+  it("matches by extension (nuclei-style) independent of filePatterns", () => {
+    expect(includedByWhere("src/foo.ts", ["ts"], [])).toBe(true);
+    expect(includedByWhere("src/foo.py", ["ts"], [])).toBe(false);
   });
 });
 
@@ -70,12 +86,13 @@ describe("collectAllFiles", () => {
     expect(files).toContain("a/b/c.ts");
   });
 
-  it("skips default-ignored directories", () => {
+  it("skips excluded directories when handed the default exclude set", () => {
     touch("src/keep.ts");
     touch("node_modules/foo/bad.ts");
     touch("dist/built.js");
     touch(".git/HEAD");
-    const files = collectAllFiles(tmp);
+    // The walker is policy-free: the caller opts into DEFAULT_EXCLUDES.
+    const files = collectAllFiles(tmp, { excludePatterns: DEFAULT_EXCLUDES });
     expect(files).toContain("src/keep.ts");
     expect(files).not.toContain("node_modules/foo/bad.ts");
     expect(files).not.toContain("dist/built.js");
@@ -85,7 +102,7 @@ describe("collectAllFiles", () => {
   it("skips the scan-results output dir so re-runs don't loop", () => {
     touch("scan-results/findings/old.md");
     touch("src/real.ts");
-    const files = collectAllFiles(tmp);
+    const files = collectAllFiles(tmp, { excludePatterns: DEFAULT_EXCLUDES });
     expect(files).not.toContain("scan-results/findings/old.md");
     expect(files).toContain("src/real.ts");
   });
@@ -99,7 +116,7 @@ describe("walkForAgents", () => {
     expect(work.map((w) => w.agent.slug)).toEqual(["x", "y"]);
   });
 
-  it("routes each file to the agents whose filePatterns match it", () => {
+  it("routes each file to the agents whose where matches it", () => {
     touch("src/foo.ts");
     touch("src/bar.py");
     const work = walkForAgents(tmp, [

@@ -14,10 +14,10 @@ slug: sql-injection
 name: SQL Injection
 description: Detects string-concatenated SQL queries.
 version: 0.1.0
-mode: file
 noiseTier: normal
-filePatterns:
-  - "**/*.ts"
+where:
+  filePatterns:
+    - "**/*.ts"
 references:
   - CWE-89
 ---
@@ -34,9 +34,8 @@ describe("parseAgentMarkdown", () => {
     const agent = parseAgentMarkdown(VALID_MD);
     expect(agent.slug).toBe("sql-injection");
     expect(agent.name).toBe("SQL Injection");
-    expect(agent.mode).toBe("file");
     expect(agent.noiseTier).toBe("normal");
-    expect(agent.filePatterns).toEqual(["**/*.ts"]);
+    expect(agent.where.filePatterns).toEqual(["**/*.ts"]);
     expect(agent.references).toEqual(["CWE-89"]);
     // Prompt is the markdown body, trimmed.
     expect(agent.prompt).toContain("string-concatenated SQL");
@@ -108,7 +107,7 @@ body
     expect(() => parseAgentMarkdown(bad)).toThrow(AgentParseError);
   });
 
-  it("fills schema defaults (mode -> file, noiseTier -> normal, etc.)", () => {
+  it("fills schema defaults (noiseTier -> normal, where defaults, etc.)", () => {
     const minimal = `---
 slug: minimal-agent
 name: Minimal
@@ -118,10 +117,12 @@ description: x
 This is the prompt body. It's long enough to be useful as a real prompt.
 `;
     const agent = parseAgentMarkdown(minimal);
-    expect(agent.mode).toBe("file");
     expect(agent.noiseTier).toBe("normal");
     expect(agent.version).toBe("0.0.1");
-    expect(agent.filePatterns).toEqual([]);
+    // Omitted `where` resolves to an all-files default scope.
+    expect(agent.where.extensions).toEqual([]);
+    expect(agent.where.filePatterns).toEqual([]);
+    expect(agent.where.maxFilesPerBatch).toBe(5);
     expect(agent.references).toBeUndefined();
   });
 });

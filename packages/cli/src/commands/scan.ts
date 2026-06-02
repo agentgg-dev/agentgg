@@ -1,6 +1,14 @@
 import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
-import type { Agent, AgentRun, FileRecord, Finding, Provider } from "@agentgg/core";
+import type {
+  Agent,
+  AgentRun,
+  FileRecord,
+  Finding,
+  PreconditionDecisionRecord,
+  Provider,
+  ReconReport,
+} from "@agentgg/core";
 import {
   completeRun,
   createRunMeta,
@@ -10,6 +18,7 @@ import {
   loadAllFileRecords,
   readAgentRun,
   readFileRecord,
+  readScanPlan,
   upsertScanMeta,
   writeAgentRun,
   writeFileRecord,
@@ -32,6 +41,7 @@ import { findingFilenameSlug, writeMarkdownReport } from "../reporters/md.js";
 import { resolveTemplates } from "../template.js";
 import { DEFAULT_VIEWER_PORT, openBrowser, startViewer } from "../viewer-server.js";
 import { DEFAULT_EXCLUDES, type WalkConfig, walkForAgents } from "../walker.js";
+import { buildInvocation } from "./invocation.js";
 import { printReady } from "./view.js";
 
 interface ScanOpts {
@@ -94,6 +104,22 @@ interface ScanOpts {
    */
   reRecon?: boolean;
   /**
+   * `--no-recon` → `recon: false`. Skip the recon survey AND precondition
+   * gating: no project brief is generated or injected into prompts, and
+   * every agent selected via `-t` runs unconditionally (the regex/prompt
+   * gates that would otherwise skip irrelevant agents are bypassed). For
+   * a focused run where you already know exactly which agents you want.
+   * Commander defaults this to `true`; the bare flag sets it `false`.
+   */
+  recon?: boolean;
+  /**
+   * `--no-summary` → `summary: false`. Skip the final report-writing step
+   * (`summary.md` + per-finding `findings/*.md`). Findings still persist to
+   * `state/files/*`; render the report later with `agentgg summary`.
+   * Commander defaults this to `true`; the bare flag sets it `false`.
+   */
+  summary?: boolean;
+  /**
    * Run the CVSS 3.1 scoring phase after detection (and after validation
    * when --validate is set). The scoring agent picks the 8 base metrics
    * per finding; the score and severity bucket are computed
@@ -142,7 +168,10 @@ export async function runScan(
   // sidecar records the absolute root so `revalidate` can resolve
   // relative filePaths back to source files later.
   upsertScanMeta(outDir, root);
-  const runMeta = createRunMeta({ type: "scan" });
+  const runMeta = createRunMeta({
+    type: "scan",
+    invocation: buildInvocation({ command: "scan" }),
+  });
   writeRunMeta(outDir, runMeta);
   if (opts.verbose) {
     console.log(`State: ${outDir}\\state  (run ${runMeta.runId})`);
@@ -238,7 +267,7 @@ export async function runScan(
     // full vulnerability library.
     const templateInputs = opts.template ?? [];
     const baseDir = join(officialAgentsDir, "base");
-    let selectedAgents: Agent[] =
+    const selectedAgents: Agent[] =
       templateInputs.length > 0
         ? resolveTemplates(templateInputs, catalog.agents, officialAgentsDir)
         : existsSync(baseDir)
@@ -353,12 +382,13 @@ export async function runScan(
       const normalized = relPath.replace(/\\/g, "/");
       let record: FileRecord | null;
       try {
-        record = readFileRecord(outDir, normalized);
+        record = readFileRecord(outDir, agent.slug, normalized);
       } catch {
         record = null;
       }
       if (!record) {
         record = {
+          agentSlug: agent.slug,
           filePath: normalized,
           contentHash: hashContent(fileContent),
           candidates: [],
@@ -371,6 +401,12 @@ export async function runScan(
       const byId = new Map(record.findings.map((f) => [f.id, f]));
       for (const f of newFindings) byId.set(f.id, f);
       record.findings = [...byId.values()];
+      // Refresh the content + recon stamps to the inputs actually
+      // analyzed this pass — both are the keys per-file resume checks,
+      // and refreshing keeps a re-analyzed (changed) file from looking
+      // stale on the next resume.
+      record.contentHash = hashContent(fileContent);
+      record.reconHash = recon.reconHash;
       record.analysisHistory.push({
         runId: runMeta.runId,
         phase: "detect",
@@ -394,26 +430,42 @@ export async function runScan(
     // One tool-enabled survey of the repo, cached/resumed by reconHash.
     // The brief is injected into precondition prompt gates and into every
     // queued agent's detection prompt so the model starts oriented.
-    console.log("\n[1/3] Recon — surveying the project…");
-    const recon = await runRecon({
-      rootDir: root,
-      outDir,
-      detector,
-      fingerprintTags: project.tags,
-      excludePatterns: walkExcludes,
-      includePatterns,
-      maxFileSizeKb: opts.maxFileSize ?? 500,
-      maxTurns: opts.maxTurns ?? 30,
-      force: opts.reRecon,
-      signal: scanAbortController.signal,
-      verbose: opts.verbose,
-    });
-    const reconBlock = renderReconForPrompt(recon);
-    console.log(
-      `Recon: ${recon.languages.length > 0 ? recon.languages.join(", ") : "(languages unknown)"}${
-        recon.frameworks.length > 0 ? ` | ${recon.frameworks.join(", ")}` : ""
-      }`,
-    );
+    //
+    // `--no-recon` short-circuits this entirely: no survey runs, no brief
+    // is injected (reconBlock is empty), and a synthetic brief with a
+    // sentinel reconHash stands in so the rest of the pipeline — resume
+    // stamps, plan.json — stays well-formed.
+    const skipRecon = opts.recon === false;
+    let recon: ReconReport;
+    let reconBlock: string;
+    if (skipRecon) {
+      console.log(
+        "\n[1/3] Recon — skipped (--no-recon); every selected agent runs unconditionally.",
+      );
+      recon = synthesizeSkippedRecon();
+      reconBlock = "";
+    } else {
+      console.log("\n[1/3] Recon — surveying the project…");
+      recon = await runRecon({
+        rootDir: root,
+        outDir,
+        detector,
+        fingerprintTags: project.tags,
+        excludePatterns: walkExcludes,
+        includePatterns,
+        maxFileSizeKb: opts.maxFileSize ?? 500,
+        maxTurns: opts.maxTurns ?? 30,
+        force: opts.reRecon,
+        signal: scanAbortController.signal,
+        verbose: opts.verbose,
+      });
+      reconBlock = renderReconForPrompt(recon);
+      console.log(
+        `Recon: ${recon.languages.length > 0 ? recon.languages.join(", ") : "(languages unknown)"}${
+          recon.frameworks.length > 0 ? ` | ${recon.frameworks.join(", ")}` : ""
+        }`,
+      );
+    }
 
     // Scope signature stamped on each agent's resume sidecar. A change to
     // --diff, --exclude, --only, --max-file-size, root, OR the recon brief
@@ -433,18 +485,70 @@ export async function runScan(
     // ANY agent runs. No precondition = always queued. Regex checks are pure
     // filesystem work; only prompt-gated agents incur an LLM call. The result
     // is persisted to state/plan.json as the durable plan→run hand-off.
-    console.log("\n[2/3] Preconditions — deciding which agents run…");
-    const selection = await selectAgents(selectedAgents, {
-      rootDir: root,
-      walkCfg,
-      detector,
-      recon,
-      concurrency: opts.concurrency,
-      signal: scanAbortController.signal,
-      verbose: opts.verbose,
-    });
-    const queuedAgents = selection.queued;
-    const skippedCount = selection.decisions.length - queuedAgents.length;
+    // Under `--no-recon` the gate is bypassed: every selected agent is
+    // queued unconditionally (prompt gates need the brief that wasn't
+    // generated, and the user explicitly asked to run exactly their -t set).
+    let queuedAgents: Agent[];
+    let decisions: PreconditionDecisionRecord[];
+    if (skipRecon) {
+      console.log("\n[2/3] Preconditions — skipped (--no-recon); queuing every selected agent.");
+      queuedAgents = [...selectedAgents];
+      decisions = selectedAgents.map((a) => ({
+        slug: a.slug,
+        queued: true,
+        reason: "recon skipped (--no-recon) — queued unconditionally",
+      }));
+    } else {
+      // Reuse a cached precondition plan when one already exists for this
+      // exact recon brief and covers the current agent selection — the
+      // plan→run hand-off written by `agentgg recon` (or a prior scan).
+      // This is the counterpart to recon caching: just as a matching
+      // recon brief is reused instead of re-surveying, a matching plan is
+      // reused instead of re-running the precondition for-loop (and, in
+      // particular, the per-agent LLM prompt gates). Invalidated by
+      // `--re-recon` (which forces a re-survey + re-plan) or by selecting
+      // agents the plan never evaluated.
+      const cachedPlan = readScanPlan(outDir);
+      const planUsable =
+        !!cachedPlan &&
+        !opts.reRecon &&
+        cachedPlan.reconHash === recon.reconHash &&
+        selectedAgents.every((a) => cachedPlan.decisions.some((d) => d.slug === a.slug));
+      if (planUsable && cachedPlan) {
+        const queuedSlugs = new Set(
+          cachedPlan.decisions.filter((d) => d.queued).map((d) => d.slug),
+        );
+        queuedAgents = selectedAgents.filter((a) => queuedSlugs.has(a.slug));
+        // Re-derive decisions in selection order from the cached plan so
+        // the rewritten plan.json + verbose log reflect exactly this run's
+        // selection (a subset of the plan is a valid, narrower plan).
+        decisions = selectedAgents.map(
+          (a) =>
+            cachedPlan.decisions.find((d) => d.slug === a.slug) ?? {
+              slug: a.slug,
+              queued: true,
+              reason: "no precondition",
+            },
+        );
+        console.log(
+          `\n[2/3] Preconditions — reusing cached plan from ${outDir}\\state\\plan.json (${queuedAgents.length} queued; pass --re-recon to re-evaluate).`,
+        );
+      } else {
+        console.log("\n[2/3] Preconditions — deciding which agents run…");
+        const selection = await selectAgents(selectedAgents, {
+          rootDir: root,
+          walkCfg,
+          detector,
+          recon,
+          concurrency: opts.concurrency,
+          signal: scanAbortController.signal,
+          verbose: opts.verbose,
+        });
+        queuedAgents = selection.queued;
+        decisions = selection.decisions;
+      }
+    }
+    const skippedCount = decisions.length - queuedAgents.length;
     // Persist the plan BEFORE any agent runs — this is the artifact a
     // distributed runner consumes to dispatch the queued agents.
     try {
@@ -453,7 +557,7 @@ export async function runScan(
         generatedAt: new Date().toISOString(),
         reconHash: recon.reconHash,
         rootPath: root,
-        decisions: selection.decisions,
+        decisions,
       });
     } catch (err) {
       if (opts.verbose) console.error(`  plan: failed to write: ${(err as Error).message}`);
@@ -462,7 +566,7 @@ export async function runScan(
       `Preconditions: ${queuedAgents.length} queued, ${skippedCount} skipped → ${outDir}\\state\\plan.json`,
     );
     if (opts.verbose) {
-      for (const d of selection.decisions) {
+      for (const d of decisions) {
         console.log(`  ${d.queued ? "[queued] " : "[skipped]"} ${d.slug}: ${d.reason}`);
       }
     }
@@ -574,6 +678,66 @@ export async function runScan(
         continue;
       }
 
+      // Per-file resume: within an agent interrupted before its
+      // completion sidecar was written, skip candidate files already
+      // analyzed under the SAME content AND recon brief, lifting their
+      // saved findings from disk. A changed file (contentHash) or changed
+      // brief (reconHash) re-runs that file; --rescan re-runs everything.
+      let pending = candidates;
+      if (!opts.rescan) {
+        const todo: AgentCandidate[] = [];
+        let resumedFiles = 0;
+        let resumedFindings = 0;
+        for (const c of candidates) {
+          let rec: FileRecord | null = null;
+          try {
+            rec = readFileRecord(outDir, agent.slug, c.filePath.replace(/\\/g, "/"));
+          } catch {
+            rec = null;
+          }
+          const reusable =
+            rec !== null &&
+            rec.contentHash === hashContent(c.content) &&
+            rec.reconHash === recon.reconHash;
+          if (reusable && rec) {
+            findings.push(...rec.findings);
+            byAgent[agent.slug] = (byAgent[agent.slug] ?? 0) + rec.findings.length;
+            for (const f of rec.findings) {
+              if (f.filePath && f.filePath !== "(unknown)") touchedFiles.add(f.filePath);
+            }
+            resumedFiles++;
+            resumedFindings += rec.findings.length;
+            continue;
+          }
+          todo.push(c);
+        }
+        if (resumedFiles > 0) {
+          console.log(
+            `  ${agent.slug}: resuming — ${resumedFiles}/${candidates.length} file(s) already analyzed (${resumedFindings} finding(s)) reused`,
+          );
+        }
+        pending = todo;
+      }
+      // Everything already analyzed (e.g. the agent finished its batches
+      // but crashed before the completion sidecar landed) → mark the
+      // agent complete and move on.
+      if (pending.length === 0) {
+        try {
+          writeAgentRun(outDir, {
+            agentSlug: agent.slug,
+            lastCompletedRunId: runMeta.runId,
+            lastCompletedAt: new Date().toISOString(),
+            scope: currentScope,
+            precondition: { queued: true },
+            findingCount: byAgent[agent.slug] ?? 0,
+          });
+          allRecordsCache = null;
+        } catch {
+          // best-effort
+        }
+        continue;
+      }
+
       const maxTurns = opts.maxTurns ?? agent.where.maxTurnsPerBatch;
       const batchSize = Math.max(1, opts.maxFilesPerBatch ?? agent.where.maxFilesPerBatch);
       const diffArg =
@@ -581,12 +745,12 @@ export async function runScan(
 
       // Candidates are reviewed in batches of `batchSize`, run concurrently.
       const batches: AgentCandidate[][] = [];
-      for (let i = 0; i < candidates.length; i += batchSize) {
-        batches.push(candidates.slice(i, i + batchSize));
+      for (let i = 0; i < pending.length; i += batchSize) {
+        batches.push(pending.slice(i, i + batchSize));
       }
 
       console.log(
-        `  ${agent.slug}: ${candidates.length} candidate file(s) → ${batches.length} batch(es) of up to ${batchSize} (concurrency ${concurrency})`,
+        `  ${agent.slug}: ${pending.length} candidate file(s) → ${batches.length} batch(es) of up to ${batchSize} (concurrency ${concurrency})`,
       );
 
       let agentFailed = false;
@@ -720,11 +884,11 @@ export async function runScan(
           // classify against --scope, and only persist `out-of-scope`.
           // Findings the scope doesn't disqualify are left untouched so a
           // follow-up `revalidate` (full mode) can still assess them.
-          if (scopeOnlyValidate) {
+          if (scopeOnlyValidate && scopeContent !== undefined) {
             try {
               const result = await detector.validateFindingByScope({
                 finding,
-                scope: scopeContent!,
+                scope: scopeContent,
                 signal: scanAbortController.signal,
               });
               if (result.verdict === "out-of-scope") {
@@ -777,20 +941,28 @@ export async function runScan(
             handleDetectorError(opts, `validate:${finding.id}`, err, scanAbortController);
           }
         });
-        // Persist validation verdicts back into FileRecords. Group by
-        // file so each record is rewritten once even when N findings
-        // share a path.
-        const byFile = new Map<string, Finding[]>();
+        // Persist validation verdicts back into the per-(agent, file)
+        // shards. Group by (agentSlug, filePath) so each shard is
+        // rewritten once.
+        const byShard = new Map<
+          string,
+          { agentSlug: string; filePath: string; findings: Finding[] }
+        >();
         for (const f of validatable) {
           if (!f.validation) continue;
           const normalized = f.filePath.replace(/\\/g, "/");
           if (isAbsolute(normalized)) continue;
-          const list = byFile.get(normalized) ?? [];
-          list.push(f);
-          byFile.set(normalized, list);
+          const key = `${f.agentSlug} ${normalized}`;
+          const entry = byShard.get(key) ?? {
+            agentSlug: f.agentSlug,
+            filePath: normalized,
+            findings: [],
+          };
+          entry.findings.push(f);
+          byShard.set(key, entry);
         }
-        for (const [normalized, group] of byFile) {
-          const record = readFileRecord(outDir, normalized);
+        for (const { agentSlug, filePath, findings: group } of byShard.values()) {
+          const record = readFileRecord(outDir, agentSlug, filePath);
           if (!record) continue;
           const inMemory = new Map(group.map((f) => [f.id, f]));
           record.findings = record.findings.map((rec) => {
@@ -803,7 +975,7 @@ export async function runScan(
             ranAt: new Date().toISOString(),
             durationMs: 0,
             provider: detector.name,
-            agentSlugs: Array.from(new Set(group.map((f) => f.agentSlug))),
+            agentSlugs: [agentSlug],
             findingCount: group.length,
           });
           record.status = "validated";
@@ -811,7 +983,9 @@ export async function runScan(
             writeFileRecord(outDir, record);
           } catch (err) {
             if (opts.verbose) {
-              console.error(`    persist failed for ${normalized}: ${(err as Error).message}`);
+              console.error(
+                `    persist failed for ${agentSlug}/${filePath}: ${(err as Error).message}`,
+              );
             }
           }
         }
@@ -858,7 +1032,10 @@ export async function runScan(
             (skippedDisq > 0 ? ` (${skippedDisq} skipped: FP/out-of-scope)` : ""),
         );
         const scoreFileCache = new Map<string, string | null>();
-        const scoredByFile = new Map<string, Finding[]>();
+        const scoredByShard = new Map<
+          string,
+          { agentSlug: string; filePath: string; findings: Finding[] }
+        >();
         // Sequential — same legibility argument as validation. The
         // scorer is one call per finding; parallelizing it would tangle
         // progress + rate-limit pressure with the validator above.
@@ -887,9 +1064,14 @@ export async function runScan(
             finding.cvss = cvss;
             finding.severity = cvss.severity;
             const normalized = finding.filePath.replace(/\\/g, "/");
-            const list = scoredByFile.get(normalized) ?? [];
-            list.push(finding);
-            scoredByFile.set(normalized, list);
+            const key = `${finding.agentSlug} ${normalized}`;
+            const entry = scoredByShard.get(key) ?? {
+              agentSlug: finding.agentSlug,
+              filePath: normalized,
+              findings: [],
+            };
+            entry.findings.push(finding);
+            scoredByShard.set(key, entry);
             if (opts.verbose) {
               const loc = finding.lineRange ? `:${finding.lineRange[0]}` : "";
               console.log(
@@ -900,11 +1082,12 @@ export async function runScan(
             handleDetectorError(opts, `score:${finding.id}`, err, scanAbortController);
           }
         });
-        // Persist scored findings back into the FileRecord. Grouped by
-        // file so each record is rewritten once per scoring run.
-        for (const [normalized, group] of scoredByFile) {
-          if (isAbsolute(normalized)) continue;
-          const record = readFileRecord(outDir, normalized);
+        // Persist scored findings back into the per-(agent, file) shards.
+        // Grouped by (agentSlug, filePath) so each shard is rewritten
+        // once per scoring run.
+        for (const { agentSlug, filePath, findings: group } of scoredByShard.values()) {
+          if (isAbsolute(filePath)) continue;
+          const record = readFileRecord(outDir, agentSlug, filePath);
           if (!record) continue;
           const inMemory = new Map(group.map((f) => [f.id, f]));
           record.findings = record.findings.map((rec) => {
@@ -918,14 +1101,16 @@ export async function runScan(
             ranAt: new Date().toISOString(),
             durationMs: 0,
             provider: detector.name,
-            agentSlugs: Array.from(new Set(group.map((f) => f.agentSlug))),
+            agentSlugs: [agentSlug],
             findingCount: group.length,
           });
           try {
             writeFileRecord(outDir, record);
           } catch (err) {
             if (opts.verbose) {
-              console.error(`    persist failed for ${normalized}: ${(err as Error).message}`);
+              console.error(
+                `    persist failed for ${agentSlug}/${filePath}: ${(err as Error).message}`,
+              );
             }
           }
         }
@@ -948,16 +1133,22 @@ export async function runScan(
 
     const completedAt = new Date();
 
-    const report = writeMarkdownReport({
-      outDir,
-      root,
-      startedAt,
-      completedAt,
-      findings,
-      filesScanned: touchedFiles.size,
-      byAgent,
-      excludeFalsePositives: opts.excludeFalsePositives,
-    });
+    // `--no-summary` skips the report render entirely. Findings are already
+    // persisted to state/files/*, so `agentgg summary <outDir>` can produce
+    // the markdown later without re-running detection.
+    const report =
+      opts.summary === false
+        ? null
+        : writeMarkdownReport({
+            outDir,
+            root,
+            startedAt,
+            completedAt,
+            findings,
+            filesScanned: touchedFiles.size,
+            byAgent,
+            excludeFalsePositives: opts.excludeFalsePositives,
+          });
 
     completeRun(outDir, runMeta.runId, "done", {
       filesScanned: touchedFiles.size,
@@ -968,8 +1159,14 @@ export async function runScan(
     process.off("SIGINT", sigintHandler);
 
     console.log(`\nDone. ${findings.length} finding(s) across ${touchedFiles.size} file(s).`);
-    console.log(`  Summary: ${report.summaryPath}`);
-    console.log(`  Findings dir: ${outDir}\\findings`);
+    if (report) {
+      console.log(`  Summary: ${report.summaryPath}`);
+      console.log(`  Findings dir: ${outDir}\\findings`);
+    } else {
+      console.log(
+        `  Summary: skipped (--no-summary). Run \`agentgg summary ${opts.output ?? "./scan-results/"}\` to render it.`,
+      );
+    }
 
     if (opts.serve) {
       const port = parsePortOpt(opts.serve);
@@ -1013,6 +1210,25 @@ export async function runScan(
     }
     throw err;
   }
+}
+
+/**
+ * The stand-in recon brief used under `--no-recon`. Empty content (nothing
+ * is injected into prompts) with a stable sentinel `reconHash` so resume
+ * stamps and plan.json stay consistent across `--no-recon` runs, and a
+ * normal (recon-bearing) run is correctly treated as a different scope.
+ */
+function synthesizeSkippedRecon(): ReconReport {
+  return {
+    purpose: "",
+    languages: [],
+    frameworks: [],
+    integrations: [],
+    notableDirs: [],
+    summary: "",
+    reconHash: "no-recon",
+    generatedAt: new Date().toISOString(),
+  };
 }
 
 /**
@@ -1148,6 +1364,14 @@ export function registerScanCommand(program: Command): void {
     .option(
       "--re-recon",
       "Re-run the recon pass even if a cached brief exists for this output dir (default: reuse it when the project root + stack fingerprint are unchanged).",
+    )
+    .option(
+      "--no-recon",
+      "Skip the recon survey AND precondition gating: no project brief is generated or injected into prompts, and every agent passed via -t runs unconditionally (the regex/prompt gates that would otherwise skip irrelevant agents are bypassed). Use for a focused run when you already know exactly which agents you want.",
+    )
+    .option(
+      "--no-summary",
+      "Skip writing the markdown report (summary.md + findings/*.md) at the end of the scan. Findings still persist to state/files/*; render the report later with `agentgg summary`.",
     )
     .option(
       "--score",

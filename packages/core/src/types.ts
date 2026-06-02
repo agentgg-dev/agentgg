@@ -369,9 +369,25 @@ export type AnalysisRun = z.infer<typeof AnalysisRun>;
 // ---------------------------------------------------------------------------
 
 export const FileRecord = z.object({
+  /**
+   * The agent this record belongs to. Records are sharded by agent on disk
+   * (`state/files/<agentSlug>/<filePath>.json`) so multiple agents — and
+   * multiple concurrent `scan` processes — never write the same file. A
+   * single source file's full picture is the union of every agent's record
+   * for that path, assembled at read time.
+   */
+  agentSlug: z.string(),
   /** Repo-relative POSIX path (forward slashes). */
   filePath: z.string(),
   contentHash: z.string(),
+  /**
+   * Hash of the recon brief in effect when this file was last analyzed.
+   * Per-file resume skips re-analyzing a file only when BOTH its
+   * `contentHash` (file unchanged) AND this `reconHash` (same brief)
+   * still match — a changed brief re-runs the file. Absent on records
+   * written before per-file resume, or by non-detect paths.
+   */
+  reconHash: z.string().optional(),
   candidates: z.array(CandidateMatch).default([]),
   findings: z.array(Finding).default([]),
   analysisHistory: z.array(AnalysisRun).default([]),
@@ -740,6 +756,21 @@ export const RunMeta = z.object({
   phase: z.enum(["running", "done", "error"]),
   startedAt: z.string(),
   completedAt: z.string().optional(),
+  /**
+   * What was actually invoked, so a run is self-describing: the
+   * subcommand plus the raw args as typed (which already carry the
+   * `-t` templates and every flag). Optional so run files written
+   * before this field still parse. `type` alone (e.g. "scan") doesn't
+   * say what was run or with what flags — `argv` fills that gap.
+   */
+  invocation: z
+    .object({
+      /** Subcommand: "scan" | "revalidate" | "score" | "recon" | "summary". */
+      command: z.string(),
+      /** Raw CLI args as typed (process.argv after the node binary + entrypoint). */
+      argv: z.string().optional(),
+    })
+    .optional(),
   stats: z
     .object({
       filesScanned: z.number().int().nonnegative().optional(),

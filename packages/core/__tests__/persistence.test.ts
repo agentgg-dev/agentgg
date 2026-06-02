@@ -37,8 +37,9 @@ afterEach(() => {
   rmSync(outputDir, { recursive: true, force: true });
 });
 
-function makeRecord(filePath: string): FileRecord {
+function makeRecord(filePath: string, agentSlug = "test-agent"): FileRecord {
   return {
+    agentSlug,
     filePath,
     contentHash: hashContent("hello"),
     candidates: [],
@@ -105,14 +106,19 @@ describe("path helpers", () => {
     expect(getRunMetaPath(outputDir, "20260513120000-aaaaaaaaaaaaaaaa")).toBe(
       join(outputDir, "state", "runs", "20260513120000-aaaaaaaaaaaaaaaa.json"),
     );
-    expect(getFileRecordPath(outputDir, "src/foo.ts")).toBe(
-      join(outputDir, "state", "files", "src/foo.ts.json"),
+    expect(getFileRecordPath(outputDir, "test-agent", "src/foo.ts")).toBe(
+      join(outputDir, "state", "files", "test-agent", "src/foo.ts.json"),
     );
   });
 
   it("getFileRecordPath rejects unsafe relative file paths", () => {
-    expect(() => getFileRecordPath(outputDir, "../escape.ts")).toThrow();
-    expect(() => getFileRecordPath(outputDir, "C:\\abs.ts")).toThrow();
+    expect(() => getFileRecordPath(outputDir, "test-agent", "../escape.ts")).toThrow();
+    expect(() => getFileRecordPath(outputDir, "test-agent", "C:\\abs.ts")).toThrow();
+  });
+
+  it("getFileRecordPath rejects unsafe agent slugs", () => {
+    expect(() => getFileRecordPath(outputDir, "../escape", "foo.ts")).toThrow();
+    expect(() => getFileRecordPath(outputDir, "a/b", "foo.ts")).toThrow();
   });
 
   it("getRunMetaPath rejects unsafe runIds", () => {
@@ -156,25 +162,27 @@ describe("FileRecord round-trip", () => {
   it("write then read returns the same record", () => {
     const rec = makeRecord("src/foo.ts");
     writeFileRecord(outputDir, rec);
-    const loaded = readFileRecord(outputDir, "src/foo.ts");
+    const loaded = readFileRecord(outputDir, "test-agent", "src/foo.ts");
     expect(loaded).toEqual(rec);
   });
 
   it("creates the nested directory structure on first write", () => {
     const rec = makeRecord("deep/nested/path/file.ts");
     writeFileRecord(outputDir, rec);
-    expect(existsSync(getFileRecordPath(outputDir, "deep/nested/path/file.ts"))).toBe(true);
+    expect(existsSync(getFileRecordPath(outputDir, "test-agent", "deep/nested/path/file.ts"))).toBe(
+      true,
+    );
   });
 
   it("readFileRecord returns null for a missing record", () => {
-    expect(readFileRecord(outputDir, "never-written.ts")).toBeNull();
+    expect(readFileRecord(outputDir, "test-agent", "never-written.ts")).toBeNull();
   });
 
   it("readFileRecord returns null on malformed JSON instead of throwing", () => {
     const rec = makeRecord("src/bad.ts");
     writeFileRecord(outputDir, rec);
-    writeFileSync(getFileRecordPath(outputDir, "src/bad.ts"), "not json{");
-    expect(readFileRecord(outputDir, "src/bad.ts")).toBeNull();
+    writeFileSync(getFileRecordPath(outputDir, "test-agent", "src/bad.ts"), "not json{");
+    expect(readFileRecord(outputDir, "test-agent", "src/bad.ts")).toBeNull();
   });
 });
 

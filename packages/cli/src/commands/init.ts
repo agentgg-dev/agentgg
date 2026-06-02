@@ -349,11 +349,7 @@ function hasCredentialContext(
       // from --project, $GOOGLE_CLOUD_PROJECT, or $GCLOUD_PROJECT.
       // ADC presence we don't check here — if it's missing,
       // buildDetector surfaces a clear error at scan time.
-      return Boolean(
-        opts.project?.trim() ||
-          env.GOOGLE_CLOUD_PROJECT ||
-          env.GCLOUD_PROJECT,
-      );
+      return Boolean(opts.project?.trim() || env.GOOGLE_CLOUD_PROJECT || env.GCLOUD_PROJECT);
   }
 }
 
