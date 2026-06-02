@@ -54,6 +54,8 @@ interface RevalidateOpts {
    * Commander defaults this to `true`; the bare flag sets it `false`.
    */
   summary?: boolean;
+  /** Findings validated in parallel (in-flight LLM calls). Default 5. */
+  concurrency?: number;
 }
 
 /**
@@ -170,10 +172,12 @@ export async function runRevalidate(
   // FileRecord on disk for no reason.
   const dirtyRecords = new Set<FileRecord>();
 
-  // Sequential — one finding at a time so each verdict lands
-  // before the next call starts. Validation is the per-report step;
-  // parallelism would only tangle progress and rate-limit pressure.
-  await runConcurrent(tasks, 1, async ({ record, finding }) => {
+  // One bounded pool over findings. Each finding is a distinct object;
+  // verdicts, fileCache, and dirtyRecords are only touched in await-free
+  // regions, so concurrent workers can't race. Dirtied records are written
+  // below once the pool drains.
+  const concurrency = Math.max(1, opts.concurrency ?? 5);
+  await runConcurrent(tasks, concurrency, async ({ record, finding }) => {
     // Scope-only branch: never read the file, only ask the LLM to
     // classify against the scope document, and only persist when the
     // verdict is `out-of-scope`. In-scope/uncertain results are logged
@@ -359,6 +363,12 @@ export function registerRevalidateCommand(program: Command): void {
       "Skip re-rendering the markdown report (summary.md + findings/*.md) after validation. Verdicts still persist to state/files/*; render later with `agentgg summary`.",
     )
     .option("--force", "re-validate findings that already have a verdict (default: skip them)")
+    .option(
+      "--concurrency <n>",
+      "findings validated in parallel (in-flight LLM calls)",
+      (v) => parseInt(v, 10),
+      5,
+    )
     .option("-v, --verbose", "verbose output")
     .action(async (outputDir: string, opts: RevalidateOpts) => {
       try {

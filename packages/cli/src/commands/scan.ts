@@ -931,13 +931,13 @@ export async function runScan(
         const carryNote = carriedOver > 0 ? ` (${carriedOver} cached)` : "";
         const modeNote = scopeOnlyValidate ? " — scope-only mode" : "";
         console.log(
-          `\nValidating ${validatable.length} finding(s)${scopeNote}${carryNote}${modeNote} (one at a time)`,
+          `\nValidating ${validatable.length} finding(s)${scopeNote}${carryNote}${modeNote} at concurrency ${concurrency}`,
         );
         const fileCache = new Map<string, string | null>();
-        // Validation always runs sequentially — one finding at a time —
-        // so progress is legible and per-finding failures don't get
-        // tangled with parallel siblings.
-        await runConcurrent(validatable, 1, async (finding) => {
+        // One bounded pool over findings. Each finding is a distinct object
+        // and fileCache is only touched in await-free regions, so workers
+        // don't race; verdicts are persisted below once the pool drains.
+        await runConcurrent(validatable, concurrency, async (finding) => {
           // Scope-only branch: never read the file, only ask the LLM to
           // classify against --scope, and only persist `out-of-scope`.
           // Findings the scope doesn't disqualify are left untouched so a
@@ -1094,10 +1094,10 @@ export async function runScan(
           string,
           { agentSlug: string; filePath: string; findings: Finding[] }
         >();
-        // Sequential — same legibility argument as validation. The
-        // scorer is one call per finding; parallelizing it would tangle
-        // progress + rate-limit pressure with the validator above.
-        await runConcurrent(scorable, 1, async (finding) => {
+        // One bounded pool over findings, same as validation. scoredByShard
+        // is mutated only after the await (a synchronous get/push/set with no
+        // yield), so concurrent workers can't lose an entry.
+        await runConcurrent(scorable, concurrency, async (finding) => {
           let content = scoreFileCache.get(finding.filePath);
           if (content === undefined) {
             try {

@@ -42,6 +42,8 @@ interface ScoreOpts {
    * defaults this to `true`; the bare flag sets it `false`.
    */
   summary?: boolean;
+  /** Findings scored in parallel (in-flight LLM calls). Default 5. */
+  concurrency?: number;
 }
 
 /**
@@ -147,9 +149,11 @@ export async function runScore(
   const fileCache = new Map<string, string | null>();
   const dirtyRecords = new Set<FileRecord>();
 
-  // Sequential — same reasoning as revalidate: progress reads cleanly
-  // and per-finding errors don't get tangled with parallel siblings.
-  await runConcurrent(tasks, 1, async ({ record, finding }) => {
+  // One bounded pool over findings, same as revalidate. Each finding is a
+  // distinct object; buckets, fileCache, and dirtyRecords are only touched
+  // in await-free regions, so concurrent workers can't race.
+  const concurrency = Math.max(1, opts.concurrency ?? 5);
+  await runConcurrent(tasks, concurrency, async ({ record, finding }) => {
     const absPath = resolve(rootPath, finding.filePath);
     let content = fileCache.get(finding.filePath);
     if (content === undefined) {
@@ -280,6 +284,12 @@ export function registerScoreCommand(program: Command): void {
     .option(
       "--no-summary",
       "Skip re-rendering the markdown report (summary.md + findings/*.md) after scoring. Scores still persist to state/files/*; render later with `agentgg summary`.",
+    )
+    .option(
+      "--concurrency <n>",
+      "findings scored in parallel (in-flight LLM calls)",
+      (v) => parseInt(v, 10),
+      5,
     )
     .option("-v, --verbose", "verbose output")
     .action(async (outputDir: string, opts: ScoreOpts) => {
