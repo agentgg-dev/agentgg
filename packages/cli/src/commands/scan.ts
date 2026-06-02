@@ -589,17 +589,39 @@ export async function runScan(
     //
     // Resume is per-agent: a completed agent with a matching scope
     // (including reconHash) is skipped and its findings lifted from disk.
-    // An interrupted agent (no sidecar) re-runs in full. Agents run one at
-    // a time; their batches run concurrently.
+    // An interrupted agent (no sidecar) re-runs in full.
+    //
+    // Concurrency model: every (agent, batch) pair across ALL queued agents
+    // is fed through ONE bounded worker pool, so batches from different
+    // agents overlap instead of agents running one-at-a-time. `--concurrency`
+    // caps TOTAL in-flight batches across the whole scan (it used to cap
+    // batches within a single agent). Safe because every disk write is
+    // namespaced by agent.slug, so disjoint agents never collide. Phase 1
+    // (the loop below) resolves each agent to its batches sequentially —
+    // cheap: walk + prefilter + resume, no LLM — and enqueues them; Phase 2
+    // drains the pool.
     const concurrency = Math.max(1, opts.concurrency ?? 5);
     let cachedAgentCount = 0;
+    const diffArg =
+      opts.diff && diffPatch !== undefined ? { commit: opts.diff, patch: diffPatch } : undefined;
+    type AgentRuntime = {
+      // Batches not yet settled; the resume sidecar is written when it hits 0.
+      remaining: number;
+      // Sticky: any failed batch suppresses the sidecar so the agent re-runs.
+      failed: boolean;
+      agentExcludes: string[];
+      maxTurns: number;
+      filesReviewed: number;
+      hitCount: number;
+    };
+    const runtimeBySlug = new Map<string, AgentRuntime>();
+    const batchQueue: { agent: Agent; batch: AgentCandidate[] }[] = [];
     if (queuedAgents.length > 0) {
       console.log(
         `\n[3/3] Agents — ${queuedAgents.length} queued (completed agents are reused from prior runs; only new/changed work calls the LLM)…`,
       );
     }
     for (const agent of queuedAgents) {
-      const agentStartedAt = Date.now();
       if (!opts.rescan) {
         const prior = readAgentRun(outDir, agent.slug);
         if (prior && scopeMatches(prior.scope, currentScope)) {
@@ -661,6 +683,10 @@ export async function runScan(
         candidates.push({ filePath: relPath, content, hits });
         touchedFiles.add(relPath);
       }
+      // Deterministic "how much work" signals for this agent, fixed before
+      // any LLM call: files it reviews and total pre-filter anchor matches.
+      const filesReviewed = candidates.length;
+      const hitCount = candidates.reduce((sum, c) => sum + c.hits.length, 0);
       if (candidates.length === 0) {
         if (opts.verbose) console.log(`  ${agent.slug}: no candidate files`);
         try {
@@ -671,7 +697,8 @@ export async function runScan(
             scope: currentScope,
             precondition: { queued: true },
             findingCount: 0,
-            durationMs: Date.now() - agentStartedAt,
+            filesReviewed,
+            hitCount,
           });
           allRecordsCache = null;
         } catch {
@@ -732,7 +759,8 @@ export async function runScan(
             scope: currentScope,
             precondition: { queued: true },
             findingCount: byAgent[agent.slug] ?? 0,
-            durationMs: Date.now() - agentStartedAt,
+            filesReviewed,
+            hitCount,
           });
           allRecordsCache = null;
         } catch {
@@ -743,111 +771,137 @@ export async function runScan(
 
       const maxTurns = opts.maxTurns ?? agent.where.maxTurnsPerBatch;
       const batchSize = Math.max(1, opts.maxFilesPerBatch ?? agent.where.maxFilesPerBatch);
-      const diffArg =
-        opts.diff && diffPatch !== undefined ? { commit: opts.diff, patch: diffPatch } : undefined;
 
-      // Candidates are reviewed in batches of `batchSize`, run concurrently.
+      // Candidates are reviewed in batches of `batchSize`. The batches are
+      // not run here — they're enqueued into the shared pool drained in
+      // Phase 2, so they interleave with every other agent's batches.
       const batches: AgentCandidate[][] = [];
       for (let i = 0; i < pending.length; i += batchSize) {
         batches.push(pending.slice(i, i + batchSize));
       }
 
       console.log(
-        `  ${agent.slug}: ${pending.length} candidate file(s) → ${batches.length} batch(es) of up to ${batchSize} (concurrency ${concurrency})`,
+        `  ${agent.slug}: ${pending.length} candidate file(s) → ${batches.length} batch(es) of up to ${batchSize}`,
       );
 
-      let agentFailed = false;
-      await runConcurrent(batches, concurrency, async (batch) => {
-        try {
-          const batchFindings = await detector.runAgent({
-            agent,
-            rootDir: root,
-            recon: reconBlock,
-            candidates: batch,
-            excludePatterns: agentExcludes,
-            maxFileSizeKb: opts.maxFileSize ?? 500,
-            maxTurns,
-            diff: diffArg,
-            signal: scanAbortController.signal,
-          });
-          // Drop findings whose filePath doesn't exist on disk (model
-          // invented a path — common with smaller models).
-          const valid = batchFindings.filter((f) => {
-            if (!f.filePath || f.filePath === "(unknown)") return true;
-            if (existsSync(resolve(root, f.filePath))) return true;
+      runtimeBySlug.set(agent.slug, {
+        remaining: batches.length,
+        failed: false,
+        agentExcludes,
+        maxTurns,
+        filesReviewed,
+        hitCount,
+      });
+      for (const batch of batches) batchQueue.push({ agent, batch });
+    }
+
+    // -------- Phase 2: drain the batch pool --------
+    // One bounded worker pool over every enqueued (agent, batch) pair.
+    // Batches from different agents run concurrently up to `concurrency`.
+    if (batchQueue.length > 0) {
+      console.log(
+        `  Running ${batchQueue.length} batch(es) across ${runtimeBySlug.size} agent(s) at concurrency ${concurrency}…`,
+      );
+    }
+    await runConcurrent(batchQueue, concurrency, async ({ agent, batch }) => {
+      const rt = runtimeBySlug.get(agent.slug);
+      if (!rt) return;
+      try {
+        const batchFindings = await detector.runAgent({
+          agent,
+          rootDir: root,
+          recon: reconBlock,
+          candidates: batch,
+          excludePatterns: rt.agentExcludes,
+          maxFileSizeKb: opts.maxFileSize ?? 500,
+          maxTurns: rt.maxTurns,
+          diff: diffArg,
+          signal: scanAbortController.signal,
+        });
+        // Drop findings whose filePath doesn't exist on disk (model
+        // invented a path — common with smaller models).
+        const valid = batchFindings.filter((f) => {
+          if (!f.filePath || f.filePath === "(unknown)") return true;
+          if (existsSync(resolve(root, f.filePath))) return true;
+          if (opts.verbose) {
+            console.log(`    ${agent.slug}: dropping finding with non-existent path: ${f.filePath}`);
+          }
+          return false;
+        });
+        findings.push(...valid);
+        byAgent[agent.slug] = (byAgent[agent.slug] ?? 0) + valid.length;
+        for (const f of valid) {
+          if (f.filePath && f.filePath !== "(unknown)") touchedFiles.add(f.filePath);
+        }
+        if (opts.verbose || valid.length > 0) {
+          const label = batch.map((c) => c.filePath).join(", ");
+          console.log(`    ${agent.slug} [${label}]: ${valid.length} finding(s)`);
+        }
+        // Persist findings grouped by file.
+        const byFile = new Map<string, Finding[]>();
+        for (const f of valid) {
+          if (!f.filePath || f.filePath === "(unknown)") continue;
+          const list = byFile.get(f.filePath) ?? [];
+          list.push(f);
+          byFile.set(f.filePath, list);
+        }
+        for (const [relPath, group] of byFile) {
+          const inBatch = batch.find((c) => c.filePath === relPath);
+          let content: string;
+          if (inBatch) {
+            content = inBatch.content;
+          } else {
+            try {
+              content = readFileSync(resolve(root, relPath), "utf8");
+            } catch {
+              continue;
+            }
+          }
+          persistDetection(relPath, agent, content, group);
+        }
+        // Stamp an empty record for candidate files with no findings so
+        // `status` reports candidate files with no findings as analyzed.
+        for (const c of batch) {
+          if (byFile.has(c.filePath)) continue;
+          persistDetection(c.filePath, agent, c.content, []);
+        }
+      } catch (err) {
+        rt.failed = true;
+        // Fatal errors (bad creds, quota) throw out of here → runConcurrent
+        // stops dispatching, drains in-flight, and rethrows. Recoverable
+        // ones are logged and the pool continues.
+        handleDetectorError(opts, `agent:${agent.slug}`, err, scanAbortController);
+      } finally {
+        // Write the agent's resume sidecar exactly once, when its LAST batch
+        // settles, and only if no batch failed — a failed agent leaves no
+        // sidecar and re-runs next time. No per-agent timing: under the
+        // shared pool an agent isn't a contiguous runtime unit (its batches
+        // interleave with other agents'), so filesReviewed/hitCount are the
+        // meaningful per-agent signals; whole-scan time lives in RunMeta.
+        rt.remaining--;
+        if (rt.remaining === 0 && !rt.failed) {
+          try {
+            writeAgentRun(outDir, {
+              agentSlug: agent.slug,
+              lastCompletedRunId: runMeta.runId,
+              lastCompletedAt: new Date().toISOString(),
+              scope: currentScope,
+              precondition: { queued: true },
+              findingCount: byAgent[agent.slug] ?? 0,
+              filesReviewed: rt.filesReviewed,
+              hitCount: rt.hitCount,
+            });
+            allRecordsCache = null;
+          } catch (err) {
             if (opts.verbose) {
-              console.log(
-                `    ${agent.slug}: dropping finding with non-existent path: ${f.filePath}`,
+              console.error(
+                `    ${agent.slug}: failed to write resume sidecar: ${(err as Error).message}`,
               );
             }
-            return false;
-          });
-          findings.push(...valid);
-          byAgent[agent.slug] = (byAgent[agent.slug] ?? 0) + valid.length;
-          for (const f of valid) {
-            if (f.filePath && f.filePath !== "(unknown)") touchedFiles.add(f.filePath);
-          }
-          if (opts.verbose || valid.length > 0) {
-            const label = batch.map((c) => c.filePath).join(", ");
-            console.log(`    [${label}]: ${valid.length} finding(s)`);
-          }
-          // Persist findings grouped by file.
-          const byFile = new Map<string, Finding[]>();
-          for (const f of valid) {
-            if (!f.filePath || f.filePath === "(unknown)") continue;
-            const list = byFile.get(f.filePath) ?? [];
-            list.push(f);
-            byFile.set(f.filePath, list);
-          }
-          for (const [relPath, group] of byFile) {
-            const inBatch = batch.find((c) => c.filePath === relPath);
-            let content: string;
-            if (inBatch) {
-              content = inBatch.content;
-            } else {
-              try {
-                content = readFileSync(resolve(root, relPath), "utf8");
-              } catch {
-                continue;
-              }
-            }
-            persistDetection(relPath, agent, content, group);
-          }
-          // Stamp an empty record for candidate files with no findings so
-          // `status` reports candidate files with no findings as analyzed.
-          for (const c of batch) {
-            if (byFile.has(c.filePath)) continue;
-            persistDetection(c.filePath, agent, c.content, []);
-          }
-        } catch (err) {
-          agentFailed = true;
-          handleDetectorError(opts, `agent:${agent.slug}`, err, scanAbortController);
-        }
-      });
-
-      // Write the resume sidecar only when every batch succeeded — a
-      // failed agent leaves no sidecar and re-runs next time.
-      if (!agentFailed) {
-        try {
-          writeAgentRun(outDir, {
-            agentSlug: agent.slug,
-            lastCompletedRunId: runMeta.runId,
-            lastCompletedAt: new Date().toISOString(),
-            scope: currentScope,
-            precondition: { queued: true },
-            findingCount: byAgent[agent.slug] ?? 0,
-            durationMs: Date.now() - agentStartedAt,
-          });
-          allRecordsCache = null;
-        } catch (err) {
-          if (opts.verbose) {
-            console.error(
-              `    ${agent.slug}: failed to write resume sidecar: ${(err as Error).message}`,
-            );
           }
         }
       }
-    }
+    });
     if (queuedAgents.length > 0) {
       const ranCount = queuedAgents.length - cachedAgentCount;
       console.log(
@@ -1342,7 +1396,12 @@ export function registerScanCommand(program: Command): void {
       "--diff <commit>",
       "Restrict the scan to a single commit's own changes (parent → commit), independent of the working tree. Each agent's candidate files are intersected with the files touched in <commit>, and the commit patch is injected into the agent's prompt as a focus hint (tools stay unrestricted so it can chase context outward).",
     )
-    .option("--concurrency <n>", "parallel file processing", (v) => parseInt(v, 10), 5)
+    .option(
+      "--concurrency <n>",
+      "max batches run in parallel across ALL agents (total in-flight LLM sessions for the whole scan)",
+      (v) => parseInt(v, 10),
+      5,
+    )
     .option(
       "--max-turns <n>",
       "Max tool-use turns per LLM session. When set, applies uniformly to every agent batch, recon, and the validator. When unset: agent batches use the agent's `where.maxTurnsPerBatch` (default 30), recon 30, validator 30.",

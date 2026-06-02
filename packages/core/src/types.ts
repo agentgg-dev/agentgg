@@ -757,12 +757,21 @@ export const AgentRun = z.object({
     .optional(),
   findingCount: z.number().int().nonnegative().default(0),
   /**
-   * Wall-clock time this agent's run took, in milliseconds — from the
-   * start of its work (file walk + per-batch analysis) to the moment the
-   * completion sidecar was written. Optional so sidecars written before
-   * this field still parse; defaults to 0.
+   * How many candidate files this agent reviewed (its scope after walk +
+   * pre-filter). A deterministic "how much work" signal for comparing
+   * agents: a static property of the agent's scope, not a runtime
+   * measurement, so it doesn't vary with model latency or scheduling.
+   * (Per-agent wall time isn't tracked — under the shared batch pool an
+   * agent isn't a contiguous unit of execution.) Defaults to 0 for older
+   * sidecars.
    */
-  durationMs: z.number().int().nonnegative().default(0),
+  filesReviewed: z.number().int().nonnegative().default(0),
+  /**
+   * Total pre-filter anchor matches across those files. Finer-grained than
+   * filesReviewed (a file with 10 hits is more to review than one with 1).
+   * Defaults to 0 for older sidecars.
+   */
+  hitCount: z.number().int().nonnegative().default(0),
 });
 export type AgentRun = z.infer<typeof AgentRun>;
 
