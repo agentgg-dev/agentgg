@@ -824,7 +824,9 @@ export async function runScan(
           if (!f.filePath || f.filePath === "(unknown)") return true;
           if (existsSync(resolve(root, f.filePath))) return true;
           if (opts.verbose) {
-            console.log(`    ${agent.slug}: dropping finding with non-existent path: ${f.filePath}`);
+            console.log(
+              `    ${agent.slug}: dropping finding with non-existent path: ${f.filePath}`,
+            );
           }
           return false;
         });

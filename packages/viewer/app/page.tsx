@@ -86,12 +86,7 @@ export default function DashboardPage() {
             hint={outOfScope > 0 ? `${outOfScope} out of scope` : undefined}
             accent="neutral"
           />
-          <StatCard
-            label="Files scanned"
-            value={counts.files}
-            hint={`${counts.analyzed} analyzed · ${counts.pending} pending`}
-            accent="cyan"
-          />
+          <StatCard label="Files scanned" value={counts.files} accent="cyan" />
         </section>
 
         {/* meta strip */}
