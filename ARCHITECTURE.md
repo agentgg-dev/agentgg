@@ -20,7 +20,7 @@ There is one agent shape — no `mode`. Every agent declares a `precondition`, a
 
 - **Precondition** ([`precondition.ts`](packages/cli/src/precondition.ts)) — a `regex` block (file `extensions` / `files` / `directories` / content `patterns`) is pure filesystem work; a `prompt` is one cheap LLM call that sees the recon brief; both present = AND; neither = always run. Regex short-circuits before the LLM.
 - **Where** ([`walker.ts`](packages/cli/src/walker.ts)) — the walker enumerates files by `extensions` + `filePatterns` (a bare directory/path matches everything under it) minus `excludePatterns`, then `preFilter` regexes narrow to files with a line hit (and surface those lines as anchors). Empty `where` = all files.
-- **Run** — candidates are chunked into batches of `where.maxFilesPerBatch` (default 5); each batch is one tool-enabled session (`detector.runAgent`), run concurrently (`--concurrency`). A session can read beyond its seeded files to confirm a finding. One agent per session; findings are stamped with the agent's slug.
+- **Run** — candidates are chunked into batches of `where.maxFilesPerBatch` (default 5); each batch is one tool-enabled session (`detector.runAgent`). Batches from every queued agent are flattened into a single scan-wide pool capped by `--concurrency`, so different agents' batches interleave (safe because per-file writes are namespaced by `agent.slug`). A session can read beyond its seeded files to confirm a finding. One agent per session; findings are stamped with the agent's slug.
 
 ## Detector contract
 
@@ -90,7 +90,7 @@ Three Detector methods, so any provider participates without bespoke wiring:
 |---|---|---|
 | `--max-turns <n>` | recon, agent runs, validator | When set, a uniform cap. Unset: agent batches use `where.maxTurnsPerBatch` (default 30), recon 30, validator 30. |
 | `--max-files-per-batch <n>` | agent runs | Candidate files per batch. Overrides `where.maxFilesPerBatch` (default 5). |
-| `--concurrency <n>` | agent runs, precondition gates | Parallel sessions in flight. Default 5. |
+| `--concurrency <n>` | precondition gates, agent runs, validation, scoring | One scan-wide cap on in-flight LLM sessions. Phase 3 flattens every `(agent, batch)` pair into a single pool; validation and scoring fan out one finding per session through the same `runConcurrent` worker pool. Default 5. |
 | `--re-recon` | recon + plan | Re-run recon **and** re-evaluate the precondition plan instead of reusing the cached brief/plan. |
 | `--no-recon` | recon + precondition | Skip the survey and the gating loop; run every `-t` agent unconditionally with no injected brief. |
 | `--no-summary` | report | Skip rendering `summary.md` + `findings/*.md`. Also accepted by `revalidate` / `score`. State still persists; render later with `agentgg summary`. |

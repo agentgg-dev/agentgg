@@ -504,7 +504,7 @@ Run `agentgg <command> --help` for the full flag list on any subcommand.
 --no-recon                      skip the recon survey AND precondition gating; run every -t agent unconditionally
 --no-summary                    skip writing the markdown report (summary.md + findings/*.md); state still persists
 --max-files-per-batch <n>       candidate files per agent batch (overrides the agent's where.maxFilesPerBatch)
---concurrency <n>               parallel batches per agent (default 5)
+--concurrency <n>               max LLM sessions in flight across the whole scan — agent batches, validation, and scoring all draw from one pool (default 5)
 --exclude <pattern>             path/glob to exclude — treated as deleted (repeatable; additive)
 --only <pattern>                restrict scan to matching globs (repeatable)
 --max-file-size <kb>            skip files larger than this (default 500)
