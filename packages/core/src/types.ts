@@ -756,6 +756,13 @@ export const AgentRun = z.object({
     })
     .optional(),
   findingCount: z.number().int().nonnegative().default(0),
+  /**
+   * Wall-clock time this agent's run took, in milliseconds — from the
+   * start of its work (file walk + per-batch analysis) to the moment the
+   * completion sidecar was written. Optional so sidecars written before
+   * this field still parse; defaults to 0.
+   */
+  durationMs: z.number().int().nonnegative().default(0),
 });
 export type AgentRun = z.infer<typeof AgentRun>;
 

@@ -599,6 +599,7 @@ export async function runScan(
       );
     }
     for (const agent of queuedAgents) {
+      const agentStartedAt = Date.now();
       if (!opts.rescan) {
         const prior = readAgentRun(outDir, agent.slug);
         if (prior && scopeMatches(prior.scope, currentScope)) {
@@ -670,6 +671,7 @@ export async function runScan(
             scope: currentScope,
             precondition: { queued: true },
             findingCount: 0,
+            durationMs: Date.now() - agentStartedAt,
           });
           allRecordsCache = null;
         } catch {
@@ -730,6 +732,7 @@ export async function runScan(
             scope: currentScope,
             precondition: { queued: true },
             findingCount: byAgent[agent.slug] ?? 0,
+            durationMs: Date.now() - agentStartedAt,
           });
           allRecordsCache = null;
         } catch {
@@ -833,6 +836,7 @@ export async function runScan(
             scope: currentScope,
             precondition: { queued: true },
             findingCount: byAgent[agent.slug] ?? 0,
+            durationMs: Date.now() - agentStartedAt,
           });
           allRecordsCache = null;
         } catch (err) {
