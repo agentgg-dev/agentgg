@@ -1,7 +1,7 @@
 import { resolve } from "node:path";
 import type { ReconReport } from "@agentgg/core";
 import { hashContent, readReconReport, writeReconReport } from "@agentgg/core";
-import type { Detector } from "./detect.js";
+import type { Detector, ReconResult } from "./detect.js";
 import { loadReconInstructions } from "./recon-agent.js";
 
 /**
@@ -60,7 +60,7 @@ export async function runRecon(opts: RunReconOptions): Promise<ReconReport> {
     }
   }
 
-  let result;
+  let result: ReconResult;
   try {
     result = await opts.detector.recon({
       rootDir: opts.rootDir,
