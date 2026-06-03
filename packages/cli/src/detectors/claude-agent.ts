@@ -284,9 +284,16 @@ export class ClaudeAgentDetector implements Detector {
         if (this.verbose && msg.type === "assistant") {
           this.printToolUses(msg);
         }
-        if (msg.type === "result" && msg.subtype === "success") {
-          structured = (msg as { structured_output?: unknown }).structured_output;
-          resultText = String((msg as { result?: unknown }).result ?? "");
+        // Capture the structured answer from any terminal `result` message,
+        // not just `subtype: "success"`. When a session stops at its turn cap
+        // (`error_max_turns`) the SDK can still carry the last structured
+        // output the model emitted — take whatever it got rather than
+        // discarding it and failing.
+        if (msg.type === "result") {
+          const so = (msg as { structured_output?: unknown }).structured_output;
+          if (so !== undefined) structured = so;
+          const r = (msg as { result?: unknown }).result;
+          if (r !== undefined) resultText = String(r);
         }
       }
     } catch (err) {

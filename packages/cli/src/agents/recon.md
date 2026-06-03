@@ -57,11 +57,17 @@ Produce a CONCISE brief — its size must NOT grow with the repo. This is a
 fast, high-level pass, and the brief is prepended to many later prompts, so
 brevity is essential:
 
-- `summary`: a few short paragraphs, regardless of repo size.
-- `integrations` / `notableDirs`: at most ~6–8 entries each. On a large repo,
-  **generalize instead of enumerating** — e.g. "protocol handlers under
-  `lib/`", "~40 controllers under `app/Http/`" — rather than listing every
-  item. Pick the highest-signal areas.
+- `summary`: **2–4 sentences, ~80 words max — a single short paragraph,
+  never more.** One sentence on what it is, one on the stack, one on the auth
+  model, one on the single highest-risk surface. This hard limit holds
+  regardless of repo size. Do NOT write multiple paragraphs, do NOT enumerate
+  trust boundaries / plugins / files here (that is what `notableDirs` is for),
+  and do NOT add caveats or "note:" asides.
+- `integrations` / `notableDirs`: at most ~6–8 entries each, **one short
+  phrase per entry** — not a sentence. On a large repo, **generalize instead
+  of enumerating** — e.g. "protocol handlers under `lib/`", "~40 controllers
+  under `app/Http/`" — rather than listing every item. Pick the highest-signal
+  areas.
 
 When something isn't discernible, use an empty list or null rather than
 guessing.

@@ -150,7 +150,7 @@ export async function runReconCommand(
       excludePatterns: walkExcludes,
       includePatterns,
       maxFileSizeKb: opts.maxFileSize ?? 500,
-      maxTurns: opts.maxTurns ?? 30,
+      maxTurns: opts.maxTurns ?? 50,
       force: opts.reRecon,
       signal: reconAbortController.signal,
       verbose: opts.verbose,
@@ -256,7 +256,7 @@ export function registerReconCommand(program: Command): void {
       [] as string[],
     )
     .option("--concurrency <n>", "parallel precondition prompt gates", (v) => parseInt(v, 10), 5)
-    .option("--max-turns <n>", "Max tool-use turns for the recon survey (default 30).", (v) =>
+    .option("--max-turns <n>", "Max tool-use turns for the recon survey (default 50).", (v) =>
       parseInt(v, 10),
     )
     .option(

@@ -60,16 +60,42 @@ export async function runRecon(opts: RunReconOptions): Promise<ReconReport> {
     }
   }
 
-  const result = await opts.detector.recon({
-    rootDir: opts.rootDir,
-    instructions: loadReconInstructions(),
-    fingerprintTags: opts.fingerprintTags,
-    excludePatterns: opts.excludePatterns,
-    includePatterns: opts.includePatterns,
-    maxFileSizeKb: opts.maxFileSizeKb,
-    maxTurns: opts.maxTurns,
-    signal: opts.signal,
-  });
+  let result;
+  try {
+    result = await opts.detector.recon({
+      rootDir: opts.rootDir,
+      instructions: loadReconInstructions(),
+      fingerprintTags: opts.fingerprintTags,
+      excludePatterns: opts.excludePatterns,
+      includePatterns: opts.includePatterns,
+      maxFileSizeKb: opts.maxFileSizeKb,
+      maxTurns: opts.maxTurns,
+      signal: opts.signal,
+    });
+  } catch (err) {
+    // Recon is advisory: its brief orients the agents but the scan can run
+    // without it. A turn-cap stop (or any survey failure) must not abort the
+    // whole scan — degrade to a minimal brief and continue. We intentionally
+    // do NOT persist this stand-in, so the next run re-attempts a full survey
+    // instead of caching a truncated one. Raise --max-turns or pass --re-recon
+    // to refresh.
+    console.warn(
+      `  recon: survey did not complete (${(err as Error).message}); ` +
+        `continuing with a minimal brief. Raise --max-turns or re-run with --re-recon to refresh.`,
+    );
+    return {
+      purpose: "",
+      languages: [],
+      frameworks: [],
+      authModel: undefined,
+      integrations: [],
+      notableDirs: [],
+      summary:
+        "Recon did not complete within the turn budget; the scan proceeded without a full project brief.",
+      reconHash,
+      generatedAt: new Date().toISOString(),
+    };
+  }
 
   const report: ReconReport = {
     purpose: result.purpose,

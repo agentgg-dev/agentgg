@@ -95,7 +95,7 @@ export const ReconResult = z.object({
   summary: z
     .string()
     .describe(
-      "A few short paragraphs orienting a security reviewer to this codebase. Concise — orientation, not an audit.",
+      "One short paragraph, ~80 words max, orienting a security reviewer: what it is, the stack, the auth model, the highest-risk surface. Orientation, not an audit. Never multiple paragraphs.",
     ),
 });
 export type ReconResult = z.infer<typeof ReconResult>;
