@@ -31,26 +31,80 @@ export type Effort = "low" | "medium" | "high" | "max";
 export type Thinking = "off" | "adaptive" | "enabled";
 
 /**
- * Parse the retry delay from a TPM rate-limit error message.
- * OpenAI embeds "Please try again in Xs" in the 429 body; we extract
- * that value so we can sleep exactly as long as the window needs.
- * Returns milliseconds, or null when the pattern isn't present.
+ * Parse the retry delay from a rate-limit error message. Different providers
+ * embed the delay in different formats; we try each in turn.
+ *
+ *   - OpenAI: "Please try again in 1.5s"
+ *   - Standard HTTP: "Retry-After: 60" (seconds)
+ *   - Anthropic: "retry after: 60s"
+ *
+ * Returns milliseconds (with a 200ms buffer), or null when no pattern matches.
  */
-function parseRetryAfterMs(message: string): number | null {
-  const match = message.match(/try again in ([\d.]+)s/i);
-  if (!match) return null;
-  return Math.ceil(parseFloat(match[1]) * 1000) + 200;
+export function parseRetryAfterMs(message: string): number | null {
+  const tryAgain = message.match(/try again in ([\d.]+)s/i);
+  if (tryAgain) return Math.ceil(parseFloat(tryAgain[1] as string) * 1000) + 200;
+  const retryAfter = message.match(/retry[- ]?after[:\s]+([\d.]+)\s*s?\b/i);
+  if (retryAfter) return Math.ceil(parseFloat(retryAfter[1] as string) * 1000) + 200;
+  return null;
 }
 
 /**
- * Retry an LLM call on TPM rate-limit errors (HTTP 429 with a tokens-per-minute
- * body). The OpenAI error message includes the exact wait time; we parse and
- * sleep it rather than guessing. Non-TPM errors and non-429s fall through
- * immediately so the Vercel AI SDK's own retry logic can handle them.
+ * Recognize a rate-limit / quota error across the providers we support.
+ * The wording differs widely:
+ *
+ *   - OpenAI:    "Rate limit reached for ... tokens per minute"
+ *   - Anthropic: "tpm" / "tokens-per-minute" mentions
+ *   - Vertex:    "AI_RetryError: Failed after 3 attempts. Last error: Too Many Requests"
+ *                (the underlying body says "429 Too Many Requests"; the Vercel AI
+ *                SDK wraps it in an AI_RetryError after its own internal retries)
+ *   - Vertex:    "RESOURCE_EXHAUSTED" (gRPC status code 8 surfaced as text)
+ *   - Generic:   bare HTTP 429 / "Quota exceeded"
+ *
+ * Exported for unit-testing the matching set without spinning up `withTpmRetry`.
+ */
+export function isRateLimitError(message: string): boolean {
+  if (/tokens per min/i.test(message)) return true;
+  if (/\btpm\b/i.test(message)) return true;
+  if (/too many requests/i.test(message)) return true;
+  if (/\b429\b/.test(message)) return true;
+  if (/AI_RetryError/.test(message)) return true;
+  if (/RESOURCE_EXHAUSTED/.test(message)) return true;
+  if (/quota exceeded/i.test(message)) return true;
+  return false;
+}
+
+/** Default wait when the provider doesn't tell us how long to back off.
+ *  Per-minute TPM buckets refill smoothly across the window — 30s typically
+ *  frees enough capacity to fit one more call. 60s was the safe upper bound,
+ *  but compounded badly across parallel batches (3 retries × 60s × N batches). */
+const DEFAULT_BACKOFF_MS = 30_000;
+const JITTER_FRACTION = 0.2; // ±20%
+
+/** Apply ±20% jitter around the base. Critical when N callers all 429 at the
+ *  same instant — without jitter they'd all wake at exactly the same moment
+ *  and re-trip the limit in lockstep. */
+function jitter(baseMs: number): number {
+  return Math.round(baseMs * (1 + (Math.random() - 0.5) * 2 * JITTER_FRACTION));
+}
+
+/**
+ * Retry an LLM call on rate-limit errors (HTTP 429 / quota / TPM saturation).
+ * Where the provider tells us how long to wait (OpenAI's "try again in Xs",
+ * any Retry-After header echoed into the body), we honor that exactly;
+ * otherwise we default to `DEFAULT_BACKOFF_MS` with ±20% jitter.
+ * Non-rate-limit errors fall through immediately so the Vercel AI SDK's own
+ * retry logic handles them.
  *
  * When `signal` is provided and fires during a backoff sleep, the sleep
- * is interrupted with an AbortError so a quota-cancelled scan doesn't
- * have to wait out a 60s TPM window before exiting.
+ * is interrupted with an AbortError so a user-cancelled scan doesn't have
+ * to wait out the window before exiting.
+ *
+ * NOTE: The previous version of this regex only matched `/tokens per min/i`
+ * and `/tpm/i`, which silently NEVER fired on Vertex MaaS — Vertex 429s say
+ * "Too Many Requests" with no "tpm"/"tokens per minute" wording. Calls that
+ * tripped Vertex's fair-share TPM ceiling would burn 3 quick retries inside
+ * the Vercel SDK (~7s exponential backoff) and give up, instead of waiting
+ * out the window here. Broadened the matcher to catch those.
  */
 async function withTpmRetry<T>(
   fn: () => Promise<T>,
@@ -63,9 +117,10 @@ async function withTpmRetry<T>(
       return await fn();
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      const isTpm = /tokens per min/i.test(msg) || /tpm/i.test(msg);
-      if (!isTpm || attempt >= maxAttempts) throw err;
-      const waitMs = parseRetryAfterMs(msg) ?? 60_000;
+      if (!isRateLimitError(msg) || attempt >= maxAttempts) throw err;
+      // Honor a server-supplied delay precisely. Only jitter the blind default.
+      const parsed = parseRetryAfterMs(msg);
+      const waitMs = parsed ?? jitter(DEFAULT_BACKOFF_MS);
       await abortableSleep(waitMs, signal);
     }
   }
