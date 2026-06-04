@@ -1,6 +1,6 @@
 {
   "name": "agentgg",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Agentic SAST scanner — white box, CI-ready, multi-provider. Reasoning where regex falls short.",
   "license": "Apache-2.0",
   "author": "agentgg <contact@agentgg.dev>",
