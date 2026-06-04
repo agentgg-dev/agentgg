@@ -13,6 +13,7 @@ import { registerScoreCommand } from "./commands/score.js";
 import { registerStatusCommand } from "./commands/status.js";
 import { registerSummaryCommand } from "./commands/summary.js";
 import { registerViewCommand } from "./commands/view.js";
+import { checkAndReportUpdates } from "./update-check.js";
 import { VERSION } from "./version.js";
 
 const program = new Command();
@@ -34,6 +35,8 @@ registerSummaryCommand(program);
 registerViewCommand(program);
 registerAgentsCommand(program);
 registerConfigCommand(program);
+
+checkAndReportUpdates(process.argv);
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   console.error(err instanceof Error ? err.message : String(err));
