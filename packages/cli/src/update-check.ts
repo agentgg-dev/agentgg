@@ -134,14 +134,24 @@ function renderBanner(parts: {
 }): string {
   const LABEL = "Update available";
   const indent = " ".repeat(LABEL.length);
+  const CLI_NAME = "agentgg";
+  const AGENTS_NAME = "agentgg-agents";
+  const nameWidth = Math.max(
+    parts.cli ? CLI_NAME.length : 0,
+    parts.agents ? AGENTS_NAME.length : 0,
+  );
 
   const updateLines: string[] = [];
   if (parts.cli) {
-    updateLines.push(`${LABEL}  agentgg ${parts.cli.current} → ${parts.cli.latest}`);
+    updateLines.push(
+      `${LABEL}  ${CLI_NAME.padEnd(nameWidth)} ${parts.cli.current} → ${parts.cli.latest}`,
+    );
   }
   if (parts.agents) {
     const prefix = updateLines.length === 0 ? LABEL : indent;
-    updateLines.push(`${prefix}  agents  ${parts.agents.current} → ${parts.agents.latest}`);
+    updateLines.push(
+      `${prefix}  ${AGENTS_NAME.padEnd(nameWidth)} ${parts.agents.current} → ${parts.agents.latest}`,
+    );
   }
 
   const cmds: string[] = [];
