@@ -161,9 +161,9 @@ async function pickModel(
       const capable = installed.filter(isHuntCapable);
       const rest = installed.filter((m) => !isHuntCapable(m));
       const choices = [
-        ...capable.map((m) => ({ name: `${m}  ← recommended (all modes)`, value: m })),
+        ...capable.map((m) => ({ name: `${m}  ← recommended`, value: m })),
         ...rest.map((m) => ({
-          name: capable.length > 0 ? `${m}  (file mode only)` : `${m}  ⚠ file mode only`,
+          name: capable.length > 0 ? m : `${m}  ⚠ may struggle with tool-calling`,
           value: m,
         })),
         { name: "Other (enter manually)", value: "__custom__" },

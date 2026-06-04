@@ -84,7 +84,7 @@ A scan is three phases, and each writes a durable artifact under `state/` so the
 
 1. **Recon** — a fast, tool-enabled survey runs once and writes a concise project brief to `state/recon.json`: what the project is, languages, frameworks, auth model, integrations. The brief is fed into the next phases so agents start oriented. Cached across runs; force a refresh with `--re-recon`.
 2. **Preconditions** — every selected agent is checked to decide whether it's worth running on *this* repo, and the queued/skipped decisions (with reasons) are written to `state/plan.json` **before any agent runs**.
-3. **Run → validate → score → report** — each queued agent runs over its file set in batches; then the optional validation and scoring passes classify and rate the findings; finally `summary.md` + `findings/*.md` are rendered.
+3. **Run → validate → score → dedup → report** — each queued agent runs over its file set in batches; then the optional validation, scoring, and de-duplication passes classify, rate, and cluster findings; finally `summary.md` + `findings/*.md` are rendered. Dedup is the last gather step: it groups same-root-cause findings per source file across agents and folds them under one primary so the report collapses them.
 
 Interrupted scans resume: a completed agent is skipped on re-run (its findings lifted from disk); only new or changed work hits the LLM. Changing scope (`--diff`, `--exclude`, …) or the recon brief invalidates and re-runs the affected agents.
 
@@ -93,7 +93,7 @@ Interrupted scans resume: a completed agent is skipped on re-run (its findings l
 **The phases can also run on their own**, each operating on the same `--output` dir:
 
 - `agentgg recon <path> -o <dir>` runs phases 1–2 only (writes `recon.json` + `plan.json`, no detection) — a cheap preview of what a scan would run, and a durable plan→run hand-off.
-- `agentgg revalidate <dir>` / `agentgg score <dir>` / `agentgg summary <dir>` run the validate / score / report steps on already-persisted findings.
+- `agentgg revalidate <dir>` / `agentgg score <dir>` / `agentgg dedup <dir>` / `agentgg summary <dir>` run the validate / score / dedup / report steps on already-persisted findings.
 
 And the two phases can be skipped inline on a `scan`:
 
@@ -477,7 +477,8 @@ Short reasoning citing the unsafe code element.
 | `agentgg status [output-dir]` | Print a summary of a scan's output dir: file counts (analyzed / validated / pending), finding counts, validation verdicts, recent runs. Pass `--json` for machine-readable. |
 | `agentgg revalidate [output-dir]` | Re-run the validation phase against findings already on disk. Skips detection entirely. Use to validate with a different model, scope, or after editing the validator prompt. `--no-summary` defers the report render. |
 | `agentgg score [output-dir]` | Standalone CVSS 3.1 scoring pass over persisted findings. The agent picks the 8 base metrics; the score and severity bucket are computed deterministically. `--no-summary` defers the report render. |
-| `agentgg summary [output-dir]` | Render `summary.md` + `findings/*.md` from persisted findings. No LLM, no detection. Pairs with `scan/revalidate/score --no-summary` to render the report once, at the end. |
+| `agentgg dedup [output-dir]` | De-duplicate findings on disk: group same-root-cause findings per source file across agents, fold them under one primary, and mark the rest with a `dedup` field so the report collapses them. Pass `--delete-duplicates` to physically remove marked duplicates; `--no-summary` defers the report render. |
+| `agentgg summary [output-dir]` | Render `summary.md` + `findings/*.md` from persisted findings. No LLM, no detection. Pairs with `scan/revalidate/score/dedup --no-summary` to render the report once, at the end. |
 | `agentgg view [output-dir]` | Boot the bundled Next.js viewer on a local port to browse findings in a web UI. |
 | `agentgg agents list` | List installed agents (official + user-installed). Pass `--json` for machine-readable. |
 | `agentgg agents info <slug>` | Print an agent's full frontmatter + prompt body. |
@@ -505,6 +506,8 @@ Run `agentgg <command> --help` for the full flag list on any subcommand.
 --no-summary                    skip writing the markdown report (summary.md + findings/*.md); state still persists
 --max-files-per-batch <n>       candidate files per agent batch (overrides the agent's where.maxFilesPerBatch)
 --concurrency <n>               max LLM sessions in flight across the whole scan — agent batches, validation, and scoring all draw from one pool (default 5)
+--dedup                         run a final de-duplication pass that clusters same-root-cause findings per source file (off by default)
+--delete-duplicates             with --dedup, physically remove duplicate findings instead of just marking them
 --exclude <pattern>             path/glob to exclude — treated as deleted (repeatable; additive)
 --only <pattern>                restrict scan to matching globs (repeatable)
 --max-file-size <kb>            skip files larger than this (default 500)
