@@ -4,6 +4,7 @@ import type { CvssScore, Finding } from "@agentgg/core";
 import { generateObject, generateText, type LanguageModelV1, tool } from "ai";
 import { minimatch } from "minimatch";
 import { z } from "zod";
+import { buildDedupePrompt, LlmDedup } from "../deduper.js";
 import {
   buildAgentPrompt,
   buildPreconditionPrompt,
@@ -312,6 +313,32 @@ export class VercelAgentDetector implements Detector {
       return asCvssScore(object);
     } catch (err) {
       debugLog("VercelAgentDetector.scoreFinding", err);
+      throw err;
+    }
+  }
+
+  async dedupeFindings(args: {
+    filePath: string;
+    findings: Finding[];
+    fileContent?: string;
+    signal?: AbortSignal;
+  }): Promise<LlmDedup["clusters"]> {
+    try {
+      const { object } = await withTpmRetry(
+        () =>
+          generateObject({
+            model: this.model,
+            schema: LlmDedup,
+            mode: "json",
+            prompt: buildDedupePrompt(args),
+            providerOptions: this.providerOptionsArg(),
+            abortSignal: args.signal,
+          }),
+        args.signal,
+      );
+      return object.clusters;
+    } catch (err) {
+      debugLog("VercelAgentDetector.dedupeFindings", err);
       throw err;
     }
   }

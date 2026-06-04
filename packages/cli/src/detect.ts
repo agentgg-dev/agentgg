@@ -212,6 +212,33 @@ export interface Detector {
    * choices in the actual code rather than the detector's prose.
    */
   scoreFinding(args: { finding: Finding; fileContent: string } & AbortableArgs): Promise<CvssScore>;
+
+  /**
+   * De-duplication phase — the final gather pass. Given every finding for
+   * ONE source file (unioned across agent shards) and, when readable, the
+   * file content, return the equivalence classes of findings that describe
+   * the same root cause at the same location. The caller marks the
+   * non-primary members with a `dedup` field. Single structured-output
+   * call, no tools (the finding metadata + file are already in the prompt).
+   * Cannot run distributed: it needs all of a file's findings co-located,
+   * so it runs only after scan/validate/score complete.
+   */
+  dedupeFindings(
+    args: { filePath: string; findings: Finding[]; fileContent?: string } & AbortableArgs,
+  ): Promise<DedupCluster[]>;
+}
+
+/**
+ * One equivalence class returned by `dedupeFindings`: a primary finding to
+ * keep plus the ids of findings that are duplicates of it. Structurally
+ * the `LlmDedup` cluster shape from `deduper.ts`; declared here as a plain
+ * type so the Detector contract doesn't import the zod module (which
+ * imports back from this file).
+ */
+export interface DedupCluster {
+  primaryId: string;
+  duplicateIds: string[];
+  reasoning: string;
 }
 
 /**

@@ -1,7 +1,12 @@
 import { ArrowLeft, ExternalLink, Hash } from "lucide-react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ConfidenceBar, SeverityBadge, VerdictBadge } from "@/app/components/Badges";
+import {
+  ConfidenceBar,
+  DuplicateBadge,
+  SeverityBadge,
+  VerdictBadge,
+} from "@/app/components/Badges";
 import Markdown from "@/app/components/Markdown";
 import Nav from "@/app/components/Nav";
 import { findFindingById, loadViewerState } from "@/app/lib/state";
@@ -32,6 +37,7 @@ export default async function FindingPage({ params }: { params: Promise<{ id: st
           <div className="flex flex-wrap items-center gap-2 mb-4">
             <SeverityBadge severity={finding.severity} />
             <VerdictBadge verdict={finding.validation?.verdict} />
+            <DuplicateBadge dedup={finding.dedup} />
             <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider border border-bg-border bg-bg/40 text-amber">
               {finding.agentSlug}
             </span>
@@ -94,6 +100,23 @@ export default async function FindingPage({ params }: { params: Promise<{ id: st
               )}
             </div>
             <Markdown source={finding.validation.reasoning} />
+          </Section>
+        )}
+
+        {finding.dedup && (
+          <Section title="Duplicate">
+            <div className="mb-4 flex flex-wrap items-center gap-2 text-xs">
+              <DuplicateBadge dedup={finding.dedup} />
+              <span className="text-ink-dim">folded into primary</span>
+              <Link
+                href={`/finding/${finding.dedup.duplicateOf}`}
+                className="inline-flex items-center gap-1 font-mono text-cyan hover:text-cyan-glow transition-colors"
+              >
+                <Hash className="w-3 h-3" />
+                {finding.dedup.duplicateOf}
+              </Link>
+            </div>
+            <Markdown source={finding.dedup.reasoning} />
           </Section>
         )}
 

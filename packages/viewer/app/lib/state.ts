@@ -42,6 +42,10 @@ export type ViewerState = {
     pending: number;
     findings: number;
     findingsValidated: number;
+    /** Findings the de-duplication phase folded into another (carry a `dedup` marker). */
+    findingsDuplicate: number;
+    /** Confirmed AND not a duplicate — the shippable set the "Confirmed" card shows. */
+    findingsConfirmedUnique: number;
     findingsByVerdict: Record<string, number>;
     findingsByAgent: AgentSummary[];
     findingsBySeverity: Record<string, number>;
@@ -56,6 +60,10 @@ export function loadViewerState(): ViewerState {
 
   const findings = files.flatMap((f) => f.findings);
   const findingsValidated = findings.filter((f) => f.validation).length;
+  const findingsDuplicate = findings.filter((f) => f.dedup).length;
+  const findingsConfirmedUnique = findings.filter(
+    (f) => f.validation?.verdict === "confirmed" && !f.dedup,
+  ).length;
 
   const findingsByVerdict: Record<string, number> = {};
   for (const f of findings) {
@@ -98,6 +106,8 @@ export function loadViewerState(): ViewerState {
       pending: statusCounts.pending,
       findings: findings.length,
       findingsValidated,
+      findingsDuplicate,
+      findingsConfirmedUnique,
       findingsByVerdict,
       findingsByAgent,
       findingsBySeverity,

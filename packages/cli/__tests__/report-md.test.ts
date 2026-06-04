@@ -192,6 +192,39 @@ describe("writeMarkdownReport", () => {
     expect(readFileSync(out.summaryPath, "utf8")).toContain("Total findings:** 2");
   });
 
+  it("collapses dedup-marked duplicates under their primary", () => {
+    const out = writeMarkdownReport({
+      outDir: tmp,
+      root: "/fake/project",
+      startedAt: new Date(2026, 0, 1, 12, 0, 0),
+      completedAt: new Date(2026, 0, 1, 12, 1, 30),
+      findings: [
+        makeFinding(), // primary, id "abc123"
+        makeFinding({
+          id: "dupe1",
+          title: "SQLi via second var",
+          dedup: { duplicateOf: "abc123", reasoning: "same query, second interpolated var" },
+        }),
+      ],
+      filesScanned: 1,
+      byAgent: { "sql-injection": 2 },
+    });
+    // Only the primary gets a .md; the duplicate is collapsed.
+    expect(out.findingPaths).toHaveLength(1);
+    expect(readdirSync(join(tmp, "findings"))).toHaveLength(1);
+
+    const primaryMd = readFileSync(out.findingPaths[0], "utf8");
+    expect(primaryMd).toContain("Duplicates collapsed (1)");
+    expect(primaryMd).toContain("SQLi via second var");
+
+    const summary = readFileSync(out.summaryPath, "utf8");
+    // Total still counts every finding; a separate line reports the collapse.
+    expect(summary).toContain("Total findings:** 2");
+    expect(summary).toContain("Duplicates collapsed:** 1");
+    // The collapsed duplicate is not listed in All findings.
+    expect(summary).not.toContain("SQLi via second var");
+  });
+
   it("writes a summary even when there are zero findings", () => {
     const out = writeMarkdownReport({
       outDir: tmp,

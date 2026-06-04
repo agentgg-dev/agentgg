@@ -77,27 +77,47 @@ export function writeMarkdownReport(input: ScanReportInput): ScanReportOutput {
   rmSync(findingsDir, { recursive: true, force: true });
   mkdirSync(findingsDir, { recursive: true });
 
+  // Findings the de-duplication phase marked as duplicates are collapsed
+  // under their primary: they don't get their own `.md` or a line in the
+  // All-findings list, and the primary's `.md` notes how many were folded
+  // in. They remain on disk in state/files/* regardless (deletion is a
+  // separate opt-in in the dedup command), so this is purely a reporting
+  // choice. Map primary id → its duplicates so we can annotate the primary.
+  const duplicatesByPrimary = new Map<string, Finding[]>();
+  for (const f of input.findings) {
+    if (!f.dedup) continue;
+    const list = duplicatesByPrimary.get(f.dedup.duplicateOf);
+    if (list) list.push(f);
+    else duplicatesByPrimary.set(f.dedup.duplicateOf, [f]);
+  }
+
   // False-positives get their own `.md` by default (and always stay
   // in the FileRecord state as an audit trail). The caller can opt out
   // of rendering them with `excludeFalsePositives`; the summary still
   // counts them so the operator sees how many the validator flagged.
+  // Duplicates are always collapsed out of the rendered set.
   const renderable = (
     input.excludeFalsePositives
       ? input.findings.filter((f) => f.validation?.verdict !== "false-positive")
       : [...input.findings]
   )
+    .filter((f) => !f.dedup)
     .slice()
     .sort(compareForReport);
 
   const findingPaths: string[] = [];
   for (const f of renderable) {
     const fullPath = join(findingsDir, findingFilename(f));
-    writeFileSync(fullPath, renderFindingMd(f), "utf8");
+    writeFileSync(fullPath, renderFindingMd(f, duplicatesByPrimary.get(f.id)), "utf8");
     findingPaths.push(fullPath);
   }
 
   const summaryPath = join(outDir, "summary.md");
-  writeFileSync(summaryPath, renderSummaryMd(input, findingPaths, renderable), "utf8");
+  writeFileSync(
+    summaryPath,
+    renderSummaryMd(input, findingPaths, renderable, duplicatesByPrimary),
+    "utf8",
+  );
 
   return { summaryPath, findingPaths };
 }
@@ -127,7 +147,7 @@ export function findingFilenameSlug(f: Finding): string {
   return `${f.agentSlug}-${titleSlug}-${f.id}.md`;
 }
 
-export function renderFindingMd(f: Finding): string {
+export function renderFindingMd(f: Finding, duplicates?: ReadonlyArray<Finding>): string {
   const lines: string[] = [];
   lines.push(`# ${f.title}`);
   lines.push("");
@@ -159,6 +179,31 @@ export function renderFindingMd(f: Finding): string {
     lines.push(`**Verdict:** \`${f.validation.verdict}\``);
     lines.push("");
     lines.push(f.validation.reasoning);
+    lines.push("");
+  }
+
+  // De-duplication folded other findings into this one as the canonical
+  // report for the shared root cause. List them so the reviewer sees the
+  // full picture without separate tickets.
+  if (duplicates && duplicates.length > 0) {
+    lines.push(`### Duplicates collapsed (${duplicates.length})`);
+    lines.push("");
+    lines.push("These findings describe the same root cause and were folded into this one:");
+    lines.push("");
+    for (const d of duplicates) {
+      const loc = d.lineRange ? `:${d.lineRange[0]}` : "";
+      lines.push(`- \`${d.agentSlug}\`: ${d.title} (\`${d.filePath}${loc}\`)`);
+      if (d.dedup?.reasoning) lines.push(`  - ${d.dedup.reasoning}`);
+    }
+    lines.push("");
+  }
+
+  // If this finding is itself a duplicate (only rendered when a caller
+  // opts to show collapsed items), flag it.
+  if (f.dedup) {
+    lines.push(`**Duplicate of:** \`${f.dedup.duplicateOf}\``);
+    lines.push("");
+    lines.push(f.dedup.reasoning);
     lines.push("");
   }
 
@@ -199,6 +244,8 @@ export function renderSummaryMd(
    * list).
    */
   rendered?: ReadonlyArray<Finding>,
+  /** primary id → folded-in duplicates, for the collapsed-count line. */
+  duplicatesByPrimary?: ReadonlyMap<string, ReadonlyArray<Finding>>,
 ): string {
   const renderedList = rendered ?? input.findings;
   const durationMs = input.completedAt.getTime() - input.startedAt.getTime();
@@ -212,6 +259,17 @@ export function renderSummaryMd(
   lines.push(`**Duration:** ${durationSec}s`);
   lines.push(`**Files scanned:** ${input.filesScanned}`);
   lines.push(`**Total findings:** ${input.findings.length}`);
+  const collapsedDuplicates = duplicatesByPrimary
+    ? [...duplicatesByPrimary.values()].reduce((n, ds) => n + ds.length, 0)
+    : input.findings.filter((f) => f.dedup).length;
+  if (collapsedDuplicates > 0) {
+    const primaries = duplicatesByPrimary
+      ? duplicatesByPrimary.size
+      : new Set(input.findings.filter((f) => f.dedup).map((f) => f.dedup?.duplicateOf)).size;
+    lines.push(
+      `**Duplicates collapsed:** ${collapsedDuplicates} (folded into ${primaries} primary finding(s))`,
+    );
+  }
   lines.push("");
 
   lines.push("## Findings by agent");

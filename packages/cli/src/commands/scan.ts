@@ -29,6 +29,7 @@ import type { Command } from "commander";
 import { loadAllAgents } from "../agent-catalog.js";
 import { installOfficialAgents } from "../agents-install.js";
 import { runConcurrent } from "../concurrent.js";
+import { resolveDedup } from "../deduper.js";
 import type { AgentCandidate } from "../detect.js";
 import { FatalScanError, handleDetectorError } from "../diagnostics.js";
 import { listChangedFiles, loadCommitPatch } from "../diff.js";
@@ -130,6 +131,20 @@ interface ScanOpts {
   score?: boolean;
   /** Re-score findings even when they already carry a `cvss` on disk. */
   rescore?: boolean;
+  /**
+   * Run the de-duplication phase at the very end (after detect/validate/
+   * score). Groups shippable findings by source file across agents, folds
+   * same-root-cause findings under one primary, and marks the rest with a
+   * `dedup` field so the report collapses them. The final gather step —
+   * it needs every finding for a file co-located, so it cannot be
+   * distributed like the earlier phases.
+   */
+  dedup?: boolean;
+  /**
+   * With --dedup, physically remove duplicate findings from their
+   * FileRecords instead of just marking them. Off by default.
+   */
+  deleteDuplicates?: boolean;
   /**
    * Boot the local viewer (Next.js) after the scan finishes and keep
    * it running until Ctrl+C. Accepts an optional port; without one,
@@ -365,7 +380,9 @@ export async function runScan(
     }
     console.log("");
 
-    const findings: Finding[] = [];
+    // `let` (not const): the de-duplication phase may drop deleted
+    // duplicates from this list before the report render.
+    let findings: Finding[] = [];
     const byAgent: Record<string, number> = {};
     const touchedFiles = new Set<string>();
 
@@ -1191,6 +1208,126 @@ export async function runScan(
       }
     }
 
+    // -------- de-duplication phase (final gather) --------
+    // Group shippable findings by source filePath ACROSS agents and fold
+    // same-root-cause duplicates under one primary. Runs LAST — after
+    // detect/validate/score — because, unlike those per-finding phases, it
+    // needs every finding for a file co-located, so it cannot be
+    // distributed. Marks the non-primary findings with a `dedup` field
+    // (orthogonal to the validation verdict); `--delete-duplicates` strips
+    // them instead. The report render below then collapses them.
+    if (opts.dedup && findings.length > 0) {
+      const shippable = findings.filter(
+        (f) =>
+          f.filePath &&
+          f.filePath !== "(unknown)" &&
+          f.validation?.verdict !== "false-positive" &&
+          f.validation?.verdict !== "out-of-scope",
+      );
+      const byFile = new Map<string, Finding[]>();
+      for (const f of shippable) {
+        const bucket = byFile.get(f.filePath);
+        if (bucket) bucket.push(f);
+        else byFile.set(f.filePath, [f]);
+      }
+      const dedupeTasks = [...byFile.entries()]
+        .filter(([, fs]) => fs.length >= 2)
+        .map(([filePath, fs]) => ({ filePath, findings: fs }));
+
+      if (dedupeTasks.length > 0) {
+        console.log(`\nDe-duplicating across ${dedupeTasks.length} file(s)`);
+        const dedupeFileCache = new Map<string, string | null>();
+        const dupedByShard = new Map<
+          string,
+          { agentSlug: string; filePath: string; findings: Finding[] }
+        >();
+        let totalDuplicates = 0;
+        await runConcurrent(dedupeTasks, concurrency, async ({ filePath, findings: bucket }) => {
+          let content = dedupeFileCache.get(filePath);
+          if (content === undefined) {
+            try {
+              content = readFileSync(resolve(root, filePath), "utf8");
+            } catch {
+              content = null;
+            }
+            dedupeFileCache.set(filePath, content);
+          }
+          try {
+            const clusters = await detector.dedupeFindings({
+              filePath,
+              findings: bucket,
+              fileContent: content ?? undefined,
+              signal: scanAbortController.signal,
+            });
+            const byId = new Map(bucket.map((f) => [f.id, f]));
+            for (const a of resolveDedup(bucket, clusters)) {
+              const dupe = byId.get(a.id);
+              if (!dupe) continue;
+              dupe.dedup = {
+                duplicateOf: a.duplicateOf,
+                reasoning: a.reasoning,
+                runId: runMeta.runId,
+              };
+              const normalized = dupe.filePath.replace(/\\/g, "/");
+              const key = `${dupe.agentSlug} ${normalized}`;
+              const entry = dupedByShard.get(key) ?? {
+                agentSlug: dupe.agentSlug,
+                filePath: normalized,
+                findings: [],
+              };
+              entry.findings.push(dupe);
+              dupedByShard.set(key, entry);
+              totalDuplicates++;
+            }
+          } catch (err) {
+            handleDetectorError(opts, `dedup:${filePath}`, err, scanAbortController);
+          }
+        });
+        // Persist dedup markers back into the per-(agent, file) shards.
+        for (const { agentSlug, filePath, findings: group } of dupedByShard.values()) {
+          if (isAbsolute(filePath)) continue;
+          const record = readFileRecord(outDir, agentSlug, filePath);
+          if (!record) continue;
+          const inMemory = new Map(group.map((f) => [f.id, f]));
+          if (opts.deleteDuplicates) {
+            record.findings = record.findings.filter((rec) => !inMemory.has(rec.id));
+          } else {
+            record.findings = record.findings.map((rec) => {
+              const live = inMemory.get(rec.id);
+              return live?.dedup ? { ...rec, dedup: live.dedup } : rec;
+            });
+          }
+          record.analysisHistory.push({
+            runId: runMeta.runId,
+            phase: "dedup",
+            ranAt: new Date().toISOString(),
+            durationMs: 0,
+            provider: detector.name,
+            agentSlugs: [agentSlug],
+            findingCount: record.findings.length,
+          });
+          try {
+            writeFileRecord(outDir, record);
+          } catch (err) {
+            if (opts.verbose) {
+              console.error(
+                `    persist failed for ${agentSlug}/${filePath}: ${(err as Error).message}`,
+              );
+            }
+          }
+        }
+        const verb = opts.deleteDuplicates ? "deleted" : "marked";
+        console.log(`  ${verb} ${totalDuplicates} duplicate(s)`);
+        // When deleting, drop them from the in-memory list too so the
+        // report render below doesn't re-include them.
+        if (opts.deleteDuplicates && totalDuplicates > 0) {
+          findings = findings.filter((f) => !f.dedup);
+        }
+      } else {
+        console.log("\nDe-duplication: nothing to compare (no file has 2+ shippable findings).");
+      }
+    }
+
     const completedAt = new Date();
 
     // `--no-summary` skips the report render entirely. Findings are already
@@ -1445,6 +1582,14 @@ export function registerScanCommand(program: Command): void {
     .option(
       "--rescore",
       "Re-score findings even when they already carry a CVSS score on disk (default: skip them)",
+    )
+    .option(
+      "--dedup",
+      "Run the de-duplication phase at the very end (after detect/validate/score). Groups findings by source file across agents, folds same-root-cause findings under one primary, and marks the rest with a `dedup` field so the report collapses them. The final gather step — it sees all of a file's findings, so it can't be distributed like the earlier phases.",
+    )
+    .option(
+      "--delete-duplicates",
+      "With --dedup, physically remove duplicate findings from their FileRecords instead of just marking them (default: keep + mark).",
     )
     .option(
       "--serve [port]",

@@ -1,5 +1,6 @@
 import type { CvssScore, Finding } from "@agentgg/core";
 import { generateObject, type LanguageModelV1 } from "ai";
+import { buildDedupePrompt, LlmDedup } from "../deduper.js";
 import {
   buildAgentPrompt,
   buildPreconditionPrompt,
@@ -249,6 +250,33 @@ export class MultiProviderDetector implements Detector {
         console.error("---- MultiProviderDetector score error ----");
         console.error(util.inspect(err, { depth: 5, colors: false }));
         console.error("-------------------------------------------");
+      }
+      throw err;
+    }
+  }
+
+  async dedupeFindings(args: {
+    filePath: string;
+    findings: Finding[];
+    fileContent?: string;
+    signal?: AbortSignal;
+  }): Promise<LlmDedup["clusters"]> {
+    try {
+      const { object } = await generateObject({
+        model: this.model,
+        schema: LlmDedup,
+        mode: "json",
+        prompt: buildDedupePrompt(args),
+        providerOptions: this.providerOptionsArg(),
+        abortSignal: args.signal,
+      });
+      return object.clusters;
+    } catch (err) {
+      if (process.env.AGENTGG_DEBUG) {
+        const util = await import("node:util");
+        console.error("---- MultiProviderDetector dedupe error ----");
+        console.error(util.inspect(err, { depth: 5, colors: false }));
+        console.error("--------------------------------------------");
       }
       throw err;
     }

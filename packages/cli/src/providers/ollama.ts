@@ -45,6 +45,7 @@ function buildDetector(config: UserConfig, options: ResolveOptions): Detector {
     validateFinding: (args) => fileDetector.validateFinding(args),
     validateFindingByScope: (args) => fileDetector.validateFindingByScope(args),
     scoreFinding: (args) => fileDetector.scoreFinding(args),
+    dedupeFindings: (args) => fileDetector.dedupeFindings(args),
   };
 }
 

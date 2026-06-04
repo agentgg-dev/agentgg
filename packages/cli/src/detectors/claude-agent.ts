@@ -2,6 +2,7 @@ import type { CvssScore, Finding } from "@agentgg/core";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
+import { buildDedupePrompt, LlmDedup } from "../deduper.js";
 import {
   buildAgentPrompt,
   buildPreconditionPrompt,
@@ -201,6 +202,24 @@ export class ClaudeAgentDetector implements Detector {
       signal: args.signal,
     });
     return asCvssScore(llmScore);
+  }
+
+  async dedupeFindings(args: {
+    filePath: string;
+    findings: Finding[];
+    fileContent?: string;
+    signal?: AbortSignal;
+  }): Promise<LlmDedup["clusters"]> {
+    // Single-turn, no tools — the finding metadata and (when readable) the
+    // file content are already in the prompt; clustering is pure reasoning.
+    const result = await this.runStructured({
+      prompt: buildDedupePrompt(args),
+      tools: [],
+      maxTurns: this.validateMaxTurns,
+      schema: LlmDedup,
+      signal: args.signal,
+    });
+    return result.clusters;
   }
 
   /**

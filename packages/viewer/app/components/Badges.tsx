@@ -1,4 +1,4 @@
-import type { Severity, ValidationVerdict } from "@agentgg/core";
+import type { Finding, Severity, ValidationVerdict } from "@agentgg/core";
 
 const SEVERITY_STYLE: Record<Severity, string> = {
   CRITICAL: "border-severity-critical/40 bg-severity-critical/10 text-severity-critical",
@@ -45,6 +45,24 @@ export function VerdictBadge({ verdict }: { verdict?: ValidationVerdict }) {
       className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider border ${VERDICT_STYLE[verdict]}`}
     >
       {verdict}
+    </span>
+  );
+}
+
+/**
+ * Marks a finding the de-duplication phase folded into another as the
+ * same root cause. Orthogonal to the validation verdict (a finding can be
+ * both `confirmed` and a duplicate), so it renders as its own chip rather
+ * than replacing the verdict badge. Returns null for non-duplicates.
+ */
+export function DuplicateBadge({ dedup }: { dedup?: Finding["dedup"] }) {
+  if (!dedup) return null;
+  return (
+    <span
+      className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider border border-terminal-purple/40 bg-terminal-purple/10 text-terminal-purple"
+      title={`Duplicate of ${dedup.duplicateOf}`}
+    >
+      duplicate
     </span>
   );
 }

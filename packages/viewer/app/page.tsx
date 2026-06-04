@@ -41,7 +41,6 @@ export default function DashboardPage() {
     ? (new Date(lastRun.completedAt).getTime() - new Date(lastRun.startedAt).getTime()) / 1000
     : null;
 
-  const confirmed = counts.findingsByVerdict.confirmed ?? 0;
   const falsePositive = counts.findingsByVerdict["false-positive"] ?? 0;
   const outOfScope = counts.findingsByVerdict["out-of-scope"] ?? 0;
   const uncertain = counts.findingsByVerdict.uncertain ?? 0;
@@ -76,8 +75,14 @@ export default function DashboardPage() {
           />
           <StatCard
             label="Confirmed"
-            value={confirmed}
-            hint={uncertain > 0 ? `${uncertain} uncertain` : undefined}
+            value={counts.findingsConfirmedUnique}
+            hint={
+              counts.findingsDuplicate > 0
+                ? `${counts.findingsDuplicate} duplicate (excluded)`
+                : uncertain > 0
+                  ? `${uncertain} uncertain`
+                  : undefined
+            }
             accent="green"
           />
           <StatCard

@@ -4,7 +4,7 @@ import type { Finding, Severity } from "@agentgg/core";
 import { ChevronRight, Search } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
-import { ConfidenceBar, SeverityBadge, VerdictBadge } from "./Badges";
+import { ConfidenceBar, DuplicateBadge, SeverityBadge, VerdictBadge } from "./Badges";
 
 type Props = {
   findings: Finding[];
@@ -20,6 +20,10 @@ type VerdictFilter =
   | "uncertain"
   | "pending";
 type SeverityFilter = "all" | Severity | "unscored";
+// Dedup status is orthogonal to the validation verdict (a finding can be
+// confirmed AND a duplicate), so it gets its own axis: show both, only the
+// duplicates, or only the uniques (primaries + never-duplicated findings).
+type DedupFilter = "all" | "duplicate" | "unique";
 
 const SEVERITY_RANK: Record<string, number> = {
   CRITICAL: 5,
@@ -32,8 +36,11 @@ const SEVERITY_RANK: Record<string, number> = {
 
 export default function FindingsTable({ findings, agents }: Props) {
   const [agent, setAgent] = useState<AgentFilter>("all");
-  const [verdict, setVerdict] = useState<VerdictFilter>("all");
+  // Default to the shippable view: confirmed findings, duplicates excluded.
+  // Users can widen to "All verdicts" / "Dup & unique" from the dropdowns.
+  const [verdict, setVerdict] = useState<VerdictFilter>("confirmed");
   const [severity, setSeverity] = useState<SeverityFilter>("all");
+  const [dedup, setDedup] = useState<DedupFilter>("unique");
   const [query, setQuery] = useState("");
 
   const filtered = useMemo(() => {
@@ -42,8 +49,12 @@ export default function FindingsTable({ findings, agents }: Props) {
       .map((f, i) => ({ f, i }))
       .filter(({ f }) => {
         if (agent !== "all" && f.agentSlug !== agent) return false;
-        const v = f.validation?.verdict ?? "pending";
-        if (verdict !== "all" && v !== verdict) return false;
+        if (verdict !== "all") {
+          const v = f.validation?.verdict ?? "pending";
+          if (v !== verdict) return false;
+        }
+        if (dedup === "duplicate" && !f.dedup) return false;
+        if (dedup === "unique" && f.dedup) return false;
         if (severity !== "all") {
           const s = f.severity ?? "unscored";
           if (s !== severity) return false;
@@ -63,7 +74,9 @@ export default function FindingsTable({ findings, agents }: Props) {
     });
 
     return result.map((x) => x.f);
-  }, [findings, agent, verdict, severity, query]);
+  }, [findings, agent, verdict, severity, dedup, query]);
+
+  const anyDuplicates = useMemo(() => findings.some((f) => f.dedup), [findings]);
 
   return (
     <div className="rounded-xl border border-bg-border bg-bg-panel/30 overflow-hidden">
@@ -111,6 +124,17 @@ export default function FindingsTable({ findings, agents }: Props) {
             { value: "pending", label: "Pending" },
           ]}
         />
+        {anyDuplicates && (
+          <Selector
+            value={dedup}
+            onChange={(v) => setDedup(v as DedupFilter)}
+            options={[
+              { value: "all", label: "Dup & unique" },
+              { value: "unique", label: "Unique only" },
+              { value: "duplicate", label: "Duplicates only" },
+            ]}
+          />
+        )}
       </div>
 
       {/* rows */}
@@ -127,6 +151,7 @@ export default function FindingsTable({ findings, agents }: Props) {
               <div className="flex flex-col items-center gap-2 pt-1 min-w-[88px]">
                 <SeverityBadge severity={f.severity} />
                 <VerdictBadge verdict={f.validation?.verdict} />
+                <DuplicateBadge dedup={f.dedup} />
               </div>
 
               <div className="flex-1 min-w-0">

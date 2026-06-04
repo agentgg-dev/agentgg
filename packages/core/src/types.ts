@@ -321,6 +321,25 @@ export const Finding = z.object({
       adjustedSeverity: Severity.optional(),
     })
     .optional(),
+  /**
+   * Set by the de-duplication phase (`agentgg dedup`) when this finding
+   * describes the same root cause as another finding in the SAME source
+   * file. Orthogonal to `validation`: a finding can be both `confirmed`
+   * AND a duplicate. Handled downstream like a disqualifier (collapsed
+   * under its primary in the report) but via this distinct marker, so the
+   * underlying validation verdict is preserved. The primary of each group
+   * carries no `dedup` field. `duplicateOf` is the primary finding's
+   * stable `id` (which already encodes the primary's agentSlug, so the
+   * reference resolves across agent shards).
+   */
+  dedup: z
+    .object({
+      duplicateOf: z.string(),
+      reasoning: z.string(),
+      /** Run that produced this marker. */
+      runId: z.string().optional(),
+    })
+    .optional(),
   /** Where the finding has been reported (notifiers). */
   notifications: z
     .array(
@@ -341,7 +360,7 @@ export type Finding = z.infer<typeof Finding>;
 
 export const AnalysisRun = z.object({
   runId: z.string(),
-  phase: z.enum(["detect", "validate"]),
+  phase: z.enum(["detect", "validate", "dedup"]),
   ranAt: z.string(),
   durationMs: z.number().int().nonnegative().default(0),
   provider: z.string(),
@@ -777,7 +796,7 @@ export type AgentRun = z.infer<typeof AgentRun>;
 
 export const RunMeta = z.object({
   runId: z.string(),
-  type: z.enum(["scan", "detect", "validate"]),
+  type: z.enum(["scan", "detect", "validate", "dedup"]),
   phase: z.enum(["running", "done", "error"]),
   startedAt: z.string(),
   completedAt: z.string().optional(),
@@ -790,7 +809,7 @@ export const RunMeta = z.object({
    */
   invocation: z
     .object({
-      /** Subcommand: "scan" | "revalidate" | "score" | "recon" | "summary". */
+      /** Subcommand: "scan" | "revalidate" | "score" | "dedup" | "recon" | "summary". */
       command: z.string(),
       /** Raw CLI args as typed (process.argv after the node binary + entrypoint). */
       argv: z.string().optional(),
