@@ -266,7 +266,66 @@ class QuotaExhausted extends ScanDiagnostic {
   }
 }
 
-const DIAGNOSTICS: DiagnosticConstructor[] = [AuthFailure, QuotaExhausted, OllamaContextOverflow];
+/**
+ * Claude.ai web / Pro / Max plan usage-window limit, surfaced through the
+ * Claude Agent SDK subprocess as `"You've hit your limit · resets <time>"`.
+ *
+ * Distinct from:
+ *   - AuthFailure (401/403): credentials are still valid, just throttled.
+ *   - QuotaExhausted (API billing): different surface — that path is for
+ *     `sk-ant-…` keys hitting credit/billing limits, not Pro/Max plans.
+ *   - Anthropic 429 rate_limit_error: short-term TPM throttling, retryable
+ *     by withTpmRetry on seconds-scale backoff.
+ *
+ * This one resets at a wall-clock time that's typically hours away, so
+ * every queued (file, agent) pair is guaranteed to hit the same error.
+ * Fatal so the scan aborts immediately; `agentgg scan --resume` picks up
+ * the unfinished files after the reset.
+ */
+class ClaudeUsageLimit extends ScanDiagnostic {
+  override readonly fatal = true;
+
+  private constructor(private readonly resetHint: string | null) {
+    super();
+  }
+
+  static from(err: unknown): ClaudeUsageLimit | null {
+    if (!(err instanceof Error)) return null;
+    const e = err as Error & { responseBody?: string; cause?: unknown };
+    const cause =
+      typeof e.cause === "object" && e.cause !== null
+        ? (e.cause as { message?: string; responseBody?: string })
+        : undefined;
+    const haystack = [e.message, e.responseBody, cause?.message, cause?.responseBody]
+      .filter((v): v is string => typeof v === "string" && v.length > 0)
+      .join("\n");
+
+    // Match both curly (’) and straight (') apostrophes — the SDK uses curly,
+    // but downstream tooling sometimes re-serializes through ASCII.
+    if (!/you[’']ve hit your (?:usage )?limit/i.test(haystack)) return null;
+
+    // Best-effort capture of "resets <time> (tz)" so the diagnostic echoes
+    // the SDK's hint instead of saying just "reset later".
+    const resetMatch = haystack.match(/resets\s+([^\n·]+?)(?:\s*$|\s*[·\n])/i);
+    return new ClaudeUsageLimit(resetMatch?.[1]?.trim() ?? null);
+  }
+
+  format(): string {
+    const when = this.resetHint ? ` Resets ${this.resetHint}.` : "";
+    return (
+      `Claude.ai plan usage limit reached.${when} ` +
+      `Wait for the window to reset and re-run with \`agentgg scan --resume\`, ` +
+      `or switch to API-key billing via \`--api-key sk-ant-…\` to bypass the plan limit.`
+    );
+  }
+}
+
+const DIAGNOSTICS: DiagnosticConstructor[] = [
+  AuthFailure,
+  QuotaExhausted,
+  ClaudeUsageLimit,
+  OllamaContextOverflow,
+];
 
 export function diagnoseScanError(err: unknown): ScanDiagnostic | null {
   for (const cls of DIAGNOSTICS) {

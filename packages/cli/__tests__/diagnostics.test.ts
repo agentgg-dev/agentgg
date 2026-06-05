@@ -211,6 +211,38 @@ describe("QuotaExhausted classifier", () => {
   });
 });
 
+describe("ClaudeUsageLimit classifier", () => {
+  it("recognizes the canonical claude-agent-sdk message and echoes the reset hint", () => {
+    // Verbatim shape observed from the SDK subprocess, wrapped by detect.ts.
+    const err = new Error(
+      "Claude Code returned an error result: You’ve hit your limit · resets 10pm (America/Los_Angeles)",
+    );
+    const d = diagnoseScanError(err);
+    expect(d?.fatal).toBe(true);
+    expect(d?.format()).toMatch(/Claude\.ai plan usage limit/);
+    expect(d?.format()).toMatch(/10pm \(America\/Los_Angeles\)/);
+    expect(d?.format()).toMatch(/--resume/);
+  });
+
+  it("still fires when the SDK message uses a straight apostrophe (ASCII re-serialization path)", () => {
+    const err = new Error("You've hit your limit");
+    const d = diagnoseScanError(err);
+    expect(d?.fatal).toBe(true);
+    // No reset hint available, so the formatted message must omit it gracefully.
+    expect(d?.format()).not.toMatch(/Resets undefined/);
+    expect(d?.format()).not.toMatch(/Resets null/);
+  });
+
+  it("does NOT trigger on short-term TPM rate limits like 'Rate limit reached … try again in 20s' (those stay retryable)", () => {
+    // Regression: the previous QuotaExhausted/AuthFailure tests already
+    // guard their own slices; this one guards us from over-matching the
+    // generic word "limit" and bailing healthy scans mid-run.
+    const err = new Error("Rate limit reached for gpt-4 … Please try again in 20s.");
+    const d = diagnoseScanError(err);
+    expect(d).toBeNull();
+  });
+});
+
 describe("handleDetectorError abort-and-suppress behavior", () => {
   it("throws FatalScanError and aborts the controller when a fatal diagnostic fires", () => {
     const abortController = new AbortController();
