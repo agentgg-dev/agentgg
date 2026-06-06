@@ -162,15 +162,60 @@ export async function runDedup(
   });
   writeRunMeta(outputDir, runMeta);
 
+  // SIGINT (Ctrl+C) / SIGTERM handler: stamp the run as errored on disk.
+  // SIGTERM matters when this CLI runs inside a Cloud Run Job — cancel
+  // sends SIGTERM and we want the run sidecar to reflect that exit.
+  let runFinalized = false;
+  const shutdownHandler = (signal: NodeJS.Signals) => {
+    if (!runFinalized) {
+      runFinalized = true;
+      try {
+        completeRun(outputDir, runMeta.runId, "error", {});
+      } catch {
+        // best-effort
+      }
+      console.error(`\nInterrupted (${signal}). Partial dedup state persisted; re-run to resume.`);
+    }
+    process.exit(signal === "SIGTERM" ? 143 : 130);
+  };
+  process.on("SIGINT", shutdownHandler);
+  process.on("SIGTERM", shutdownHandler);
+
   const startedAt = new Date();
   const fileCache = new Map<string, string | null>();
   let totalDuplicates = 0;
   let filesWithDuplicates = 0;
 
+  // Pre-pool persistence of --force-cleared records: with end-of-phase
+  // persistence removed (we now write inside the runConcurrent callback
+  // so SIGTERM mid-pool preserves work), records cleared by --force but
+  // never touched by the in-pool dedup would never be written. Flush
+  // them here so the cleared state is durable independent of pool work.
+  for (const record of dirtyRecords) {
+    record.analysisHistory.push({
+      runId: runMeta.runId,
+      phase: "dedup",
+      ranAt: new Date().toISOString(),
+      durationMs: 0,
+      provider: detector.name,
+      agentSlugs: [record.agentSlug],
+      findingCount: record.findings.length,
+    });
+    try {
+      writeFileRecord(outputDir, record);
+    } catch (err) {
+      console.error(
+        `  persist (force-clear) failed for ${record.filePath}: ${(err as Error).message}`,
+      );
+    }
+  }
+
   // One bounded pool over files. Each file's findings belong to distinct
   // records (per agent), and different files never share a record, so
-  // concurrent workers never mutate the same record. dirtyRecords /
-  // counters are only touched in await-free regions.
+  // concurrent workers never mutate the same record. Per-task persistence:
+  // each callback writes its dirtied records before returning, so a
+  // mid-pool SIGTERM (Job cancel, OOM) preserves the dedup work that
+  // already resolved instead of throwing away the whole phase.
   const concurrency = Math.max(1, opts.concurrency ?? 5);
   await runConcurrent(tasks, concurrency, async ({ filePath, findings }) => {
     let content = fileCache.get(filePath);
@@ -196,6 +241,10 @@ export async function runDedup(
         return;
       }
       filesWithDuplicates++;
+      // Records touched by THIS file — kept local so we can persist them
+      // immediately at the end of this task, independent of the global
+      // dirtyRecords set.
+      const localDirtyRecords = new Set<FileRecord>();
       for (const a of assignments) {
         const entry = index.get(a.id);
         if (!entry) continue;
@@ -209,40 +258,46 @@ export async function runDedup(
           };
         }
         dirtyRecords.add(entry.record);
+        localDirtyRecords.add(entry.record);
         totalDuplicates++;
       }
       if (opts.verbose) {
         const verb = opts.deleteDuplicates ? "deleted" : "marked";
         console.log(`  ${filePath}: ${verb} ${assignments.length} duplicate(s)`);
       }
+
+      // Per-task persistence: write each dirtied record now so SIGTERM
+      // mid-pool doesn't throw away resolved work. analysisHistory entry
+      // is added once per record (idempotent on re-run via runId).
+      for (const record of localDirtyRecords) {
+        record.analysisHistory.push({
+          runId: runMeta.runId,
+          phase: "dedup",
+          ranAt: new Date().toISOString(),
+          durationMs: 0,
+          provider: detector.name,
+          agentSlugs: [record.agentSlug],
+          findingCount: record.findings.length,
+        });
+        try {
+          writeFileRecord(outputDir, record);
+        } catch (writeErr) {
+          console.error(`  persist failed for ${record.filePath}: ${(writeErr as Error).message}`);
+        }
+      }
     } catch (err) {
       handleDetectorError(opts, `dedup:${filePath}`, err, dedupAbortController);
     }
   });
-
-  // Persist dirtied records, appending a dedup-phase AnalysisRun entry.
-  for (const record of dirtyRecords) {
-    record.analysisHistory.push({
-      runId: runMeta.runId,
-      phase: "dedup",
-      ranAt: new Date().toISOString(),
-      durationMs: 0,
-      provider: detector.name,
-      agentSlugs: [record.agentSlug],
-      findingCount: record.findings.length,
-    });
-    try {
-      writeFileRecord(outputDir, record);
-    } catch (err) {
-      console.error(`  persist failed for ${record.filePath}: ${(err as Error).message}`);
-    }
-  }
 
   const completedAt = new Date();
   completeRun(outputDir, runMeta.runId, "done", {
     findingsCount: totalDuplicates,
     totalDurationMs: completedAt.getTime() - startedAt.getTime(),
   });
+  runFinalized = true;
+  process.off("SIGINT", shutdownHandler);
+  process.off("SIGTERM", shutdownHandler);
 
   // Re-render so the report collapses the freshly-marked duplicates.
   if (opts.summary !== false) {

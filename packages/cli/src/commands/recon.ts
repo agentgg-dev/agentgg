@@ -76,6 +76,25 @@ export async function runReconCommand(
   const reconAbortController = new AbortController();
   let runFinalized = false;
 
+  // SIGINT (Ctrl+C) / SIGTERM handler: stamp the run as errored on disk.
+  // SIGTERM matters when this CLI runs inside a Cloud Run Job — cancel
+  // sends SIGTERM, and without this Node's default would exit silently,
+  // leaving the run sidecar stuck at `phase: "running"`.
+  const shutdownHandler = (signal: NodeJS.Signals) => {
+    if (!runFinalized) {
+      runFinalized = true;
+      try {
+        completeRun(outDir, runMeta.runId, "error", {});
+      } catch {
+        // best-effort
+      }
+      console.error(`\nInterrupted (${signal}). Partial state persisted; re-run to resume.`);
+    }
+    process.exit(signal === "SIGTERM" ? 143 : 130);
+  };
+  process.on("SIGINT", shutdownHandler);
+  process.on("SIGTERM", shutdownHandler);
+
   try {
     const config = loadOrSynthesizeConfig(env, opts.provider);
     const activeProvider = (opts.provider ?? config.provider) as Provider;
@@ -175,6 +194,8 @@ export async function runReconCommand(
       concurrency: opts.concurrency,
       signal: reconAbortController.signal,
       verbose: opts.verbose,
+      outputDir: outDir,
+      force: opts.reRecon,
     });
     const queuedAgents = selection.queued;
     const skippedCount = selection.decisions.length - queuedAgents.length;
@@ -201,6 +222,8 @@ export async function runReconCommand(
 
     completeRun(outDir, runMeta.runId, "done", {});
     runFinalized = true;
+    process.off("SIGINT", shutdownHandler);
+    process.off("SIGTERM", shutdownHandler);
 
     console.log(
       `\nDone. ${queuedAgents.length} agent(s) queued. Run \`agentgg scan ${rootArg} -o ${
@@ -209,12 +232,15 @@ export async function runReconCommand(
     );
   } catch (err) {
     if (!runFinalized) {
+      runFinalized = true;
       try {
         completeRun(outDir, runMeta.runId, "error", {});
       } catch {
         // best-effort
       }
     }
+    process.off("SIGINT", shutdownHandler);
+    process.off("SIGTERM", shutdownHandler);
     throw err;
   }
 }

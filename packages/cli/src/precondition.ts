@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import type { Agent, PreconditionRegex, ReconReport } from "@agentgg/core";
 import { minimatch } from "minimatch";
 import { runConcurrent } from "./concurrent.js";
@@ -42,6 +42,76 @@ export interface SelectAgentsOptions {
   concurrency?: number;
   signal?: AbortSignal;
   verbose?: boolean;
+  /** Scan output dir. When set, each agent's decision is persisted as
+   *  `<outputDir>/state/preconditions/<slug>.json` immediately after the
+   *  LLM gate resolves, and existing sidecars are read at the top of the
+   *  pass to skip already-evaluated agents. Without this, the function
+   *  still runs (in-memory only) — used by tests that don't need resume. */
+  outputDir?: string;
+  /** When true, ignore existing sidecars and re-evaluate every agent.
+   *  Set by --re-recon: the user explicitly asked to re-run the gating.
+   *  New decisions still get written to sidecars, so the next normal run
+   *  picks them up via the cache. */
+  force?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Precondition sidecars — per-agent persistence so a SIGTERM mid-pass
+// (Cloud Run Job cancel, OOM) doesn't throw away evaluated decisions.
+// Sidecar shape mirrors `PreconditionDecision`. Failed JSON.parse on read
+// treats the sidecar as missing — the agent gets re-evaluated. That's the
+// safe default for any partial-write scenario.
+// ---------------------------------------------------------------------------
+
+const PRECONDITIONS_SUBDIR = "state/preconditions";
+
+function preconditionsDir(outputDir: string): string {
+  return join(outputDir, PRECONDITIONS_SUBDIR);
+}
+
+function preconditionSidecarPath(outputDir: string, slug: string): string {
+  // Slug safety: agent catalog loader already rejects path-traversal characters
+  // (see agents-fs.ts). Trust the loader rather than re-validating here.
+  return join(preconditionsDir(outputDir), `${slug}.json`);
+}
+
+function writePreconditionSidecar(outputDir: string, decision: PreconditionDecision): void {
+  const path = preconditionSidecarPath(outputDir, decision.slug);
+  mkdirSync(preconditionsDir(outputDir), { recursive: true });
+  // Direct write — file is tiny and idempotent; a torn write fails JSON.parse
+  // on the next read and the agent is re-evaluated. No tmp/rename needed.
+  writeFileSync(path, `${JSON.stringify(decision, null, 2)}\n`);
+}
+
+function readPreconditionSidecar(outputDir: string, slug: string): PreconditionDecision | null {
+  const path = preconditionSidecarPath(outputDir, slug);
+  if (!existsSync(path)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as Partial<PreconditionDecision>;
+    if (
+      typeof parsed.slug === "string" &&
+      typeof parsed.queued === "boolean" &&
+      typeof parsed.reason === "string"
+    ) {
+      return { slug: parsed.slug, queued: parsed.queued, reason: parsed.reason };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function readAllPreconditionSidecars(outputDir: string): Map<string, PreconditionDecision> {
+  const dir = preconditionsDir(outputDir);
+  const out = new Map<string, PreconditionDecision>();
+  if (!existsSync(dir)) return out;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+    const slug = entry.name.slice(0, -".json".length);
+    const decision = readPreconditionSidecar(outputDir, slug);
+    if (decision) out.set(slug, decision);
+  }
+  return out;
 }
 
 export interface SelectAgentsResult {
@@ -62,9 +132,20 @@ export async function selectAgents(
   const files = collectAllFiles(opts.rootDir, opts.walkCfg);
   const reconBlock = opts.recon ? renderReconForPrompt(opts.recon) : undefined;
 
+  // Resume: read any existing sidecars before kicking off the pool, so
+  // agents already evaluated in a prior (killed) run skip straight to
+  // their cached decision. `force` (set by --re-recon) bypasses the cache
+  // so the user can deliberately re-evaluate every gate.
   const decisionBySlug = new Map<string, PreconditionDecision>();
+  if (opts.outputDir && !opts.force) {
+    const cached = readAllPreconditionSidecars(opts.outputDir);
+    for (const [slug, decision] of cached) decisionBySlug.set(slug, decision);
+  }
 
-  await runConcurrent(agents, Math.max(1, opts.concurrency ?? 5), async (agent) => {
+  // Only evaluate agents that don't already have a cached decision.
+  const toEvaluate = agents.filter((a) => !decisionBySlug.has(a.slug));
+
+  await runConcurrent(toEvaluate, Math.max(1, opts.concurrency ?? 5), async (agent) => {
     const decision = await evaluateAgent(
       agent,
       files,
@@ -73,6 +154,20 @@ export async function selectAgents(
       reconBlock,
       opts.signal,
     );
+    // Write sidecar BEFORE updating the in-memory map. If we crash between
+    // the write and the map update, the next run reads the sidecar and
+    // picks up the decision; vice versa would lose it.
+    if (opts.outputDir) {
+      try {
+        writePreconditionSidecar(opts.outputDir, decision);
+      } catch (err) {
+        if (opts.verbose) {
+          console.error(
+            `  precondition sidecar write failed for ${agent.slug}: ${(err as Error).message}`,
+          );
+        }
+      }
+    }
     decisionBySlug.set(agent.slug, decision);
   });
 
