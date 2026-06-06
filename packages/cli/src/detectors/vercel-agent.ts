@@ -121,6 +121,9 @@ async function withTpmRetry<T>(
       // Honor a server-supplied delay precisely. Only jitter the blind default.
       const parsed = parseRetryAfterMs(msg);
       const waitMs = parsed ?? jitter(DEFAULT_BACKOFF_MS);
+      console.warn(
+        `[withTpmRetry] rate-limit on attempt ${attempt}/${maxAttempts}, sleeping ${waitMs}ms (retryAfterParsed=${parsed != null})`,
+      );
       await abortableSleep(waitMs, signal);
     }
   }
