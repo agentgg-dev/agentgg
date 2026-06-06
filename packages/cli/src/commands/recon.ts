@@ -194,8 +194,6 @@ export async function runReconCommand(
       concurrency: opts.concurrency,
       signal: reconAbortController.signal,
       verbose: opts.verbose,
-      outputDir: outDir,
-      force: opts.reRecon,
     });
     const queuedAgents = selection.queued;
     const skippedCount = selection.decisions.length - queuedAgents.length;

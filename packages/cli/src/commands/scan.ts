@@ -564,8 +564,6 @@ export async function runScan(
           concurrency: opts.concurrency,
           signal: scanAbortController.signal,
           verbose: opts.verbose,
-          outputDir: outDir,
-          force: opts.reRecon,
         });
         queuedAgents = selection.queued;
         decisions = selection.decisions;
@@ -959,139 +957,119 @@ export async function runScan(
           `\nValidating ${validatable.length} finding(s)${scopeNote}${carryNote}${modeNote} at concurrency ${concurrency}`,
         );
         const fileCache = new Map<string, string | null>();
-        // Group validatable findings by (agentSlug, filePath). The pool
-        // operates over these groups (not raw findings) so per-task writes
-        // are race-free: only one task ever writes any given FileRecord,
-        // and SIGTERM mid-pool preserves the records that finished writing.
-        // Findings within a group are validated sequentially — typical
-        // groups are 1-3 findings, so the lost parallelism is negligible.
-        const validateGroups = new Map<
+        // One bounded pool over findings. Each finding is a distinct object
+        // and fileCache is only touched in await-free regions, so workers
+        // don't race; verdicts are persisted below once the pool drains.
+        await runConcurrent(validatable, concurrency, async (finding) => {
+          // Scope-only branch: never read the file, only ask the LLM to
+          // classify against --scope, and only persist `out-of-scope`.
+          // Findings the scope doesn't disqualify are left untouched so a
+          // follow-up `revalidate` (full mode) can still assess them.
+          if (scopeOnlyValidate && scopeContent !== undefined) {
+            try {
+              const result = await detector.validateFindingByScope({
+                finding,
+                scope: scopeContent,
+                signal: scanAbortController.signal,
+              });
+              if (result.verdict === "out-of-scope") {
+                finding.validation = {
+                  verdict: result.verdict,
+                  reasoning: result.reasoning,
+                };
+              }
+              if (opts.verbose) {
+                const note =
+                  result.verdict === "out-of-scope"
+                    ? "marked out-of-scope"
+                    : "kept (scope did not disqualify)";
+                console.log(`    ${finding.filePath}: ${result.verdict} — ${note}`);
+              }
+            } catch (err) {
+              handleDetectorError(opts, `scope-validate:${finding.id}`, err, scanAbortController);
+            }
+            return;
+          }
+
+          let content = fileCache.get(finding.filePath);
+          if (content === undefined) {
+            try {
+              content = readFileSync(resolve(root, finding.filePath), "utf8");
+            } catch {
+              content = null;
+            }
+            fileCache.set(finding.filePath, content);
+          }
+          if (content === null) {
+            console.log(`    skip ${finding.id}: file not readable (${finding.filePath})`);
+            return;
+          }
+          try {
+            const result = await detector.validateFinding({
+              finding,
+              fileContent: content,
+              scope: scopeContent,
+              signal: scanAbortController.signal,
+            });
+            finding.validation = {
+              verdict: result.verdict,
+              reasoning: result.reasoning,
+            };
+            if (opts.verbose) {
+              console.log(`    ${finding.filePath}: ${result.verdict}`);
+            }
+          } catch (err) {
+            handleDetectorError(opts, `validate:${finding.id}`, err, scanAbortController);
+          }
+        });
+        // Persist validation verdicts back into the per-(agent, file)
+        // shards. Group by (agentSlug, filePath) so each shard is
+        // rewritten once.
+        const byShard = new Map<
           string,
           { agentSlug: string; filePath: string; findings: Finding[] }
         >();
         for (const f of validatable) {
+          if (!f.validation) continue;
           const normalized = f.filePath.replace(/\\/g, "/");
           if (isAbsolute(normalized)) continue;
           const key = `${f.agentSlug} ${normalized}`;
-          const entry = validateGroups.get(key) ?? {
+          const entry = byShard.get(key) ?? {
             agentSlug: f.agentSlug,
             filePath: normalized,
             findings: [],
           };
           entry.findings.push(f);
-          validateGroups.set(key, entry);
+          byShard.set(key, entry);
         }
-
-        await runConcurrent(
-          [...validateGroups.values()],
-          concurrency,
-          async ({ agentSlug, filePath, findings: groupFindings }) => {
-            // Scope-only branch: never read the file, only ask the LLM to
-            // classify against --scope, and only persist `out-of-scope`.
-            // Findings the scope doesn't disqualify are left untouched so a
-            // follow-up `revalidate` (full mode) can still assess them.
-            if (scopeOnlyValidate && scopeContent !== undefined) {
-              for (const finding of groupFindings) {
-                try {
-                  const result = await detector.validateFindingByScope({
-                    finding,
-                    scope: scopeContent,
-                    signal: scanAbortController.signal,
-                  });
-                  if (result.verdict === "out-of-scope") {
-                    finding.validation = {
-                      verdict: result.verdict,
-                      reasoning: result.reasoning,
-                    };
-                  }
-                  if (opts.verbose) {
-                    const note =
-                      result.verdict === "out-of-scope"
-                        ? "marked out-of-scope"
-                        : "kept (scope did not disqualify)";
-                    console.log(`    ${finding.filePath}: ${result.verdict} — ${note}`);
-                  }
-                } catch (err) {
-                  handleDetectorError(
-                    opts,
-                    `scope-validate:${finding.id}`,
-                    err,
-                    scanAbortController,
-                  );
-                }
-              }
-            } else {
-              let content = fileCache.get(filePath);
-              if (content === undefined) {
-                try {
-                  content = readFileSync(resolve(root, filePath), "utf8");
-                } catch {
-                  content = null;
-                }
-                fileCache.set(filePath, content);
-              }
-              if (content === null) {
-                if (opts.verbose) {
-                  console.log(`    skip ${filePath}: file not readable`);
-                }
-              } else {
-                for (const finding of groupFindings) {
-                  try {
-                    const result = await detector.validateFinding({
-                      finding,
-                      fileContent: content,
-                      scope: scopeContent,
-                      signal: scanAbortController.signal,
-                    });
-                    finding.validation = {
-                      verdict: result.verdict,
-                      reasoning: result.reasoning,
-                    };
-                    if (opts.verbose) {
-                      console.log(`    ${finding.filePath}: ${result.verdict}`);
-                    }
-                  } catch (err) {
-                    handleDetectorError(opts, `validate:${finding.id}`, err, scanAbortController);
-                  }
-                }
-              }
+        for (const { agentSlug, filePath, findings: group } of byShard.values()) {
+          const record = readFileRecord(outDir, agentSlug, filePath);
+          if (!record) continue;
+          const inMemory = new Map(group.map((f) => [f.id, f]));
+          record.findings = record.findings.map((rec) => {
+            const live = inMemory.get(rec.id);
+            return live?.validation ? { ...rec, validation: live.validation } : rec;
+          });
+          record.analysisHistory.push({
+            runId: runMeta.runId,
+            phase: "validate",
+            ranAt: new Date().toISOString(),
+            durationMs: 0,
+            provider: detector.name,
+            agentSlugs: [agentSlug],
+            findingCount: group.length,
+          });
+          record.status = "validated";
+          try {
+            writeFileRecord(outDir, record);
+          } catch (err) {
+            if (opts.verbose) {
+              console.error(
+                `    persist failed for ${agentSlug}/${filePath}: ${(err as Error).message}`,
+              );
             }
-
-            // Per-task persistence: write THIS file's record immediately
-            // after its validations complete. SIGTERM after this point
-            // preserves the work; SIGTERM before it loses only this file
-            // group (the others were already written or haven't started).
-            const inMemory = new Map(
-              groupFindings.filter((f) => f.validation).map((f) => [f.id, f]),
-            );
-            if (inMemory.size === 0) return; // nothing to persist (scope-only kept everything)
-            const record = readFileRecord(outDir, agentSlug, filePath);
-            if (!record) return;
-            record.findings = record.findings.map((rec) => {
-              const live = inMemory.get(rec.id);
-              return live?.validation ? { ...rec, validation: live.validation } : rec;
-            });
-            record.analysisHistory.push({
-              runId: runMeta.runId,
-              phase: "validate",
-              ranAt: new Date().toISOString(),
-              durationMs: 0,
-              provider: detector.name,
-              agentSlugs: [agentSlug],
-              findingCount: groupFindings.length,
-            });
-            record.status = "validated";
-            try {
-              writeFileRecord(outDir, record);
-            } catch (err) {
-              if (opts.verbose) {
-                console.error(
-                  `    persist failed for ${agentSlug}/${filePath}: ${(err as Error).message}`,
-                );
-              }
-            }
-          },
-        );
+          }
+        }
         // Final tally combines this-run verdicts and carried-over ones so
         // the summary reflects every classified finding, not just freshly
         // validated ones.
@@ -1135,96 +1113,88 @@ export async function runScan(
             (skippedDisq > 0 ? ` (${skippedDisq} skipped: FP/out-of-scope)` : ""),
         );
         const scoreFileCache = new Map<string, string | null>();
-        // Group scorable findings by (agentSlug, filePath). Same rationale
-        // as the validate phase — per-task writes are race-free when one
-        // task owns each FileRecord, and SIGTERM mid-pool preserves the
-        // records that finished writing.
-        const scoreGroups = new Map<
+        const scoredByShard = new Map<
           string,
           { agentSlug: string; filePath: string; findings: Finding[] }
         >();
-        for (const f of scorable) {
-          const normalized = f.filePath.replace(/\\/g, "/");
-          if (isAbsolute(normalized)) continue;
-          const key = `${f.agentSlug} ${normalized}`;
-          const entry = scoreGroups.get(key) ?? {
-            agentSlug: f.agentSlug,
-            filePath: normalized,
-            findings: [],
-          };
-          entry.findings.push(f);
-          scoreGroups.set(key, entry);
-        }
-
-        await runConcurrent(
-          [...scoreGroups.values()],
-          concurrency,
-          async ({ agentSlug, filePath, findings: groupFindings }) => {
-            let content = scoreFileCache.get(filePath);
-            if (content === undefined) {
-              try {
-                content = readFileSync(resolve(root, filePath), "utf8");
-              } catch {
-                content = null;
-              }
-              scoreFileCache.set(filePath, content);
-            }
-            if (content === null) {
-              if (opts.verbose) {
-                console.log(`    skip score ${filePath}: file not readable`);
-              }
-              return;
-            }
-            for (const finding of groupFindings) {
-              try {
-                const cvss = await detector.scoreFinding({
-                  finding,
-                  fileContent: content,
-                  signal: scanAbortController.signal,
-                });
-                finding.cvss = cvss;
-                finding.severity = cvss.severity;
-                if (opts.verbose) {
-                  const loc = finding.lineRange ? `:${finding.lineRange[0]}` : "";
-                  console.log(
-                    `    ${cvss.severity.padEnd(8)} ${cvss.baseScore.toFixed(1).padStart(4)}  ${findingFilenameSlug(finding)}  ${finding.filePath}${loc}`,
-                  );
-                }
-              } catch (err) {
-                handleDetectorError(opts, `score:${finding.id}`, err, scanAbortController);
-              }
-            }
-
-            // Per-task persistence: write this file's record now.
-            const inMemory = new Map(groupFindings.filter((f) => f.cvss).map((f) => [f.id, f]));
-            if (inMemory.size === 0) return;
-            const record = readFileRecord(outDir, agentSlug, filePath);
-            if (!record) return;
-            record.findings = record.findings.map((rec) => {
-              const live = inMemory.get(rec.id);
-              if (!live?.cvss) return rec;
-              return { ...rec, cvss: live.cvss, severity: live.severity };
-            });
-            record.analysisHistory.push({
-              runId: runMeta.runId,
-              phase: "detect",
-              ranAt: new Date().toISOString(),
-              durationMs: 0,
-              provider: detector.name,
-              agentSlugs: [agentSlug],
-              findingCount: groupFindings.length,
-            });
+        // One bounded pool over findings, same as validation. scoredByShard
+        // is mutated only after the await (a synchronous get/push/set with no
+        // yield), so concurrent workers can't lose an entry.
+        await runConcurrent(scorable, concurrency, async (finding) => {
+          let content = scoreFileCache.get(finding.filePath);
+          if (content === undefined) {
             try {
-              writeFileRecord(outDir, record);
-            } catch (err) {
-              if (opts.verbose) {
-                console.error(
-                  `    persist failed for ${agentSlug}/${filePath}: ${(err as Error).message}`,
-                );
-              }
+              content = readFileSync(resolve(root, finding.filePath), "utf8");
+            } catch {
+              content = null;
             }
-          },
-        );
+            scoreFileCache.set(finding.filePath, content);
+          }
+          if (content === null) {
+            if (opts.verbose) {
+              console.log(`    skip score ${finding.id}: file not readable`);
+            }
+            return;
+          }
+          try {
+            const cvss = await detector.scoreFinding({
+              finding,
+              fileContent: content,
+              signal: scanAbortController.signal,
+            });
+            finding.cvss = cvss;
+            finding.severity = cvss.severity;
+            const normalized = finding.filePath.replace(/\\/g, "/");
+            const key = `${finding.agentSlug} ${normalized}`;
+            const entry = scoredByShard.get(key) ?? {
+              agentSlug: finding.agentSlug,
+              filePath: normalized,
+              findings: [],
+            };
+            entry.findings.push(finding);
+            scoredByShard.set(key, entry);
+            if (opts.verbose) {
+              const loc = finding.lineRange ? `:${finding.lineRange[0]}` : "";
+              console.log(
+                `    ${cvss.severity.padEnd(8)} ${cvss.baseScore.toFixed(1).padStart(4)}  ${findingFilenameSlug(finding)}  ${finding.filePath}${loc}`,
+              );
+            }
+          } catch (err) {
+            handleDetectorError(opts, `score:${finding.id}`, err, scanAbortController);
+          }
+        });
+        // Persist scored findings back into the per-(agent, file) shards.
+        // Grouped by (agentSlug, filePath) so each shard is rewritten
+        // once per scoring run.
+        for (const { agentSlug, filePath, findings: group } of scoredByShard.values()) {
+          if (isAbsolute(filePath)) continue;
+          const record = readFileRecord(outDir, agentSlug, filePath);
+          if (!record) continue;
+          const inMemory = new Map(group.map((f) => [f.id, f]));
+          record.findings = record.findings.map((rec) => {
+            const live = inMemory.get(rec.id);
+            if (!live?.cvss) return rec;
+            return { ...rec, cvss: live.cvss, severity: live.severity };
+          });
+          record.analysisHistory.push({
+            runId: runMeta.runId,
+            phase: "detect",
+            ranAt: new Date().toISOString(),
+            durationMs: 0,
+            provider: detector.name,
+            agentSlugs: [agentSlug],
+            findingCount: group.length,
+          });
+          try {
+            writeFileRecord(outDir, record);
+          } catch (err) {
+            if (opts.verbose) {
+              console.error(
+                `    persist failed for ${agentSlug}/${filePath}: ${(err as Error).message}`,
+              );
+            }
+          }
+        }
         const buckets: Record<string, number> = {};
         for (const f of scorable) {
           if (!f.severity) continue;
@@ -1271,12 +1241,11 @@ export async function runScan(
       if (dedupeTasks.length > 0) {
         console.log(`\nDe-duplicating across ${dedupeTasks.length} file(s)`);
         const dedupeFileCache = new Map<string, string | null>();
+        const dupedByShard = new Map<
+          string,
+          { agentSlug: string; filePath: string; findings: Finding[] }
+        >();
         let totalDuplicates = 0;
-        // Dedup is already per-filePath, and each filePath's findings can
-        // span multiple agents → each task touches multiple FileRecords
-        // (one per agentSlug for this file). Records are partitioned by
-        // (agentSlug, filePath) and no two dedup tasks share a filePath,
-        // so per-task persistence inside each task is race-free.
         await runConcurrent(dedupeTasks, concurrency, async ({ filePath, findings: bucket }) => {
           let content = dedupeFileCache.get(filePath);
           if (content === undefined) {
@@ -1287,12 +1256,6 @@ export async function runScan(
             }
             dedupeFileCache.set(filePath, content);
           }
-          // Touched records keyed by `${agentSlug} ${normalizedPath}`, only
-          // for this task's filePath.
-          const touched = new Map<
-            string,
-            { agentSlug: string; filePath: string; findings: Finding[] }
-          >();
           try {
             const clusters = await detector.dedupeFindings({
               filePath,
@@ -1311,56 +1274,52 @@ export async function runScan(
               };
               const normalized = dupe.filePath.replace(/\\/g, "/");
               const key = `${dupe.agentSlug} ${normalized}`;
-              const entry = touched.get(key) ?? {
+              const entry = dupedByShard.get(key) ?? {
                 agentSlug: dupe.agentSlug,
                 filePath: normalized,
                 findings: [],
               };
               entry.findings.push(dupe);
-              touched.set(key, entry);
+              dupedByShard.set(key, entry);
               totalDuplicates++;
             }
           } catch (err) {
             handleDetectorError(opts, `dedup:${filePath}`, err, scanAbortController);
-            return;
-          }
-
-          // Per-task persistence: write each touched (agentSlug, filePath)
-          // shard immediately. SIGTERM after this returns preserves the
-          // dedup result for this file.
-          for (const { agentSlug, filePath: normalizedPath, findings: group } of touched.values()) {
-            if (isAbsolute(normalizedPath)) continue;
-            const record = readFileRecord(outDir, agentSlug, normalizedPath);
-            if (!record) continue;
-            const inMemory = new Map(group.map((f) => [f.id, f]));
-            if (opts.deleteDuplicates) {
-              record.findings = record.findings.filter((rec) => !inMemory.has(rec.id));
-            } else {
-              record.findings = record.findings.map((rec) => {
-                const live = inMemory.get(rec.id);
-                return live?.dedup ? { ...rec, dedup: live.dedup } : rec;
-              });
-            }
-            record.analysisHistory.push({
-              runId: runMeta.runId,
-              phase: "dedup",
-              ranAt: new Date().toISOString(),
-              durationMs: 0,
-              provider: detector.name,
-              agentSlugs: [agentSlug],
-              findingCount: record.findings.length,
-            });
-            try {
-              writeFileRecord(outDir, record);
-            } catch (err) {
-              if (opts.verbose) {
-                console.error(
-                  `    persist failed for ${agentSlug}/${normalizedPath}: ${(err as Error).message}`,
-                );
-              }
-            }
           }
         });
+        // Persist dedup markers back into the per-(agent, file) shards.
+        for (const { agentSlug, filePath, findings: group } of dupedByShard.values()) {
+          if (isAbsolute(filePath)) continue;
+          const record = readFileRecord(outDir, agentSlug, filePath);
+          if (!record) continue;
+          const inMemory = new Map(group.map((f) => [f.id, f]));
+          if (opts.deleteDuplicates) {
+            record.findings = record.findings.filter((rec) => !inMemory.has(rec.id));
+          } else {
+            record.findings = record.findings.map((rec) => {
+              const live = inMemory.get(rec.id);
+              return live?.dedup ? { ...rec, dedup: live.dedup } : rec;
+            });
+          }
+          record.analysisHistory.push({
+            runId: runMeta.runId,
+            phase: "dedup",
+            ranAt: new Date().toISOString(),
+            durationMs: 0,
+            provider: detector.name,
+            agentSlugs: [agentSlug],
+            findingCount: record.findings.length,
+          });
+          try {
+            writeFileRecord(outDir, record);
+          } catch (err) {
+            if (opts.verbose) {
+              console.error(
+                `    persist failed for ${agentSlug}/${filePath}: ${(err as Error).message}`,
+              );
+            }
+          }
+        }
         const verb = opts.deleteDuplicates ? "deleted" : "marked";
         console.log(`  ${verb} ${totalDuplicates} duplicate(s)`);
         // When deleting, drop them from the in-memory list too so the
