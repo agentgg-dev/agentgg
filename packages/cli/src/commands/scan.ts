@@ -192,13 +192,16 @@ export async function runScan(
     console.log(`State: ${outDir}\\state  (run ${runMeta.runId})`);
   }
 
-  // SIGINT (Ctrl+C) handler: mark the run as errored on disk so it
-  // doesn't sit in `phase: "running"` forever, then exit with the
-  // conventional 128+SIGINT code. Files already persisted stay on
-  // disk and a re-run with the same --output resumes past them
-  // (see contentHash skip in the file-mode loop below).
+  // SIGINT (Ctrl+C) / SIGTERM handler: mark the run as errored on disk
+  // so it doesn't sit in `phase: "running"` forever, then exit with the
+  // conventional 128+signal code. Files already persisted stay on disk
+  // and a re-run with the same --output resumes past them (see
+  // contentHash skip in the file-mode loop below). SIGTERM matters when
+  // the CLI runs inside a Cloud Run Job — `gcloud run jobs executions
+  // cancel` sends SIGTERM, and without this handler Node's default would
+  // kill the process immediately, leaving no audit trail of why.
   let runFinalized = false;
-  const sigintHandler = () => {
+  const shutdownHandler = (signal: NodeJS.Signals) => {
     if (!runFinalized) {
       runFinalized = true;
       try {
@@ -206,11 +209,12 @@ export async function runScan(
       } catch {
         // best-effort; the run file just stays "running"
       }
-      console.error("\nInterrupted. Partial state persisted; re-run the same command to resume.");
+      console.error(`\nInterrupted (${signal}). Partial state persisted; re-run to resume.`);
     }
-    process.exit(130);
+    process.exit(signal === "SIGTERM" ? 143 : 130);
   };
-  process.on("SIGINT", sigintHandler);
+  process.on("SIGINT", shutdownHandler);
+  process.on("SIGTERM", shutdownHandler);
 
   // Scan-wide abort controller. Fired by `handleDetectorError` when a
   // fatal diagnostic (quota exhausted, bad credentials) classifies an
@@ -1353,7 +1357,8 @@ export async function runScan(
       totalDurationMs: completedAt.getTime() - startedAt.getTime(),
     });
     runFinalized = true;
-    process.off("SIGINT", sigintHandler);
+    process.off("SIGINT", shutdownHandler);
+    process.off("SIGTERM", shutdownHandler);
 
     console.log(`\nDone. ${findings.length} finding(s) across ${touchedFiles.size} file(s).`);
     if (report) {
@@ -1399,7 +1404,8 @@ export async function runScan(
         // best-effort
       }
     }
-    process.off("SIGINT", sigintHandler);
+    process.off("SIGINT", shutdownHandler);
+    process.off("SIGTERM", shutdownHandler);
     if (err instanceof FatalScanError) {
       // Single clean line. The action handler also prints "scan failed:"
       // around it, so the user sees the diagnostic message once.
