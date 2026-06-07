@@ -440,7 +440,11 @@ the exact file path, line range, and unsafe code element, and explain
 why it is exploitable. If a candidate turns out to be safe or already
 mitigated, omit it — an empty result is the correct answer for clean
 code. Do NOT invent findings to satisfy expectations; false positives
-erode trust.`;
+erode trust.
+
+Write the title, summary, details, PoC, and impact in plain, direct
+language. Do not use em-dashes (—); use commas, parentheses, or separate
+sentences instead.`;
 
   return `${reconBlock}${args.agent.prompt}${diffBlock}
 
