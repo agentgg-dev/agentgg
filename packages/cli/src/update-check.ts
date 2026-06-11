@@ -77,8 +77,16 @@ function normalize(version: string): string {
   return version.startsWith("v") ? version.slice(1) : version;
 }
 
-function differs(current: string, latest: string): boolean {
-  return normalize(current) !== normalize(latest);
+/** True iff `latest` is a strictly higher semver than `current` (plain x.y.z). */
+function isNewer(current: string, latest: string): boolean {
+  const c = normalize(current).split(".").map(Number);
+  const l = normalize(latest).split(".").map(Number);
+  for (let i = 0; i < 3; i++) {
+    const a = c[i] ?? 0;
+    const b = l[i] ?? 0;
+    if (b !== a) return b > a;
+  }
+  return false;
 }
 
 async function fetchWithTimeout(url: string, headers: Record<string, string>): Promise<unknown> {
@@ -170,13 +178,13 @@ function renderBanner(parts: {
 function reportFromCache(): void {
   const cache = loadCache();
   const cli =
-    cache.cli && differs(CLI_VERSION, cache.cli.latest)
+    cache.cli && isNewer(CLI_VERSION, cache.cli.latest)
       ? { current: CLI_VERSION, latest: cache.cli.latest }
       : undefined;
 
   const installedAgents = getInstalledAgentsVersion();
   const agents =
-    installedAgents && cache.agents && differs(installedAgents, cache.agents.latest)
+    installedAgents && cache.agents && isNewer(installedAgents, cache.agents.latest)
       ? { current: installedAgents, latest: cache.agents.latest }
       : undefined;
 
