@@ -794,6 +794,58 @@ export const AgentRun = z.object({
 });
 export type AgentRun = z.infer<typeof AgentRun>;
 
+// ---------------------------------------------------------------------------
+// LlmUsage / ScanUsage — token-usage ledger (`<outputDir>/state/usage.json`)
+// ---------------------------------------------------------------------------
+//
+// The detector sums `usage` from every LLM response in this CLI invocation into
+// a flat total, checkpointed to `state/usage.json` as the run proceeds
+// (incrementally, so a cancelled or crashed run still leaves an accurate tally
+// on disk). The engine emits raw token counts only — no pricing, no cost. The
+// CLI doesn't bill anything (you run your own model); usage.json is an
+// observability surface, and whatever reads it decides what the numbers mean.
+//
+// One usage.json per CLI invocation is the natural grain: recon, each agent run
+// (`agentgg scan`), and dedup are separate invocations, each with its own state
+// dir, so a consumer that wants a scan-wide figure sums them. There is
+// deliberately no per-phase or per-slug breakdown — a single `scan` runs N
+// agents as one fused process, so the engine can't (and needn't) attribute
+// tokens finer than the invocation.
+//
+// `inputTokens` maps to the provider's `prompt_tokens`, `outputTokens` to
+// `completion_tokens`. `cachedInputTokens` is the subset of `inputTokens`
+// served from the provider's prompt cache — it is NOT added on top of
+// `inputTokens`. Providers that don't surface a cache figure leave it 0.
+
+export const LlmUsage = z.object({
+  /** Prompt (input) tokens. Maps to the provider's `usage.prompt_tokens`. */
+  inputTokens: z.number().int().nonnegative().default(0),
+  /** Completion (output) tokens. Maps to the provider's `usage.completion_tokens`. */
+  outputTokens: z.number().int().nonnegative().default(0),
+  /**
+   * Subset of `inputTokens` served from the provider's prompt cache (providers
+   * usually price these cheaper, which is why they're tracked separately). A
+   * subset of `inputTokens`, not additive. 0 when the provider doesn't report a
+   * cache figure.
+   */
+  cachedInputTokens: z.number().int().nonnegative().default(0),
+  /** Number of LLM responses folded into these totals. */
+  calls: z.number().int().nonnegative().default(0),
+});
+export type LlmUsage = z.infer<typeof LlmUsage>;
+
+export const ScanUsage = z.object({
+  /** Detector name the tokens were billed against, e.g. "vertex" / "openai". */
+  provider: z.string(),
+  /** Resolved model id, e.g. "zai-org/glm-5-maas". Absent if never recorded. */
+  model: z.string().optional(),
+  /** Flat token totals for this CLI invocation. */
+  totals: LlmUsage,
+  /** ISO timestamp of the most recent checkpoint. */
+  updatedAt: z.string(),
+});
+export type ScanUsage = z.infer<typeof ScanUsage>;
+
 export const RunMeta = z.object({
   runId: z.string(),
   type: z.enum(["scan", "detect", "validate", "dedup"]),

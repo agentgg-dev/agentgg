@@ -15,12 +15,14 @@ import {
   type RunAgentArgs,
 } from "../detect.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
+import type { UsageMeter } from "../usage-meter.js";
 import {
   asValidationField,
   buildScopeValidatePrompt,
   buildValidatePrompt,
   LlmValidation,
 } from "../validator.js";
+import { extractCallUsage } from "./vercel-agent.js";
 
 /**
  * Multi-provider detector. Backed by the Vercel AI SDK's `generateObject`
@@ -85,6 +87,7 @@ export class MultiProviderDetector implements Detector {
   private readonly providerKey?: "anthropic" | "openai" | "ollama";
   private readonly effort?: Effort;
   private readonly thinking?: Thinking;
+  private meter?: UsageMeter;
 
   constructor(name: string, model: LanguageModelV1, opts: MultiProviderDetectorOpts = {}) {
     this.name = name;
@@ -97,26 +100,43 @@ export class MultiProviderDetector implements Detector {
     this.thinking = opts.thinking;
   }
 
+  attachUsageMeter(meter: UsageMeter): void {
+    this.meter = meter;
+  }
+
+  /**
+   * Run one `generateObject` call, then record its token usage into the
+   * attached meter (a no-op when no meter is attached). Every call funnels
+   * through here so usage capture lives in one place.
+   */
+  private async metered<R>(run: () => Promise<R>): Promise<R> {
+    const result = await run();
+    this.meter?.record(extractCallUsage(result), this.model.modelId);
+    return result;
+  }
+
   async recon(args: ReconArgs & { signal?: AbortSignal }): Promise<ReconResult> {
     // Best-effort: this detector has no tools, so the model can't browse
     // the repo. It produces a brief from the fingerprint tags + its own
     // priors. The resolver routes tool-capable providers to a detector
     // that can actually read files; this is the degraded fallback.
     try {
-      const { object } = await generateObject({
-        model: this.model,
-        schema: ReconResult,
-        mode: "json",
-        prompt: buildReconPrompt({
-          instructions: args.instructions,
-          fingerprintTags: args.fingerprintTags,
-          excludePatterns: args.excludePatterns,
-          includePatterns: args.includePatterns,
-          maxFileSizeKb: args.maxFileSizeKb,
+      const { object } = await this.metered(() =>
+        generateObject({
+          model: this.model,
+          schema: ReconResult,
+          mode: "json",
+          prompt: buildReconPrompt({
+            instructions: args.instructions,
+            fingerprintTags: args.fingerprintTags,
+            excludePatterns: args.excludePatterns,
+            includePatterns: args.includePatterns,
+            maxFileSizeKb: args.maxFileSizeKb,
+          }),
+          providerOptions: this.providerOptionsArg(),
+          abortSignal: args.signal,
         }),
-        providerOptions: this.providerOptionsArg(),
-        abortSignal: args.signal,
-      });
+      );
       return object;
     } catch (err) {
       if (process.env.AGENTGG_DEBUG) {
@@ -135,14 +155,16 @@ export class MultiProviderDetector implements Detector {
     // Roam-mode agents (no candidates) will find little here — tool-capable
     // providers are routed to a detector that can actually read files.
     try {
-      const { object } = await generateObject({
-        model: this.model,
-        schema: DetectionResult,
-        mode: "json",
-        prompt: buildAgentPrompt(args),
-        providerOptions: this.providerOptionsArg(),
-        abortSignal: args.signal,
-      });
+      const { object } = await this.metered(() =>
+        generateObject({
+          model: this.model,
+          schema: DetectionResult,
+          mode: "json",
+          prompt: buildAgentPrompt(args),
+          providerOptions: this.providerOptionsArg(),
+          abortSignal: args.signal,
+        }),
+      );
       const fallback = args.candidates[0]?.filePath ?? "(unknown)";
       return object.findings.map((f) => hydrateFinding(f, args.agent, f.filePath ?? fallback));
     } catch (err) {
@@ -160,14 +182,16 @@ export class MultiProviderDetector implements Detector {
     args: PreconditionCheckArgs & { signal?: AbortSignal },
   ): Promise<PreconditionCheck> {
     try {
-      const { object } = await generateObject({
-        model: this.model,
-        schema: PreconditionCheck,
-        mode: "json",
-        prompt: buildPreconditionPrompt(args),
-        providerOptions: this.providerOptionsArg(),
-        abortSignal: args.signal,
-      });
+      const { object } = await this.metered(() =>
+        generateObject({
+          model: this.model,
+          schema: PreconditionCheck,
+          mode: "json",
+          prompt: buildPreconditionPrompt(args),
+          providerOptions: this.providerOptionsArg(),
+          abortSignal: args.signal,
+        }),
+      );
       return object;
     } catch (err) {
       if (process.env.AGENTGG_DEBUG) {
@@ -187,14 +211,16 @@ export class MultiProviderDetector implements Detector {
     signal?: AbortSignal;
   }) {
     try {
-      const { object } = await generateObject({
-        model: this.model,
-        schema: LlmValidation,
-        mode: "json",
-        prompt: buildValidatePrompt(args),
-        providerOptions: this.providerOptionsArg(),
-        abortSignal: args.signal,
-      });
+      const { object } = await this.metered(() =>
+        generateObject({
+          model: this.model,
+          schema: LlmValidation,
+          mode: "json",
+          prompt: buildValidatePrompt(args),
+          providerOptions: this.providerOptionsArg(),
+          abortSignal: args.signal,
+        }),
+      );
       return asValidationField(object);
     } catch (err) {
       if (process.env.AGENTGG_DEBUG) {
@@ -209,14 +235,16 @@ export class MultiProviderDetector implements Detector {
 
   async validateFindingByScope(args: { finding: Finding; scope: string; signal?: AbortSignal }) {
     try {
-      const { object } = await generateObject({
-        model: this.model,
-        schema: LlmValidation,
-        mode: "json",
-        prompt: buildScopeValidatePrompt(args),
-        providerOptions: this.providerOptionsArg(),
-        abortSignal: args.signal,
-      });
+      const { object } = await this.metered(() =>
+        generateObject({
+          model: this.model,
+          schema: LlmValidation,
+          mode: "json",
+          prompt: buildScopeValidatePrompt(args),
+          providerOptions: this.providerOptionsArg(),
+          abortSignal: args.signal,
+        }),
+      );
       return asValidationField(object);
     } catch (err) {
       if (process.env.AGENTGG_DEBUG) {
@@ -235,14 +263,16 @@ export class MultiProviderDetector implements Detector {
     signal?: AbortSignal;
   }): Promise<CvssScore> {
     try {
-      const { object } = await generateObject({
-        model: this.model,
-        schema: LlmScore,
-        mode: "json",
-        prompt: buildScorePrompt(args),
-        providerOptions: this.providerOptionsArg(),
-        abortSignal: args.signal,
-      });
+      const { object } = await this.metered(() =>
+        generateObject({
+          model: this.model,
+          schema: LlmScore,
+          mode: "json",
+          prompt: buildScorePrompt(args),
+          providerOptions: this.providerOptionsArg(),
+          abortSignal: args.signal,
+        }),
+      );
       return asCvssScore(object);
     } catch (err) {
       if (process.env.AGENTGG_DEBUG) {
@@ -262,14 +292,16 @@ export class MultiProviderDetector implements Detector {
     signal?: AbortSignal;
   }): Promise<LlmDedup["clusters"]> {
     try {
-      const { object } = await generateObject({
-        model: this.model,
-        schema: LlmDedup,
-        mode: "json",
-        prompt: buildDedupePrompt(args),
-        providerOptions: this.providerOptionsArg(),
-        abortSignal: args.signal,
-      });
+      const { object } = await this.metered(() =>
+        generateObject({
+          model: this.model,
+          schema: LlmDedup,
+          mode: "json",
+          prompt: buildDedupePrompt(args),
+          providerOptions: this.providerOptionsArg(),
+          abortSignal: args.signal,
+        }),
+      );
       return object.clusters;
     } catch (err) {
       if (process.env.AGENTGG_DEBUG) {

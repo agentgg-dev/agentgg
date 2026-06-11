@@ -15,6 +15,7 @@ import { handleDetectorError } from "../diagnostics.js";
 import { loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
 import { buildCredentialsFromOpts, validateProviderFlags } from "../providers/index.js";
 import { writeMarkdownReport } from "../reporters/md.js";
+import { createUsageMeter } from "../usage-meter.js";
 import { buildInvocation } from "./invocation.js";
 
 interface RevalidateOpts {
@@ -165,6 +166,13 @@ export async function runRevalidate(
   });
   writeRunMeta(outputDir, runMeta);
 
+  // Token-usage metering — revalidate is an LLM validation pass, so it's
+  // recorded too. Checkpoints to state/usage.json incrementally and is flushed
+  // at finalize. (No SIGTERM handler here, matching this command's existing
+  // shape; a cancel relies on the last incremental checkpoint.)
+  const usageMeter = createUsageMeter(outputDir, detector.name);
+  detector.attachUsageMeter?.(usageMeter);
+
   const startedAt = new Date();
   const verdicts: Record<string, number> = {};
   const fileCache = new Map<string, string | null>();
@@ -276,6 +284,7 @@ export async function runRevalidate(
     findingsCount: tasks.length,
     totalDurationMs: completedAt.getTime() - startedAt.getTime(),
   });
+  usageMeter.flush();
 
   // Re-render the per-finding markdown + summary so the on-disk
   // reports reflect the new verdicts. Without this, `findings/*.md`

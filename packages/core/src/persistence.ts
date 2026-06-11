@@ -39,8 +39,17 @@ import {
   getScanMetaPath,
   getStateFilesDir,
   getStateRunsDir,
+  getUsagePath,
 } from "./paths.js";
-import { AgentRun, FileRecord, ReconReport, RunMeta, ScanMeta, ScanPlan } from "./types.js";
+import {
+  AgentRun,
+  FileRecord,
+  ReconReport,
+  RunMeta,
+  ScanMeta,
+  ScanPlan,
+  ScanUsage,
+} from "./types.js";
 
 export function generateRunId(): string {
   const now = new Date();
@@ -122,6 +131,31 @@ export function readScanPlan(outputDir: string): ScanPlan | null {
   if (!existsSync(path)) return null;
   try {
     return ScanPlan.parse(JSON.parse(readFileSync(path, "utf8")));
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ScanUsage sidecar — token ledger, one per output dir
+// ---------------------------------------------------------------------------
+
+/**
+ * Persist the token-usage ledger to `<outputDir>/state/usage.json`. Written
+ * incrementally as a scan runs (so a cancelled/crashed scan still leaves the
+ * partial usage on disk) via the same atomic temp+rename as every other
+ * sidecar — safe to call from a signal handler.
+ */
+export function writeUsage(outputDir: string, usage: ScanUsage): void {
+  writeFileAtomic(getUsagePath(outputDir), `${JSON.stringify(usage, null, 2)}\n`);
+}
+
+/** Read the token-usage ledger, or null when absent / corrupt. */
+export function readUsage(outputDir: string): ScanUsage | null {
+  const path = getUsagePath(outputDir);
+  if (!existsSync(path)) return null;
+  try {
+    return ScanUsage.parse(JSON.parse(readFileSync(path, "utf8")));
   } catch {
     return null;
   }

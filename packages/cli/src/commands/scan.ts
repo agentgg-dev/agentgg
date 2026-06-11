@@ -40,6 +40,7 @@ import { buildCredentialsFromOpts, validateProviderFlags } from "../providers/in
 import { renderReconForPrompt, runRecon } from "../recon.js";
 import { findingFilenameSlug, writeMarkdownReport } from "../reporters/md.js";
 import { resolveTemplates } from "../template.js";
+import { createUsageMeter, type UsageMeter } from "../usage-meter.js";
 import { DEFAULT_VIEWER_PORT, openBrowser, startViewer } from "../viewer-server.js";
 import { DEFAULT_EXCLUDES, type WalkConfig, walkForAgents } from "../walker.js";
 import { buildInvocation } from "./invocation.js";
@@ -201,9 +202,19 @@ export async function runScan(
   // cancel` sends SIGTERM, and without this handler Node's default would
   // kill the process immediately, leaving no audit trail of why.
   let runFinalized = false;
+  // Assigned once the detector is resolved below. The shutdown handler closes
+  // over it so a SIGTERM (Cloud Run Job cancel) flushes the partial token
+  // ledger before exit — the basis for billing a cancelled scan.
+  let usageMeter: UsageMeter | undefined;
   const shutdownHandler = (signal: NodeJS.Signals) => {
     if (!runFinalized) {
       runFinalized = true;
+      // Flush usage first so the tokens spent before the cancel land on disk.
+      try {
+        usageMeter?.flush();
+      } catch {
+        // metering must never block shutdown
+      }
       try {
         completeRun(outDir, runMeta.runId, "error", {});
       } catch {
@@ -251,6 +262,15 @@ export async function runScan(
       effort: opts.effort,
       thinking: opts.thinking,
     });
+
+    // LLM token-usage metering (observability, not billing — you run your own
+    // model). The detector records `usage` from every LLM response into this
+    // meter, which checkpoints to state/usage.json incrementally (debounced)
+    // and is force-flushed on shutdown + finalize. Seeded from any existing
+    // usage.json so a retried invocation in the same output dir continues the
+    // total instead of resetting. Every provider's detector meters.
+    usageMeter = createUsageMeter(outDir, detector.name);
+    detector.attachUsageMeter?.(usageMeter);
 
     // Auto-install official agents on first scan — mirrors how nuclei
     // auto-downloads templates when ~/nuclei-templates/ doesn't exist yet.
@@ -1356,6 +1376,8 @@ export async function runScan(
       findingsCount: findings.length,
       totalDurationMs: completedAt.getTime() - startedAt.getTime(),
     });
+    // Final token-ledger checkpoint — drains any debounced records.
+    usageMeter?.flush();
     runFinalized = true;
     process.off("SIGINT", shutdownHandler);
     process.off("SIGTERM", shutdownHandler);
@@ -1398,6 +1420,11 @@ export async function runScan(
     // handler does — guard with runFinalized so we don't double-write.
     if (!runFinalized) {
       runFinalized = true;
+      try {
+        usageMeter?.flush();
+      } catch {
+        // metering must never mask the original error
+      }
       try {
         completeRun(outDir, runMeta.runId, "error", {});
       } catch {

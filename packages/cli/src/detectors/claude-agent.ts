@@ -17,6 +17,7 @@ import {
   type RunAgentArgs,
 } from "../detect.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
+import type { CallUsage, UsageMeter } from "../usage-meter.js";
 import {
   asValidationField,
   buildScopeValidatePrompt,
@@ -74,6 +75,7 @@ export class ClaudeAgentDetector implements Detector {
   private readonly validateMaxTurns: number;
   private readonly effort?: "low" | "medium" | "high" | "max";
   private readonly thinking?: "off" | "adaptive" | "enabled";
+  private meter?: UsageMeter;
 
   constructor(opts: {
     apiKey?: string;
@@ -99,6 +101,10 @@ export class ClaudeAgentDetector implements Detector {
     this.effort = opts.effort;
     this.thinking = opts.thinking;
     this.name = opts.oauthToken ? "anthropic-oauth" : "anthropic-api";
+  }
+
+  attachUsageMeter(meter: UsageMeter): void {
+    this.meter = meter;
   }
 
   async recon(args: ReconArgs & { signal?: AbortSignal }): Promise<ReconResult> {
@@ -278,6 +284,7 @@ export class ClaudeAgentDetector implements Detector {
     }
     let structured: unknown;
     let resultText = "";
+    let capturedUsage: unknown;
     try {
       for await (const message of query({
         prompt: opts.prompt,
@@ -313,6 +320,10 @@ export class ClaudeAgentDetector implements Detector {
           if (so !== undefined) structured = so;
           const r = (msg as { result?: unknown }).result;
           if (r !== undefined) resultText = String(r);
+          // The terminal result message carries cumulative token usage for the
+          // whole session (across tool-use turns). Capture it for the meter.
+          const usage = (msg as { usage?: unknown }).usage;
+          if (usage !== undefined) capturedUsage = usage;
         }
       }
     } catch (err) {
@@ -323,6 +334,11 @@ export class ClaudeAgentDetector implements Detector {
         console.error("------------------------------------------------------");
       }
       throw err;
+    }
+    // Record usage even if the structured output is missing/unparsable below —
+    // the tokens were spent regardless.
+    if (capturedUsage !== undefined) {
+      this.meter?.record(extractClaudeUsage(capturedUsage), this.model);
     }
     if (structured === undefined) {
       throw new Error(
@@ -364,6 +380,35 @@ export class ClaudeAgentDetector implements Detector {
     if (this.apiKey) env.ANTHROPIC_API_KEY = this.apiKey;
     return env;
   }
+}
+
+/**
+ * Map the Claude Agent SDK result message's `usage` block into the meter's
+ * normalized `CallUsage`. The SDK reports the Anthropic API shape, where the
+ * prompt side is split across `input_tokens` (uncached), `cache_read_input_tokens`,
+ * and `cache_creation_input_tokens`. We fold all three into `inputTokens` (so it
+ * matches the OpenAI-compat path, where prompt tokens already include cached)
+ * and surface the cache-hit subset as `cachedInputTokens`. Defensive — any
+ * missing field degrades to 0.
+ */
+export function extractClaudeUsage(usage: unknown): CallUsage {
+  const u = (usage ?? {}) as {
+    input_tokens?: unknown;
+    output_tokens?: unknown;
+    cache_read_input_tokens?: unknown;
+    cache_creation_input_tokens?: unknown;
+  };
+  const cachedInputTokens = claudeNumberish(u.cache_read_input_tokens);
+  const inputTokens =
+    claudeNumberish(u.input_tokens) +
+    cachedInputTokens +
+    claudeNumberish(u.cache_creation_input_tokens);
+  return { inputTokens, outputTokens: claudeNumberish(u.output_tokens), cachedInputTokens };
+}
+
+/** A finite positive number, else 0. Token counts are never negative. */
+function claudeNumberish(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
 }
 
 /**

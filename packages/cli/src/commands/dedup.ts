@@ -16,6 +16,7 @@ import { handleDetectorError } from "../diagnostics.js";
 import { loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
 import { buildCredentialsFromOpts, validateProviderFlags } from "../providers/index.js";
 import { writeMarkdownReport } from "../reporters/md.js";
+import { createUsageMeter } from "../usage-meter.js";
 import { buildInvocation } from "./invocation.js";
 
 interface DedupOpts {
@@ -163,6 +164,12 @@ export async function runDedup(
   });
   writeRunMeta(outputDir, runMeta);
 
+  // Token-usage metering — dedup is an LLM pass, so it's recorded too.
+  // Checkpoints to state/usage.json (incrementally as the pool resolves files),
+  // flushed on shutdown + finalize. Seeded from any prior ledger in this dir.
+  const usageMeter = createUsageMeter(outputDir, detector.name);
+  detector.attachUsageMeter?.(usageMeter);
+
   // SIGINT (Ctrl+C) / SIGTERM handler: stamp the run as errored on disk.
   // SIGTERM matters when this CLI runs inside a Cloud Run Job — cancel
   // sends SIGTERM and we want the run sidecar to reflect that exit.
@@ -170,6 +177,11 @@ export async function runDedup(
   const shutdownHandler = (signal: NodeJS.Signals) => {
     if (!runFinalized) {
       runFinalized = true;
+      try {
+        usageMeter.flush();
+      } catch {
+        // metering must never block shutdown
+      }
       try {
         completeRun(outputDir, runMeta.runId, "error", {});
       } catch {
@@ -296,6 +308,7 @@ export async function runDedup(
     findingsCount: totalDuplicates,
     totalDurationMs: completedAt.getTime() - startedAt.getTime(),
   });
+  usageMeter.flush();
   runFinalized = true;
   process.off("SIGINT", shutdownHandler);
   process.off("SIGTERM", shutdownHandler);

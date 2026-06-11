@@ -65,10 +65,13 @@ out/
     ├── scan.json          ← root + timestamps
     ├── recon.json         ← ReconReport (phase 1)
     ├── plan.json          ← ScanPlan: queued/skipped decisions (phase 2)
+    ├── usage.json         ← ScanUsage: LLM token usage (input / output / cached) for this invocation
     ├── runs/<id>.json     ← RunMeta per scan / recon / revalidate / score / summary
     ├── agents/<slug>.json ← AgentRun resume sidecar (one per agent)
     └── files/<path>.json  ← FileRecord per scanned source file
 ```
+
+`usage.json` (`ScanUsage`) records how many tokens a run actually spent — input, output, and prompt-cached, plus a call count. The detector checkpoints it as the run proceeds (written incrementally, force-flushed on SIGTERM), so even an interrupted run leaves an accurate tally. It's purely an observability surface: the CLI records raw counts and doesn't price or bill anything (you run your own model) — whatever reads `usage.json` (a dashboard, a CI summary, your own accounting) decides what to do with the numbers. One file per invocation, written for every provider: the Vercel AI SDK path (`vertex` / `openai` / `bedrock`), the Claude Agent SDK (Anthropic, from its `result` message's `usage`), and the structured-output path (Ollama).
 
 Resume:
 - **Recon + plan** — a `recon.json` whose `reconHash` matches is reused without re-surveying; a `plan.json` with the same `reconHash` that covers the current `-t` selection is reused without re-running the precondition for-loop (`scan.ts` reads `readScanPlan` and filters the selection to the plan's queued slugs). `--re-recon` forces both to recompute.

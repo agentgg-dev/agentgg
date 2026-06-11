@@ -14,6 +14,7 @@ import { runConcurrent } from "../concurrent.js";
 import { handleDetectorError } from "../diagnostics.js";
 import { type CredentialOverrides, loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
 import { findingFilenameSlug, writeMarkdownReport } from "../reporters/md.js";
+import { createUsageMeter } from "../usage-meter.js";
 import { buildInvocation } from "./invocation.js";
 
 interface ScoreOpts {
@@ -144,6 +145,13 @@ export async function runScore(
   });
   writeRunMeta(outputDir, runMeta);
 
+  // Token-usage metering — scoring is an LLM pass, so it's recorded too.
+  // Checkpoints to state/usage.json incrementally and is flushed at finalize.
+  // (No SIGTERM handler here, matching this command's existing shape; a cancel
+  // relies on the last incremental checkpoint.)
+  const usageMeter = createUsageMeter(outputDir, detector.name);
+  detector.attachUsageMeter?.(usageMeter);
+
   const startedAt = new Date();
   const buckets: Record<string, number> = {};
   const fileCache = new Map<string, string | null>();
@@ -215,6 +223,7 @@ export async function runScore(
     findingsCount: tasks.length,
     totalDurationMs: completedAt.getTime() - startedAt.getTime(),
   });
+  usageMeter.flush();
 
   // Re-render reports so `findings/*.md` and `summary.md` reflect the
   // new scores. Mirrors the post-revalidate re-render. `--no-summary`

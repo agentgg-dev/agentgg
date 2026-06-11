@@ -18,6 +18,7 @@ import { selectAgents } from "../precondition.js";
 import { buildCredentialsFromOpts, validateProviderFlags } from "../providers/index.js";
 import { runRecon } from "../recon.js";
 import { resolveTemplates } from "../template.js";
+import { createUsageMeter, type UsageMeter } from "../usage-meter.js";
 import { DEFAULT_EXCLUDES, type WalkConfig } from "../walker.js";
 import { buildInvocation } from "./invocation.js";
 
@@ -75,6 +76,10 @@ export async function runReconCommand(
 
   const reconAbortController = new AbortController();
   let runFinalized = false;
+  // Assigned once the detector is resolved below. Recon makes LLM calls (the
+  // survey + precondition gates), so it meters too; the handler flushes the
+  // token ledger on SIGTERM (Cloud Run Job cancel) before exit.
+  let usageMeter: UsageMeter | undefined;
 
   // SIGINT (Ctrl+C) / SIGTERM handler: stamp the run as errored on disk.
   // SIGTERM matters when this CLI runs inside a Cloud Run Job — cancel
@@ -83,6 +88,11 @@ export async function runReconCommand(
   const shutdownHandler = (signal: NodeJS.Signals) => {
     if (!runFinalized) {
       runFinalized = true;
+      try {
+        usageMeter?.flush();
+      } catch {
+        // metering must never block shutdown
+      }
       try {
         completeRun(outDir, runMeta.runId, "error", {});
       } catch {
@@ -106,6 +116,12 @@ export async function runReconCommand(
       credentials,
       verbose: opts.verbose,
     });
+
+    // Token-usage metering — recon's survey + precondition gates are real LLM
+    // calls, so they're recorded too. Checkpoints to state/usage.json, flushed
+    // on shutdown + finalize. Seeded from any prior ledger in this dir.
+    usageMeter = createUsageMeter(outDir, detector.name);
+    detector.attachUsageMeter?.(usageMeter);
 
     // Mirror `scan`: auto-install the official agent library on first use.
     if (!existsSync(getOfficialAgentsDir(env))) {
@@ -219,6 +235,7 @@ export async function runReconCommand(
     }
 
     completeRun(outDir, runMeta.runId, "done", {});
+    usageMeter?.flush();
     runFinalized = true;
     process.off("SIGINT", shutdownHandler);
     process.off("SIGTERM", shutdownHandler);
@@ -231,6 +248,11 @@ export async function runReconCommand(
   } catch (err) {
     if (!runFinalized) {
       runFinalized = true;
+      try {
+        usageMeter?.flush();
+      } catch {
+        // metering must never mask the original error
+      }
       try {
         completeRun(outDir, runMeta.runId, "error", {});
       } catch {

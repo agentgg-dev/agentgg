@@ -46,6 +46,12 @@ function buildDetector(config: UserConfig, options: ResolveOptions): Detector {
     validateFindingByScope: (args) => fileDetector.validateFindingByScope(args),
     scoreFinding: (args) => fileDetector.scoreFinding(args),
     dedupeFindings: (args) => fileDetector.dedupeFindings(args),
+    // Fan the meter out to both inner detectors so usage from the tool path
+    // and the structured-output path lands in one shared ledger.
+    attachUsageMeter: (meter) => {
+      agentDetector.attachUsageMeter(meter);
+      fileDetector.attachUsageMeter(meter);
+    },
   };
 }
 

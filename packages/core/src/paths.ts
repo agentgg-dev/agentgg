@@ -125,6 +125,11 @@ export function getPlanPath(outputDir: string): string {
   return join(getStateDir(outputDir), "plan.json");
 }
 
+/** `<outputDir>/state/usage.json` — `ScanUsage` token ledger (Option A billing). */
+export function getUsagePath(outputDir: string): string {
+  return join(getStateDir(outputDir), "usage.json");
+}
+
 /** `<outputDir>/state/files/` — mirrors the scan root, one `.json` per file. */
 export function getStateFilesDir(outputDir: string): string {
   return join(getStateDir(outputDir), "files");

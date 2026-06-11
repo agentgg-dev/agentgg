@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { extname } from "node:path";
 import type { Agent, CvssScore, Finding } from "@agentgg/core";
 import { z } from "zod";
+import type { UsageMeter } from "./usage-meter.js";
 
 /**
  * Subset of `Finding` the LLM is asked to produce. id/agentSlug/
@@ -226,6 +227,15 @@ export interface Detector {
   dedupeFindings(
     args: { filePath: string; findings: Finding[]; fileContent?: string } & AbortableArgs,
   ): Promise<DedupCluster[]>;
+
+  /**
+   * Attach a token-usage meter so the detector records `usage` from every LLM
+   * response it makes — for observability (see `state/usage.json`), not billing.
+   * Optional on the interface so a backend can opt out, but every shipped
+   * detector (Vercel / Claude Agent SDK / multi-provider / the Ollama composite)
+   * implements it. Callers invoke it as `detector.attachUsageMeter?.(meter)`.
+   */
+  attachUsageMeter?(meter: UsageMeter): void;
 }
 
 /**

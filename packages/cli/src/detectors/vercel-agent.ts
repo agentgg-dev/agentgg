@@ -20,6 +20,7 @@ import {
   type RunAgentArgs,
 } from "../detect.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
+import type { CallUsage, UsageMeter } from "../usage-meter.js";
 import {
   asValidationField,
   buildScopeValidatePrompt,
@@ -205,6 +206,7 @@ export class VercelAgentDetector implements Detector {
   private readonly effort?: Effort;
   private readonly thinking?: Thinking;
   private readonly verbose: boolean;
+  private meter?: UsageMeter;
 
   constructor(name: string, model: LanguageModelV1, opts: VercelAgentDetectorOpts = {}) {
     this.name = name;
@@ -214,6 +216,22 @@ export class VercelAgentDetector implements Detector {
     this.effort = opts.effort;
     this.thinking = opts.thinking;
     this.verbose = opts.verbose ?? false;
+  }
+
+  attachUsageMeter(meter: UsageMeter): void {
+    this.meter = meter;
+  }
+
+  /**
+   * Run one LLM call through the TPM-retry wrapper, then record its token
+   * usage into the attached meter (a no-op when no meter is attached). Every
+   * `generateObject` / `generateText` call funnels through here so usage
+   * capture lives in exactly one place.
+   */
+  private async metered<T>(run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    const result = await withTpmRetry(run, signal);
+    this.meter?.record(extractCallUsage(result), this.model.modelId);
+    return result;
   }
 
   async recon(args: ReconArgs & { signal?: AbortSignal }): Promise<ReconResult> {
@@ -226,7 +244,7 @@ export class VercelAgentDetector implements Detector {
     });
     const prompt = `${basePrompt}\n\n${reconJsonInstruction()}`;
     try {
-      const { text } = await withTpmRetry(
+      const { text } = await this.metered(
         () =>
           generateText({
             model: this.model,
@@ -254,7 +272,7 @@ export class VercelAgentDetector implements Detector {
     const base = buildAgentPrompt(args);
     const prompt = `${base}\n\n${jsonOutputInstruction(false)}`;
     try {
-      const { text } = await withTpmRetry(
+      const { text } = await this.metered(
         () =>
           generateText({
             model: this.model,
@@ -284,7 +302,7 @@ export class VercelAgentDetector implements Detector {
     args: PreconditionCheckArgs & { signal?: AbortSignal },
   ): Promise<PreconditionCheck> {
     try {
-      const { object } = await withTpmRetry(
+      const { object } = await this.metered(
         () =>
           generateObject({
             model: this.model,
@@ -310,7 +328,7 @@ export class VercelAgentDetector implements Detector {
     signal?: AbortSignal;
   }) {
     try {
-      const { object } = await withTpmRetry(
+      const { object } = await this.metered(
         () =>
           generateObject({
             model: this.model,
@@ -331,7 +349,7 @@ export class VercelAgentDetector implements Detector {
 
   async validateFindingByScope(args: { finding: Finding; scope: string; signal?: AbortSignal }) {
     try {
-      const { object } = await withTpmRetry(
+      const { object } = await this.metered(
         () =>
           generateObject({
             model: this.model,
@@ -356,7 +374,7 @@ export class VercelAgentDetector implements Detector {
     signal?: AbortSignal;
   }): Promise<CvssScore> {
     try {
-      const { object } = await withTpmRetry(
+      const { object } = await this.metered(
         () =>
           generateObject({
             model: this.model,
@@ -382,7 +400,7 @@ export class VercelAgentDetector implements Detector {
     signal?: AbortSignal;
   }): Promise<LlmDedup["clusters"]> {
     try {
-      const { object } = await withTpmRetry(
+      const { object } = await this.metered(
         () =>
           generateObject({
             model: this.model,
@@ -414,14 +432,15 @@ export class VercelAgentDetector implements Detector {
       return DetectionResult.parse(extractJSON(text));
     } catch (extractErr) {
       if (!this.structuredModel) throw extractErr;
-      const { object } = await generateObject({
+      const reformat = await generateObject({
         model: this.structuredModel,
         schema: DetectionResult,
         mode: "json",
         prompt: `The following is a completed security analysis. Extract all confirmed findings into structured JSON.\n\n${text}\n\n${jsonOutputInstruction(multiAgent)}`,
         abortSignal: signal,
       });
-      return object;
+      this.meter?.record(extractCallUsage(reformat), this.structuredModel.modelId);
+      return reformat.object;
     }
   }
 
@@ -432,14 +451,15 @@ export class VercelAgentDetector implements Detector {
       return ReconResult.parse(extractJSON(text));
     } catch (extractErr) {
       if (!this.structuredModel) throw extractErr;
-      const { object } = await generateObject({
+      const reformat = await generateObject({
         model: this.structuredModel,
         schema: ReconResult,
         mode: "json",
         prompt: `The following is a completed recon survey of a codebase. Extract it into structured JSON.\n\n${text}\n\n${reconJsonInstruction()}`,
         abortSignal: signal,
       });
-      return object;
+      this.meter?.record(extractCallUsage(reformat), this.structuredModel.modelId);
+      return reformat.object;
     }
   }
 
@@ -737,4 +757,33 @@ async function debugLog(label: string, err: unknown): Promise<void> {
   console.error(`---- ${label} error ----`);
   console.error(util.inspect(err, { depth: 5, colors: false }));
   console.error("------------------------");
+}
+
+/**
+ * Pull normalized token counts out of a Vercel AI SDK result. Reads the
+ * documented `usage` shape ({ promptTokens, completionTokens })
+ * and the provider metadata's cache figure when present — OpenAI-compatible
+ * surfaces, including Vertex MaaS (GLM-5), report it under
+ * `providerMetadata.openai.cachedPromptTokens`. Defensive by design: any
+ * missing field degrades to 0 rather than throwing, so a provider that omits
+ * usage never breaks a scan.
+ */
+export function extractCallUsage(result: unknown): CallUsage {
+  const r = (result ?? {}) as {
+    usage?: { promptTokens?: unknown; completionTokens?: unknown };
+    providerMetadata?: unknown;
+    experimental_providerMetadata?: unknown;
+  };
+  const inputTokens = numberish(r.usage?.promptTokens);
+  const outputTokens = numberish(r.usage?.completionTokens);
+  const meta = (r.providerMetadata ?? r.experimental_providerMetadata) as
+    | { openai?: { cachedPromptTokens?: unknown } }
+    | undefined;
+  const cachedInputTokens = numberish(meta?.openai?.cachedPromptTokens);
+  return { inputTokens, outputTokens, cachedInputTokens };
+}
+
+/** A finite positive number, else 0. Token counts are never negative. */
+function numberish(v: unknown): number {
+  return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
 }
