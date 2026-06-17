@@ -185,13 +185,15 @@ function renderPrecondition(p: AgentSpec["precondition"]): string | null {
       lines.push(inner);
     }
   }
-  if (p.prompt && p.prompt.trim()) {
+  if (p.prompt?.trim()) {
     lines.push(`  prompt: ${quoteYamlScalar(p.prompt.trim())}`);
   }
   return lines.length > 1 ? lines.join("\n") : null;
 }
 
-function renderPreconditionRegex(r: NonNullable<AgentSpec["precondition"]>["regex"]): string | null {
+function renderPreconditionRegex(
+  r: NonNullable<AgentSpec["precondition"]>["regex"],
+): string | null {
   if (!r) return null;
   const out: string[] = [];
   if (r.extensions.length > 0) {

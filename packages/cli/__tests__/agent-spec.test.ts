@@ -5,7 +5,8 @@ import { type AgentSpec, renderAgentSpecMd } from "../src/agent-spec.js";
 const BASE_SPEC: AgentSpec = {
   slug: "tenant-leak-on-find",
   name: "Tenant Leak on Find",
-  description: "Controller returns a tenant-scoped record without first checking the request tenant.",
+  description:
+    "Controller returns a tenant-scoped record without first checking the request tenant.",
   noiseTier: "normal",
   references: ["CWE-639", "GHSA-xxxx-yyyy-zzzz"],
   precondition: {
@@ -106,7 +107,14 @@ describe("renderAgentSpecMd", () => {
       description: "Multiple\nlines are folded by the renderer.",
       noiseTier: "normal",
       references: [],
-      where: { extensions: ["go"], filePatterns: [], excludePatterns: [], preFilter: [], maxFilesPerBatch: 5, maxTurnsPerBatch: 30 },
+      where: {
+        extensions: ["go"],
+        filePatterns: [],
+        excludePatterns: [],
+        preFilter: [],
+        maxFilesPerBatch: 5,
+        maxTurnsPerBatch: 30,
+      },
       prompt: "Body.",
     };
     const md = renderAgentSpecMd(tricky);

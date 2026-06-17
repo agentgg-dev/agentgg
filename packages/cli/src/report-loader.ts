@@ -87,7 +87,9 @@ function expandListFile(absListPath: string, seen: Set<string>): LoadedReport[] 
     try {
       s = statSync(lineAbs);
     } catch {
-      throw new Error(`--report: list file ${basename(absListPath)} references missing path: ${line}`);
+      throw new Error(
+        `--report: list file ${basename(absListPath)} references missing path: ${line}`,
+      );
     }
     if (s.isDirectory()) {
       out.push(...loadFromDir(lineAbs));

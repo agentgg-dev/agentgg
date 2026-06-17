@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { extname } from "node:path";
 import type { Agent, CvssScore, Finding } from "@agentgg/core";
 import { z } from "zod";
-import { AgentSpec } from "./agent-spec.js";
+import type { AgentSpec } from "./agent-spec.js";
 import type { UsageMeter } from "./usage-meter.js";
 
 /**
@@ -417,7 +417,12 @@ ${includeBlock}Skip files larger than ${args.maxFileSizeKb}KB.`;
 export function buildCreateAgentPrompt(
   args: Pick<
     CreateAgentArgs,
-    "instructions" | "reportName" | "reportContent" | "excludePatterns" | "includePatterns" | "maxFileSizeKb"
+    | "instructions"
+    | "reportName"
+    | "reportContent"
+    | "excludePatterns"
+    | "includePatterns"
+    | "maxFileSizeKb"
   >,
 ): string {
   const excludeLines =

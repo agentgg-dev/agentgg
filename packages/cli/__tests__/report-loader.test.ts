@@ -80,8 +80,6 @@ describe("loadReports", () => {
   });
 
   it("rejects a missing path", () => {
-    expect(() => loadReports(join(dir, "does-not-exist.md"))).toThrow(
-      /no such file or directory/,
-    );
+    expect(() => loadReports(join(dir, "does-not-exist.md"))).toThrow(/no such file or directory/);
   });
 });

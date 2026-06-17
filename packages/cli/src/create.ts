@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseAgentMarkdown } from "@agentgg/core";
-import { type AgentSpec, renderAgentSpecMd } from "./agent-spec.js";
+import { renderAgentSpecMd } from "./agent-spec.js";
 import { loadCreateInstructions } from "./create-agent.js";
 import type { Detector } from "./detect.js";
 import type { LoadedReport } from "./report-loader.js";
@@ -58,9 +58,7 @@ export async function runCreate(opts: CreateOptions): Promise<CreateOutcome[]> {
   // (and avoids fighting for the LLM rate limit).
   for (let i = 0; i < opts.reports.length; i++) {
     const report = opts.reports[i] as LoadedReport;
-    console.log(
-      `[${i + 1}/${opts.reports.length}] Distilling ${report.name} into an agent...`,
-    );
+    console.log(`[${i + 1}/${opts.reports.length}] Distilling ${report.name} into an agent...`);
     try {
       const spec = await opts.detector.createAgent({
         rootDir: opts.rootDir,
