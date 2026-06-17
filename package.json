@@ -1,6 +1,6 @@
 {
   "name": "agentgg-monorepo",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "private": true,
   "type": "module",
   "description": "Agentic SAST scanner — white box, CI-ready, multi-provider. Reasoning where regex falls short.",
