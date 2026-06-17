@@ -6,7 +6,7 @@
 
 **Agentic SAST. White box. CI ready.**
 
-`agentgg` is an agentic SAST scanner. Its agents reason about your code — they follow imports, check the call graph, and confirm findings before flagging, instead of pattern-matching the way traditional SAST does. The catalog auto-downloads on first scan from [agentgg-dev/agentgg-agents](https://github.com/agentgg-dev/agentgg-agents). Run on your full repo or on a git diff for PR reviews. There's **one kind of agent**: a tool-enabled investigation (Read/Glob/Grep) that declares **where** to look (file types, paths, content regex) and an optional **precondition** that decides whether it's even worth running on this repo. Every scan opens with a fast **recon** pass that briefs the agents on what the project is. Interrupted scans resume on re-run: completed agents are skipped, only new or changed work hits the LLM again.
+`agentgg` is an agentic SAST scanner. Its agents reason about your code — they follow imports, check the call graph, and confirm findings before flagging, instead of pattern-matching the way traditional SAST does. The catalog auto-downloads on first scan from [agentgg-dev/agentgg-agents](https://github.com/agentgg-dev/agentgg-agents). Run on your full repo or on a git diff for PR reviews. There's **one kind of agent**: a tool-enabled investigation (Read/Glob/Grep) that declares **where** to look (file types, paths, content regex) and an optional **precondition** that decides whether it's even worth running on this repo. Every scan opens with a fast **recon** pass that briefs the agents on what the project is. Interrupted scans resume on re-run: completed agents are skipped, only new or changed work hits the LLM again. Past incidents become new detectors via `agentgg create`, which distills a security report into a reusable repo-shaped agent.
 
 **[agentgg.dev](https://agentgg.dev)** · [Agents catalog](https://github.com/agentgg-dev/agentgg-agents) · [Report a bug](https://github.com/agentgg-dev/agentgg/issues/new/choose) · [Report a security issue](https://github.com/agentgg-dev/agentgg/security)
 
@@ -22,6 +22,7 @@
 - [Quick start](#quick-start)
 - [How a scan runs](#how-a-scan-runs)
 - [Agent templates](#agent-templates)
+- [Authoring agents from past reports](#authoring-agents-from-past-reports)
 - [Providers](#providers)
 - [Examples](#examples)
 - [GitHub Actions](#github-actions)
@@ -134,6 +135,27 @@ You are reviewing source for SQL injection. ...   # 3. the instructions
 **Instructions** are the prompt body. Every agent is tool-enabled (Read/Glob/Grep), so although it's seeded with specific files, it can follow imports and chase callers into other files to confirm a finding.
 
 Templates live in the **official catalog** (`~/.agentgg/agentgg-agents/`; refresh with `agentgg agents update`), are **user-installed** (`agentgg agents add ./my-agent.md`), or passed **per-scan** via `-t` — a slug, a `.md` file, a directory of `.md` files, or a `.txt` list.
+
+## Authoring agents from past reports
+
+`agentgg create` turns a past security report (an internal post-mortem, a GHSA, a CVE write-up) into a reusable agent shaped for **this** codebase. A tool-enabled LLM session reads the report, explores the repo to confirm how the issue manifested in code, and emits an agent that catches the same anti-pattern if it recurs. The goal is not to re-find the exact past bug — that's already fixed — but to catch a future re-introduction by a different author in a different file.
+
+```bash
+agentgg create -c ./src -r ./incidents/2024-q3-sqli.md -o ./generated-agents
+```
+
+`--report` accepts the same shapes `-t` accepts: a single `.md` / `.txt` file, a directory of them, or a `.txt` list of paths. Each report becomes one agent file, named `<slug>-<hash>.md` (the hash is derived from the code root + report path + report contents, so reruns are idempotent and never collide across reports).
+
+```bash
+# Distill a directory of incident reports in one pass
+agentgg create -c ./src -r ./incidents/ -o ./generated-agents
+
+# Use a one-off model and provider without saving credentials
+agentgg create -c ./src -r ./incidents/2024-q3-sqli.md -o ./out \
+  --provider anthropic --api-key $ANTHROPIC_API_KEY
+```
+
+The generated agents drop into `--output` only — they are not auto-installed. Inspect them, then install with `agentgg agents add ./generated-agents` and they show up in `agentgg agents list` and in every subsequent scan.
 
 ## Providers
 
@@ -478,6 +500,7 @@ Short reasoning citing the unsafe code element.
 | `agentgg revalidate [output-dir]` | Re-run the validation phase against findings already on disk. Skips detection entirely. Use to validate with a different model, scope, or after editing the validator prompt. `--no-summary` defers the report render. |
 | `agentgg score [output-dir]` | Standalone CVSS 3.1 scoring pass over persisted findings. The agent picks the 8 base metrics; the score and severity bucket are computed deterministically. `--no-summary` defers the report render. |
 | `agentgg dedup [output-dir]` | De-duplicate findings on disk: group same-root-cause findings per source file across agents, fold them under one primary, and mark the rest with a `dedup` field so the report collapses them. Pass `--delete-duplicates` to physically remove marked duplicates; `--no-summary` defers the report render. |
+| `agentgg create` | Distill a past security report (`.md`/`.txt`, a directory of them, or a `.txt` list) into a reusable agent `.md` shaped for the codebase the report came from. Standalone: no `state/` dir, no scan resume. Takes `-c <code-path>`, `-r <report-path>`, `-o <output-dir>`. Each report yields one `<slug>-<hash>.md`; install with `agentgg agents add`. |
 | `agentgg summary [output-dir]` | Render `summary.md` + `findings/*.md` from persisted findings. No LLM, no detection. Pairs with `scan/revalidate/score/dedup --no-summary` to render the report once, at the end. |
 | `agentgg view [output-dir]` | Boot the bundled Next.js viewer on a local port to browse findings in a web UI. |
 | `agentgg agents list` | List installed agents (official + user-installed). Pass `--json` for machine-readable. |

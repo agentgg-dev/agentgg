@@ -4,11 +4,14 @@ import type { CvssScore, Finding } from "@agentgg/core";
 import { generateObject, generateText, type LanguageModelV1, tool } from "ai";
 import { minimatch } from "minimatch";
 import { z } from "zod";
+import { AgentSpec } from "../agent-spec.js";
 import { buildDedupePrompt, LlmDedup } from "../deduper.js";
 import {
   buildAgentPrompt,
+  buildCreateAgentPrompt,
   buildPreconditionPrompt,
   buildReconPrompt,
+  type CreateAgentArgs,
   DetectionResult,
   type DetectionResult as DetectionResultType,
   type Detector,
@@ -268,6 +271,41 @@ export class VercelAgentDetector implements Detector {
     }
   }
 
+  async createAgent(args: CreateAgentArgs & { signal?: AbortSignal }): Promise<AgentSpec> {
+    const basePrompt = buildCreateAgentPrompt({
+      instructions: args.instructions,
+      reportName: args.reportName,
+      reportContent: args.reportContent,
+      excludePatterns: args.excludePatterns,
+      includePatterns: args.includePatterns,
+      maxFileSizeKb: args.maxFileSizeKb,
+    });
+    const prompt = `${basePrompt}\n\n${createAgentJsonInstruction()}`;
+    try {
+      const { text } = await this.metered(
+        () =>
+          generateText({
+            model: this.model,
+            prompt,
+            tools: buildTools(
+              resolve(args.rootDir),
+              args.maxFileSizeKb,
+              this.verbose,
+              args.excludePatterns,
+            ),
+            maxSteps: args.maxTurns + 1,
+            providerOptions: this.providerOptionsArg(),
+            abortSignal: args.signal,
+          }),
+        args.signal,
+      );
+      return await this.parseAgentSpec(text, args.signal);
+    } catch (err) {
+      debugLog("VercelAgentDetector.createAgent", err);
+      throw err;
+    }
+  }
+
   async runAgent(args: RunAgentArgs & { signal?: AbortSignal }): Promise<Finding[]> {
     const base = buildAgentPrompt(args);
     const prompt = `${base}\n\n${jsonOutputInstruction(false)}`;
@@ -437,6 +475,25 @@ export class VercelAgentDetector implements Detector {
         schema: DetectionResult,
         mode: "json",
         prompt: `The following is a completed security analysis. Extract all confirmed findings into structured JSON.\n\n${text}\n\n${jsonOutputInstruction(multiAgent)}`,
+        abortSignal: signal,
+      });
+      this.meter?.record(extractCallUsage(reformat), this.structuredModel.modelId);
+      return reformat.object;
+    }
+  }
+
+  /** Parse an AgentSpec from the tool-loop's final text, with a
+   *  structuredModel reformat fallback (Ollama best-effort). */
+  private async parseAgentSpec(text: string, signal?: AbortSignal): Promise<AgentSpec> {
+    try {
+      return AgentSpec.parse(extractJSON(text));
+    } catch (extractErr) {
+      if (!this.structuredModel) throw extractErr;
+      const reformat = await generateObject({
+        model: this.structuredModel,
+        schema: AgentSpec,
+        mode: "json",
+        prompt: `The following is a completed analysis distilling a past security incident into an agentgg agent spec. Extract it into the AgentSpec JSON shape.\n\n${text}\n\n${createAgentJsonInstruction()}`,
         abortSignal: signal,
       });
       this.meter?.record(extractCallUsage(reformat), this.structuredModel.modelId);
@@ -704,6 +761,16 @@ After your investigation, output ALL findings as a single JSON object matching E
 IMPORTANT: Every \`filePath\` must be a real file path you actually read or located with tools during this session. Do NOT copy the example path above — replace it with the actual path from your investigation. If no findings, output exactly: {"findings":[]}
 
 ${agentSlugNote}`;
+}
+
+function createAgentJsonInstruction(): string {
+  return `## Output format
+
+After your investigation, output the agent spec as a single JSON object matching EXACTLY this shape — no prose, no markdown fences, no trailing text:
+
+{"slug":"kebab-case-slug","name":"Short name","description":"One-line description of the anti-pattern.","noiseTier":"normal","references":["CWE-89"],"precondition":{"regex":{"extensions":["ts"],"files":[],"directories":[],"patterns":[]}},"where":{"extensions":["ts","tsx"],"filePatterns":[],"excludePatterns":["**/__tests__/**"],"preFilter":[{"regex":"\\\\.query\\\\s*\\\\(","label":"raw SQL call"}],"maxFilesPerBatch":5,"maxTurnsPerBatch":30},"prompt":"Markdown body of the agent's instructions."}
+
+Every regex MUST be a valid JavaScript RegExp. The slug MUST match ^[a-z0-9][a-z0-9-]*$. Omit precondition entirely if the agent should always run; include the where object (at minimum with extensions).`;
 }
 
 function reconJsonInstruction(): string {

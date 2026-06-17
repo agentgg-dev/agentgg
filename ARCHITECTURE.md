@@ -14,6 +14,17 @@ One-page reference for what's wired and how. User-facing docs are in [README.md]
 
 Each phase is also a standalone command over the same `--output` dir, sharing the artifacts above: **`agentgg recon`** (phases 1–2 only, no detection), **`agentgg revalidate`** (phase 4 validate), **`agentgg score`** (phase 4 score), **`agentgg summary`** (phase 5). `recon` writes `recon.json` + `plan.json` that a later `scan` reuses — the durable plan→run hand-off.
 
+## Create pipeline
+
+`agentgg create` ([`commands/create.ts`](packages/cli/src/commands/create.ts) → [`create.ts`](packages/cli/src/create.ts)) is a standalone, single-shot flow that takes a past security report and emits a new agent `.md` shaped for the codebase the report came from. No `state/` dir, no resume, no recon brief — just one tool-enabled LLM session per report.
+
+1. **Resolve reports** — [`report-loader.ts`](packages/cli/src/report-loader.ts) turns `--report` (a `.md`/`.txt` file, a directory of them, or a `.txt` list of paths) into a `LoadedReport[]`. A `.txt` is auto-detected as a list iff every non-blank, non-comment line resolves to an existing path.
+2. **Distill** — for each report, call `detector.createAgent` (see Detector contract). The built-in instructions live in [`src/agents/create.md`](packages/cli/src/agents/create.md), loaded by [`create-agent.ts`](packages/cli/src/create-agent.ts) the same way recon loads its prompt. The wrapper in [`detect.ts`](packages/cli/src/detect.ts) (`buildCreateAgentPrompt`) appends the report verbatim plus the scope rules. The model returns an `AgentSpec` (the LLM-authored subset of `Agent`: slug, name, description, noiseTier, references, precondition, where, prompt body), schema-constrained by Zod at the protocol layer.
+3. **Render + lint** — [`agent-spec.ts`](packages/cli/src/agent-spec.ts) renders the spec to the standard agent `.md` shape (YAML frontmatter + body), then round-trips it through `parseAgentMarkdown` from `@agentgg/core` to catch bad regex, malformed slug, or schema mismatch before write.
+4. **Write** — filename is `<slug>-<shortHash>.md` where the hash is `sha256(codeRoot|reportPath|reportContent).slice(0, 8)`. Reruns on identical inputs overwrite in place; different reports never collide.
+
+The generated agents land in `--output` only. Installing them (so `scan` picks them up) is an explicit follow-up: `agentgg agents add <output-dir>`.
+
 ## The unified agent
 
 There is one agent shape — no `mode`. Every agent declares a `precondition`, a `where`, and a prompt body (the instructions), and is always tool-enabled (Read/Glob/Grep). At runtime:
@@ -31,6 +42,7 @@ Backend-agnostic ([`detect.ts`](packages/cli/src/detect.ts)). One `Detector` is 
 - `runAgent` — tool-enabled investigation over a batch of seeded files → `Finding[]`.
 - `validateFinding` / `validateFindingByScope` — second-pass classifier.
 - `scoreFinding` — picks the 8 CVSS 3.1 base metrics.
+- `createAgent` — `agentgg create` only; tool-enabled session that reads a past security report and explores the repo → `AgentSpec`. Optional on the interface so a backend can opt out; every shipped detector implements it.
 
 ### Dispatch engines
 
@@ -121,5 +133,5 @@ maxTurnsPerBatch = opts.maxTurns         ?? agent.where.maxTurnsPerBatch (defaul
 ## Packages
 
 - [`packages/core/`](packages/core/) — types (`Agent`, `Precondition`, `Where`, `ReconReport`, `ScanPlan`, `Finding`, `FileRecord`, `AgentRun`, `UserConfig`, `CvssScore`), CVSS math, `fingerprint`, persistence helpers (`writeFileRecord` / `readAgentRun` / `writeReconReport` / `writeScanPlan` / …), agent loader, path resolution.
-- [`packages/cli/`](packages/cli/) — commander wiring, detectors, providers, recon, precondition, walker, validator, scoring, reporters, the built-in recon agent ([`src/agents/`](packages/cli/src/agents/)), viewer bootstrap.
+- [`packages/cli/`](packages/cli/) — commander wiring, detectors, providers, recon, precondition, walker, validator, scoring, reporters, the built-in `recon` and `create` agents ([`src/agents/`](packages/cli/src/agents/)), the `AgentSpec` schema + renderer ([`src/agent-spec.ts`](packages/cli/src/agent-spec.ts)) used by `agentgg create`, viewer bootstrap.
 - [`packages/viewer/`](packages/viewer/) — Next.js app served by `agentgg view` / `agentgg scan --serve`.

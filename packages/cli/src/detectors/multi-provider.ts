@@ -1,10 +1,13 @@
 import type { CvssScore, Finding } from "@agentgg/core";
 import { generateObject, type LanguageModelV1 } from "ai";
+import { AgentSpec } from "../agent-spec.js";
 import { buildDedupePrompt, LlmDedup } from "../deduper.js";
 import {
   buildAgentPrompt,
+  buildCreateAgentPrompt,
   buildPreconditionPrompt,
   buildReconPrompt,
+  type CreateAgentArgs,
   DetectionResult,
   type Detector,
   hydrateFinding,
@@ -144,6 +147,40 @@ export class MultiProviderDetector implements Detector {
         console.error("---- MultiProviderDetector recon error ----");
         console.error(util.inspect(err, { depth: 5, colors: false }));
         console.error("-------------------------------------------");
+      }
+      throw err;
+    }
+  }
+
+  async createAgent(args: CreateAgentArgs & { signal?: AbortSignal }): Promise<AgentSpec> {
+    // Best-effort: no tools, so the model can't browse the repo. It derives
+    // the spec from the report content alone. Tool-capable providers are
+    // routed to a detector that can actually read files.
+    try {
+      const { object } = await this.metered(() =>
+        generateObject({
+          model: this.model,
+          schema: AgentSpec,
+          mode: "json",
+          prompt: buildCreateAgentPrompt({
+            instructions: args.instructions,
+            reportName: args.reportName,
+            reportContent: args.reportContent,
+            excludePatterns: args.excludePatterns,
+            includePatterns: args.includePatterns,
+            maxFileSizeKb: args.maxFileSizeKb,
+          }),
+          providerOptions: this.providerOptionsArg(),
+          abortSignal: args.signal,
+        }),
+      );
+      return object;
+    } catch (err) {
+      if (process.env.AGENTGG_DEBUG) {
+        const util = await import("node:util");
+        console.error("---- MultiProviderDetector createAgent error ----");
+        console.error(util.inspect(err, { depth: 5, colors: false }));
+        console.error("-------------------------------------------------");
       }
       throw err;
     }

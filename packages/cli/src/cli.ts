@@ -4,6 +4,7 @@
 import { Command } from "commander";
 import { registerAgentsCommand } from "./commands/agents.js";
 import { registerConfigCommand } from "./commands/config.js";
+import { registerCreateCommand } from "./commands/create.js";
 import { registerDedupCommand } from "./commands/dedup.js";
 import { registerInitCommand } from "./commands/init.js";
 import { registerReconCommand } from "./commands/recon.js";
@@ -27,6 +28,7 @@ program
 registerInitCommand(program);
 registerReconCommand(program);
 registerScanCommand(program);
+registerCreateCommand(program);
 registerStatusCommand(program);
 registerRevalidateCommand(program);
 registerScoreCommand(program);

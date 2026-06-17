@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { extname } from "node:path";
 import type { Agent, CvssScore, Finding } from "@agentgg/core";
 import { z } from "zod";
+import { AgentSpec } from "./agent-spec.js";
 import type { UsageMeter } from "./usage-meter.js";
 
 /**
@@ -229,6 +230,19 @@ export interface Detector {
   ): Promise<DedupCluster[]>;
 
   /**
+   * `agentgg create` author pass. Tool-enabled session (Read/Glob/Grep)
+   * that reads a past security report + explores the codebase it came
+   * from, then emits an `AgentSpec` (frontmatter + prompt body) that a
+   * future `agentgg scan` can run to catch the same anti-pattern if it
+   * recurs. Same shape as `recon`: tool-enabled, schema-constrained
+   * output. Optional on the interface so a backend can opt out (back-ends
+   * without tool support, e.g. raw multi-provider, can implement a
+   * best-effort no-tools fallback). Callers invoke as
+   * `detector.createAgent?.(args)`.
+   */
+  createAgent?(args: CreateAgentArgs & AbortableArgs): Promise<AgentSpec>;
+
+  /**
    * Attach a token-usage meter so the detector records `usage` from every LLM
    * response it makes — for observability (see `state/usage.json`), not billing.
    * Optional on the interface so a backend can opt out, but every shipped
@@ -287,6 +301,30 @@ export interface PreconditionCheckArgs {
   conditionPrompt: string;
   /** Rendered recon brief, injected so the model can judge relevance. */
   recon?: string;
+}
+
+export interface CreateAgentArgs {
+  /** Absolute path to the codebase the past report belongs to (tool cwd). */
+  rootDir: string;
+  /**
+   * Instructions for the create agent (the body of the built-in
+   * `create.md` agent file). The engine wraps these with the past
+   * report and the AgentSpec output schema mechanics; the substance
+   * lives in the agent file.
+   */
+  instructions: string;
+  /** Filename of the past-incident report (for the model's context only). */
+  reportName: string;
+  /** Full text of the past-incident report. md/txt. */
+  reportContent: string;
+  /** Globs to skip while exploring the repo. */
+  excludePatterns: string[];
+  /** Globs to restrict exploration to. Empty = no restriction. */
+  includePatterns: string[];
+  /** Files larger than this should be skipped. */
+  maxFileSizeKb: number;
+  /** Cap on tool-use turns for the create session. */
+  maxTurns: number;
 }
 
 export interface ReconArgs {
@@ -366,6 +404,62 @@ Static fingerprint (a starting hint, may be incomplete): ${tags}
 Skip files matching any of these patterns:
 ${excludeLines}
 ${includeBlock}Skip files larger than ${args.maxFileSizeKb}KB.`;
+}
+
+/**
+ * Build the create-agent prompt. Wraps the create agent's instructions
+ * (from `src/agents/create.md`) with the past report and the scope rules
+ * the tool session operates under. The output-schema mechanics are
+ * enforced by the backend's structured-output layer, not in this string,
+ * so the same prompt works against both Claude (json_schema) and the
+ * Vercel SDK (json instruction + Zod parse).
+ */
+export function buildCreateAgentPrompt(
+  args: Pick<
+    CreateAgentArgs,
+    "instructions" | "reportName" | "reportContent" | "excludePatterns" | "includePatterns" | "maxFileSizeKb"
+  >,
+): string {
+  const excludeLines =
+    args.excludePatterns.length > 0
+      ? args.excludePatterns.map((p) => `  - ${p}`).join("\n")
+      : "  (none)";
+  const includeBlock =
+    args.includePatterns.length > 0
+      ? `\nOnly look inside files matching at least one of these patterns:\n${args.includePatterns
+          .map((p) => `  - ${p}`)
+          .join("\n")}\n`
+      : "";
+
+  return `${args.instructions}
+
+---
+
+## Past report under review: \`${args.reportName}\`
+
+This is the report you are distilling. Read it carefully, then use your
+tools to find where in the codebase the issue happened (or would have
+happened pre-fix), so the agent you produce is grounded in this repo's
+actual conventions.
+
+\`\`\`
+${args.reportContent}
+\`\`\`
+
+---
+
+You have these tools: Read, Glob, Grep. Your working directory is the
+repository root.
+
+## Scope
+Skip files matching any of these patterns:
+${excludeLines}
+${includeBlock}Skip files larger than ${args.maxFileSizeKb}KB.
+
+## Output
+
+Return exactly one \`AgentSpec\` JSON object. Every regex must compile
+as a JavaScript RegExp. The \`slug\` must match \`^[a-z0-9][a-z0-9-]*$\`.`;
 }
 
 /**

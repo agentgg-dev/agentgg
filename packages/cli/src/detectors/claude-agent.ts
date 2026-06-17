@@ -2,11 +2,14 @@ import type { CvssScore, Finding } from "@agentgg/core";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
+import { AgentSpec } from "../agent-spec.js";
 import { buildDedupePrompt, LlmDedup } from "../deduper.js";
 import {
   buildAgentPrompt,
+  buildCreateAgentPrompt,
   buildPreconditionPrompt,
   buildReconPrompt,
+  type CreateAgentArgs,
   DetectionResult,
   type Detector,
   hydrateFinding,
@@ -124,6 +127,27 @@ export class ClaudeAgentDetector implements Detector {
       maxTurns: args.maxTurns,
       cwd: args.rootDir,
       schema: ReconResult,
+      signal: args.signal,
+    });
+  }
+
+  async createAgent(args: CreateAgentArgs & { signal?: AbortSignal }): Promise<AgentSpec> {
+    const prompt = buildCreateAgentPrompt({
+      instructions: args.instructions,
+      reportName: args.reportName,
+      reportContent: args.reportContent,
+      excludePatterns: args.excludePatterns,
+      includePatterns: args.includePatterns,
+      maxFileSizeKb: args.maxFileSizeKb,
+    });
+    // Tool-enabled (Read/Glob/Grep) so the model can ground the spec in
+    // the actual repo, with SDK-enforced AgentSpec output shape.
+    return this.runStructured({
+      prompt,
+      tools: ["Read", "Glob", "Grep"],
+      maxTurns: args.maxTurns,
+      cwd: args.rootDir,
+      schema: AgentSpec,
       signal: args.signal,
     });
   }
