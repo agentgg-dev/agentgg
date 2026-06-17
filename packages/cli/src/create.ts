@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseAgentMarkdown } from "@agentgg/core";
 import { renderAgentSpecMd } from "./agent-spec.js";
@@ -88,6 +88,17 @@ export async function runCreate(opts: CreateOptions): Promise<CreateOutcome[]> {
       const hash = shortHash(opts.rootDir, report.path, report.content);
       const filename = `${spec.slug}-${hash}.md`;
       const outPath = join(opts.outputDir, filename);
+
+      // The hash (not the model-chosen slug) is the stable identity of a
+      // distillation. Drop any prior agent sharing this hash suffix so a
+      // re-run on identical inputs replaces it instead of forking a second
+      // file when the slug drifts.
+      for (const name of readdirSync(opts.outputDir)) {
+        if (name !== filename && name.endsWith(`-${hash}.md`)) {
+          unlinkSync(join(opts.outputDir, name));
+        }
+      }
+
       writeFileSync(outPath, md, "utf8");
 
       console.log(`  -> ${outPath}`);
@@ -114,7 +125,9 @@ export async function runCreate(opts: CreateOptions): Promise<CreateOutcome[]> {
 /**
  * Stable 8-char hash for the agent filename suffix. Derived from
  * (code root, report path, report content) so:
- *   - Same inputs → same hash → idempotent re-runs overwrite in place.
+ *   - Same inputs → same hash → idempotent re-runs replace the prior agent
+ *     (any file sharing this suffix is removed first), even if the model
+ *     picks a different slug.
  *   - Different reports → different hash → no collisions in the output dir.
  *   - Editing the report content → new hash → fresh file (the model's
  *     read of the report changed, so the previous agent is stale).

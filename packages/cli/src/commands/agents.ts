@@ -18,7 +18,10 @@ export function getCategory(agent: Agent, env: NodeJS.ProcessEnv = process.env):
   else if (fullPath.startsWith(customDir)) rel = relative(customDir, fullPath);
   if (rel === null) return "-";
   const parts = rel.split(sep).filter(Boolean);
-  return parts.length >= 2 ? parts[parts.length - 2] : "(root)";
+  if (parts.length >= 2) return parts[parts.length - 2];
+  // User-installed agents sit flat in the custom dir; bucket them under
+  // "custom" so they stand out in the summary instead of folding into "(root)".
+  return agent.source?.kind === "custom" ? "custom" : "(root)";
 }
 
 export function formatAgentsTable(
