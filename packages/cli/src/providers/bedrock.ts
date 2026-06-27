@@ -1,5 +1,10 @@
 import type { UserConfig } from "@agentgg/core";
 import { createAmazonBedrock } from "@ai-sdk/amazon-bedrock";
+import {
+  BedrockClient,
+  ListFoundationModelsCommand,
+  ListInferenceProfilesCommand,
+} from "@aws-sdk/client-bedrock";
 import { fromNodeProviderChain } from "@aws-sdk/credential-providers";
 import { confirm, input, password } from "@inquirer/prompts";
 import type { Detector } from "../detect.js";
@@ -147,6 +152,74 @@ function maskValue(s: string): string {
   return `${s.slice(0, 10)}…${"*".repeat(4)}`;
 }
 
+// Bedrock-hosted families the Vercel detector can drive with tool-calling
+// + structured output (see buildDetector). Amazon's only tool-capable
+// family is Nova, matched by model-id prefix rather than provider name.
+const TOOL_CAPABLE = /^(anthropic|meta|cohere|mistral)\./i;
+
+function isToolCapableModelId(id: string): boolean {
+  // Strip any inference-profile region prefix (us./eu./apac.) before
+  // checking the provider segment.
+  const family = id.replace(/^(us|eu|apac)\./, "");
+  return TOOL_CAPABLE.test(family) || family.startsWith("amazon.nova");
+}
+
+/**
+ * Live model list from the Bedrock control plane. Merges system-defined
+ * cross-region inference profiles (the us./eu./apac. IDs that newer
+ * Claude models REQUIRE) with on-demand foundation models, filtered to
+ * the tool-capable families the detector can drive. Region-scoped and
+ * auth'd via the same AWS chain as scans. Returns [] on any failure so
+ * the picker falls back to curatedModels.
+ */
+async function listModels(args: {
+  config: Partial<UserConfig>;
+  env: NodeJS.ProcessEnv;
+}): Promise<string[]> {
+  const region = args.config.bedrock?.region ?? args.env.AWS_REGION ?? args.env.AWS_DEFAULT_REGION;
+  if (!region) return [];
+
+  const accessKeyId = args.config.bedrock?.accessKeyId;
+  const secretAccessKey = args.config.bedrock?.secretAccessKey;
+  const sessionToken = args.config.bedrock?.sessionToken;
+  const credentials =
+    accessKeyId && secretAccessKey
+      ? { accessKeyId, secretAccessKey, ...(sessionToken ? { sessionToken } : {}) }
+      : fromNodeProviderChain();
+
+  const client = new BedrockClient({ region, credentials });
+  try {
+    // Foundation models: single non-paginated call.
+    const foundation = await client.send(
+      new ListFoundationModelsCommand({ byOutputModality: "TEXT", byInferenceType: "ON_DEMAND" }),
+    );
+    const onDemandIds = (foundation.modelSummaries ?? [])
+      .filter((m) => m.modelLifecycle?.status === "ACTIVE")
+      .map((m) => m.modelId)
+      .filter((id): id is string => typeof id === "string" && isToolCapableModelId(id));
+
+    // Inference profiles: paginated; drain up to a bounded number of pages.
+    const profileIds: string[] = [];
+    let nextToken: string | undefined;
+    for (let page = 0; page < 10; page++) {
+      const res = await client.send(
+        new ListInferenceProfilesCommand({ typeEquals: "SYSTEM_DEFINED", nextToken }),
+      );
+      for (const p of res.inferenceProfileSummaries ?? []) {
+        const id = p.inferenceProfileId;
+        if (p.status === "ACTIVE" && id && isToolCapableModelId(id)) profileIds.push(id);
+      }
+      nextToken = res.nextToken;
+      if (!nextToken) break;
+    }
+
+    // Profiles first — newer Claude is invocable only through them.
+    return [...new Set([...profileIds, ...onDemandIds])];
+  } catch {
+    return [];
+  }
+}
+
 export const bedrockModule: ProviderModule = {
   name: "bedrock",
   label: "AWS Bedrock (Claude / Llama / Titan, billed via AWS)",
@@ -172,6 +245,7 @@ export const bedrockModule: ProviderModule = {
     "amazon.nova-pro-v1:0",
     "amazon.nova-lite-v1:0",
   ],
+  listModels,
   buildDetector,
   collectCredentials,
   formatForList(cfg: UserConfig): string | null {
