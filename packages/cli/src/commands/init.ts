@@ -133,21 +133,17 @@ function isHuntCapable(model: string): boolean {
 /** Pick a model interactively. Uses the module's listModels() when available, falls back to curatedModels. */
 async function pickModel(
   provider: Provider,
-  inputs: InitInputs,
+  config: Partial<UserConfig>,
   env: NodeJS.ProcessEnv,
 ): Promise<string> {
   const mod = getProviderModule(provider);
   const defaultModel = mod.defaultModel;
 
-  // Provider exposes a live model list (Ollama): use it with a
-  // hunt-capability annotation specific to Ollama.
+  // Provider exposes a live model list (Anthropic, OpenAI, Ollama): query
+  // it so the picker always reflects currently-available models. `config`
+  // already carries the collected credentials (api key / base url).
   if (mod.listModels) {
-    // Build a partial UserConfig from the credentials we've collected so
-    // far so listModels can use the right base URL etc.
-    const partial: Partial<UserConfig> = inputs.baseUrl
-      ? { ollama: { baseUrl: inputs.baseUrl, model: defaultModel } }
-      : {};
-    const installed = await mod.listModels({ config: partial, env });
+    const installed = await mod.listModels({ config, env });
     if (installed.length === 0) {
       return input({ message: "Default model:", default: defaultModel });
     }
@@ -174,7 +170,8 @@ async function pickModel(
       }
       return selected;
     }
-    // Non-Ollama provider with listModels: present a plain choice list.
+    // Non-Ollama provider with a live list (Anthropic, OpenAI): plain
+    // choice list, newest-first as the endpoint returned them.
     const choices = [
       ...installed.map((m) => ({ name: m, value: m })),
       { name: "Other (enter manually)", value: "__custom__" },
@@ -199,6 +196,12 @@ async function pickModel(
     return input({ message: "Model name:", default: defaultModel });
   }
   return selected;
+}
+
+/** Write the chosen model into the active provider's config block. */
+function setModelOnConfig(config: UserConfig, provider: Provider, model: string): void {
+  const block = (config as unknown as Record<string, { model?: string } | undefined>)[provider];
+  if (block) block.model = model;
 }
 
 export interface InitOpts {
@@ -286,16 +289,26 @@ export async function runInit(
     model: opts.model,
   };
 
-  if (!opts.model && !nonInteractive) {
-    inputs.model = await pickModel(provider, inputs, env);
-  }
-
   const mod = getProviderModule(provider);
-  const fresh = await mod.collectCredentials({
-    inputs,
-    env,
-    interactive: !nonInteractive,
-  });
+  const willPick = !opts.model && !nonInteractive;
+
+  let fresh: UserConfig;
+  if (willPick && mod.listModels) {
+    // Live-list providers (Anthropic, OpenAI, Ollama) need credentials
+    // before we can query their /models endpoint — collect first, then
+    // pick from the live list. listModels falls back to curatedModels
+    // when the query fails or returns nothing.
+    fresh = await mod.collectCredentials({ inputs, env, interactive: true });
+    setModelOnConfig(fresh, provider, await pickModel(provider, fresh, env));
+  } else {
+    // Default order: pick the model first so providers that derive other
+    // fields from it (Vertex infers its region from the model) see the
+    // choice during credential collection.
+    if (willPick) {
+      inputs.model = await pickModel(provider, {}, env);
+    }
+    fresh = await mod.collectCredentials({ inputs, env, interactive: !nonInteractive });
+  }
   const merged = mergeUserConfig(fresh, existing);
   const path = saveUserConfig(merged, env);
 

@@ -97,6 +97,43 @@ function maskValue(s: string): string {
   return `${s.slice(0, 10)}…${"*".repeat(4)}`;
 }
 
+/**
+ * Live model list from the Anthropic Models API (`GET /v1/models`,
+ * newest-first). Lets `agentgg init` surface models released after this
+ * build without us hand-editing `curatedModels`. Returns [] on any
+ * failure (offline, bad key, OAuth not accepted) so the picker falls
+ * back to the curated list.
+ */
+async function listModels(args: {
+  config: Partial<UserConfig>;
+  env: NodeJS.ProcessEnv;
+}): Promise<string[]> {
+  const apiKey = args.config.anthropic?.apiKey ?? args.env.ANTHROPIC_API_KEY?.trim();
+  const oauthToken = args.config.anthropic?.oauthToken ?? args.env.CLAUDE_CODE_OAUTH_TOKEN?.trim();
+  if (!apiKey && !oauthToken) return [];
+
+  const headers: Record<string, string> = { "anthropic-version": "2023-06-01" };
+  if (oauthToken) {
+    // OAuth tokens authenticate via the Authorization header + the oauth
+    // beta flag, not x-api-key. A one-shot list call won't hit the
+    // direct-API rate limits the scan path routes around.
+    headers.Authorization = `Bearer ${oauthToken}`;
+    headers["anthropic-beta"] = "oauth-2025-04-20";
+  } else if (apiKey) {
+    headers["x-api-key"] = apiKey;
+  }
+
+  try {
+    const res = await fetch("https://api.anthropic.com/v1/models?limit=100", { headers });
+    if (!res.ok) return [];
+    const body = (await res.json()) as { data?: Array<{ id?: string }> };
+    // API returns newest-first; preserve that order for the picker.
+    return (body.data ?? []).map((m) => m.id).filter((id): id is string => Boolean(id));
+  } catch {
+    return [];
+  }
+}
+
 export const anthropicModule: ProviderModule = {
   name: "anthropic",
   label: "Claude (Anthropic — API key or OAuth)",
@@ -111,6 +148,7 @@ export const anthropicModule: ProviderModule = {
     "claude-sonnet-4-5",
     "claude-haiku-4-5-20251001",
   ],
+  listModels,
   buildDetector,
   collectCredentials,
   formatForList(cfg: UserConfig): string | null {

@@ -60,6 +60,49 @@ function maskValue(s: string): string {
   return `${s.slice(0, 10)}…${"*".repeat(4)}`;
 }
 
+/**
+ * Keep text chat families agentgg's tool-loop detector can drive; drop
+ * the audio/realtime/image/embedding/etc. variants that share the same
+ * prefixes. Prefix/suffix-based so it survives new model releases
+ * without edits.
+ */
+function isChatModel(id: string): boolean {
+  if (!/^(gpt-|o1|o3|o4|chatgpt-)/.test(id)) return false;
+  return !/(audio|realtime|transcribe|search|tts|whisper|image|moderation|embedding|dall-e)/.test(
+    id,
+  );
+}
+
+/**
+ * Live chat-model list from the OpenAI Models API (`GET /v1/models`).
+ * The endpoint returns every model the key can access (embeddings, TTS,
+ * image, etc.), so we keep only text chat families and sort newest-first.
+ * Returns [] on failure so the picker falls back to `curatedModels`.
+ */
+async function listModels(args: {
+  config: Partial<UserConfig>;
+  env: NodeJS.ProcessEnv;
+}): Promise<string[]> {
+  const apiKey = args.config.openai?.apiKey ?? args.env.OPENAI_API_KEY?.trim();
+  if (!apiKey) return [];
+  try {
+    const res = await fetch("https://api.openai.com/v1/models", {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    if (!res.ok) return [];
+    const body = (await res.json()) as { data?: Array<{ id?: string; created?: number }> };
+    return (body.data ?? [])
+      .filter(
+        (m): m is { id: string; created?: number } =>
+          typeof m?.id === "string" && isChatModel(m.id),
+      )
+      .sort((a, b) => (b.created ?? 0) - (a.created ?? 0))
+      .map((m) => m.id);
+  } catch {
+    return [];
+  }
+}
+
 export const openaiModule: ProviderModule = {
   name: "openai",
   label: "OpenAI / Codex",
@@ -67,6 +110,7 @@ export const openaiModule: ProviderModule = {
   defaultModel: DEFAULT_MODEL,
   acceptedFlags: ["api-key"],
   curatedModels: ["gpt-5", "gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "o1", "o3"],
+  listModels,
   buildDetector,
   collectCredentials,
   formatForList(cfg: UserConfig): string | null {
