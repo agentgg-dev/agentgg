@@ -9,7 +9,12 @@
  * Vercel-fixture tests below are the regression guard.
  */
 import { describe, expect, it } from "vitest";
-import { isRateLimitError, parseRetryAfterMs } from "../src/detectors/vercel-agent.js";
+import {
+  isContextLengthError,
+  isRateLimitError,
+  isTransientUpstreamError,
+  parseRetryAfterMs,
+} from "../src/detectors/vercel-agent.js";
 
 describe("isRateLimitError", () => {
   describe("matches known rate-limit errors", () => {
@@ -46,6 +51,74 @@ describe("isRateLimitError", () => {
       ["stumped on parsing input"],
     ])("does not match %s", (msg) => {
       expect(isRateLimitError(msg)).toBe(false);
+    });
+  });
+});
+
+describe("isTransientUpstreamError", () => {
+  describe("matches retryable upstream/transport flakes", () => {
+    it.each([
+      // Vertex MaaS gateway: HTTP 200 with a plain-text timeout body, which the
+      // OpenAI-compatible parser rejects as "Invalid JSON response".
+      ["AI_APICallError: Invalid JSON response | upstream request timeout"],
+      ["Invalid JSON response"],
+      ["upstream request timeout"],
+      // Dropped / slow connections.
+      ["Failed after 3 attempts. Last error: Cannot connect to API: Headers Timeout Error"],
+      ["Cannot connect to API"],
+      ["fetch failed"],
+      ["socket hang up"],
+      ["read ECONNRESET"],
+      ["connect ETIMEDOUT 10.0.0.1:443"],
+      ["terminated"],
+      // 5xx gateway errors.
+      ["503 Service Unavailable"],
+      ["502 Bad Gateway"],
+      ["504 Gateway Timeout"],
+    ])("matches %s", (msg) => {
+      expect(isTransientUpstreamError(msg)).toBe(true);
+    });
+  });
+
+  describe("does NOT match deterministic or unrelated errors", () => {
+    it.each([
+      // Context overflow is a 400 — deterministic, must NOT be retried here.
+      ["The input (207058 tokens) is longer than the model's context length (202752 tokens)."],
+      ["Bad Request"],
+      ["Authentication failed: invalid API key"],
+      ["Model not found"],
+      // A standalone 404/400 must not trip the 502/503/504 matcher.
+      ["HTTP 404 Not Found"],
+      ["HTTP 400 invalid argument"],
+    ])("does not match %s", (msg) => {
+      expect(isTransientUpstreamError(msg)).toBe(false);
+    });
+  });
+});
+
+describe("isContextLengthError", () => {
+  describe("matches context-overflow rejections across providers", () => {
+    it.each([
+      // Vertex / GLM-5 MaaS (the production case).
+      ["The input (207058 tokens) is longer than the model's context length (202752 tokens)."],
+      // OpenAI.
+      ["context_length_exceeded: maximum context length is 128000 tokens"],
+      ["This model's maximum context length is 8192 tokens"],
+      // Anthropic.
+      ["prompt is too long: 250000 tokens > 200000 maximum"],
+    ])("matches %s", (msg) => {
+      expect(isContextLengthError(msg)).toBe(true);
+    });
+  });
+
+  describe("does NOT match unrelated errors", () => {
+    it.each([
+      ["Too Many Requests"],
+      ["Invalid JSON response"],
+      ["Bad Request"],
+      ["Internal server error"],
+    ])("does not match %s", (msg) => {
+      expect(isContextLengthError(msg)).toBe(false);
     });
   });
 });

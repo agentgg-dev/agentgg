@@ -77,12 +77,110 @@ export function isRateLimitError(message: string): boolean {
   return false;
 }
 
+/**
+ * Recognize a *transient* upstream/transport failure worth retrying with a
+ * short backoff — distinct from a rate-limit (handled above) and from a
+ * deterministic request error like context overflow (never retried).
+ *
+ * These are the Vertex MaaS gateway / network flakes seen in production: the
+ * gateway returns HTTP 200 with a plain-text `upstream request timeout` body
+ * (which the OpenAI-compatible parser rejects as "Invalid JSON response"),
+ * drops the connection ("Headers Timeout", "Cannot connect to API"), or 5xxs.
+ * A naive rerun usually clears them, so retrying in-process saves the agent.
+ *
+ * Run against the full error haystack (message + responseBody + cause), since
+ * the actionable text often lives in the response body, not `err.message`.
+ */
+export function isTransientUpstreamError(message: string): boolean {
+  if (/upstream request timeout/i.test(message)) return true;
+  if (/invalid json response/i.test(message)) return true;
+  if (/headers timeout/i.test(message)) return true;
+  if (/cannot connect to api/i.test(message)) return true;
+  if (/fetch failed/i.test(message)) return true;
+  if (/socket hang ?up/i.test(message)) return true;
+  if (/\b(?:ECONNRESET|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|EPIPE)\b/.test(message)) return true;
+  if (/\bterminated\b/i.test(message)) return true;
+  if (/service unavailable/i.test(message)) return true;
+  if (/bad gateway/i.test(message)) return true;
+  if (/gateway timeout/i.test(message)) return true;
+  if (/\b50[234]\b/.test(message)) return true;
+  return false;
+}
+
+/**
+ * Recognize a context-length overflow. The agent's accumulated tool transcript
+ * (file contents) outgrew the model's context window, so the provider 400s.
+ * This is DETERMINISTIC — re-sending the same oversized request just burns
+ * another call — so `withTpmRetry` throws it straight through with a clearer
+ * message instead of retrying. Prevention lives in the per-session tool-output
+ * budget (see buildTools / TOOL_OUTPUT_BUDGET_BYTES).
+ *
+ *   - Vertex/GLM-5: "The input (207058 tokens) is longer than the model's
+ *                    context length (202752 tokens)." (INVALID_ARGUMENT)
+ *   - OpenAI:        "context_length_exceeded" / "maximum context length"
+ *   - Anthropic:     "prompt is too long: N tokens > M maximum"
+ */
+export function isContextLengthError(message: string): boolean {
+  if (/longer than the model'?s context length/i.test(message)) return true;
+  if (/context[_ ]length[_ ]exceeded/i.test(message)) return true;
+  if (/maximum context length/i.test(message)) return true;
+  if (/exceeds the (?:maximum )?context window/i.test(message)) return true;
+  if (/prompt is too long/i.test(message)) return true;
+  if (/reduce the length/i.test(message)) return true;
+  return false;
+}
+
+/**
+ * Flatten an error into one searchable string: its message plus the fields the
+ * Vercel AI SDK's APICallError hangs the useful detail off of (responseBody /
+ * data / statusCode) plus its cause chain. The matchers above run against this,
+ * not bare `err.message` — a context-overflow 400's message is only
+ * "Bad Request"; the token-count detail lives in `responseBody`.
+ */
+function errorHaystack(err: unknown, depth = 0): string {
+  if (depth > 3 || err == null) return String(err ?? "");
+  if (typeof err !== "object") return String(err);
+  const e = err as Record<string, unknown>;
+  const parts: string[] = [];
+  if (typeof e.message === "string") parts.push(e.message);
+  if (typeof e.responseBody === "string") parts.push(e.responseBody);
+  if (typeof e.data === "string") parts.push(e.data);
+  else if (e.data && typeof e.data === "object") {
+    try {
+      parts.push(JSON.stringify(e.data));
+    } catch {
+      /* non-serializable */
+    }
+  }
+  if (typeof e.statusCode === "number") parts.push(`status ${e.statusCode}`);
+  if (e.cause != null && e.cause !== err) parts.push(errorHaystack(e.cause, depth + 1));
+  return parts.join(" | ");
+}
+
+/** First non-empty line of an error haystack, trimmed for one-line logs and
+ *  error messages. ASCII-only ("...") so it's safe in customer-facing copy. */
+function firstErrorLine(hay: string): string {
+  const line =
+    hay
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => l.length > 0) ?? hay;
+  return line.length > 200 ? `${line.slice(0, 200)}...` : line;
+}
+
 /** Default wait when the provider doesn't tell us how long to back off.
  *  Per-minute TPM buckets refill smoothly across the window — 30s typically
  *  frees enough capacity to fit one more call. 60s was the safe upper bound,
  *  but compounded badly across parallel batches (3 retries × 60s × N batches). */
 const DEFAULT_BACKOFF_MS = 30_000;
 const JITTER_FRACTION = 0.2; // ±20%
+
+/** Base backoff for transient upstream/transport errors (timeouts, dropped
+ *  connections, non-JSON gateway bodies). Far shorter than the rate-limit
+ *  default — these clear in seconds, not a TPM-window — and grows
+ *  exponentially per attempt, capped at TRANSIENT_BACKOFF_MAX_MS. */
+const TRANSIENT_BACKOFF_MS = 2_000;
+const TRANSIENT_BACKOFF_MAX_MS = 15_000;
 
 /** Apply ±20% jitter around the base. Critical when N callers all 429 at the
  *  same instant — without jitter they'd all wake at exactly the same moment
@@ -120,14 +218,32 @@ async function withTpmRetry<T>(
     try {
       return await fn();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      if (!isRateLimitError(msg) || attempt >= maxAttempts) throw err;
-      // Honor a server-supplied delay precisely. Only jitter the blind default.
-      const parsed = parseRetryAfterMs(msg);
-      const waitMs = parsed ?? jitter(DEFAULT_BACKOFF_MS);
-      console.warn(
-        `[withTpmRetry] rate-limit on attempt ${attempt}/${maxAttempts}, sleeping ${waitMs}ms (retryAfterParsed=${parsed != null})`,
-      );
+      const hay = errorHaystack(err);
+      // Context overflow is deterministic — re-sending the same oversized
+      // request can't succeed. Surface a clear, non-retryable error instead of
+      // the opaque "Bad Request" the provider returns.
+      if (isContextLengthError(hay)) {
+        throw new Error(`context length exceeded: ${firstErrorLine(hay)}`, { cause: err });
+      }
+      const rateLimited = isRateLimitError(hay);
+      const transient = !rateLimited && isTransientUpstreamError(hay);
+      if ((!rateLimited && !transient) || attempt >= maxAttempts) throw err;
+      let waitMs: number;
+      if (rateLimited) {
+        // Honor a server-supplied delay precisely. Only jitter the blind default.
+        const parsed = parseRetryAfterMs(hay);
+        waitMs = parsed ?? jitter(DEFAULT_BACKOFF_MS);
+        console.warn(
+          `[withTpmRetry] rate-limit on attempt ${attempt}/${maxAttempts}, sleeping ${waitMs}ms (retryAfterParsed=${parsed != null})`,
+        );
+      } else {
+        // Transient upstream/transport flake: short exponential backoff.
+        const base = Math.min(TRANSIENT_BACKOFF_MS * 2 ** (attempt - 1), TRANSIENT_BACKOFF_MAX_MS);
+        waitMs = jitter(base);
+        console.warn(
+          `[withTpmRetry] transient upstream error on attempt ${attempt}/${maxAttempts}, sleeping ${waitMs}ms: ${firstErrorLine(hay)}`,
+        );
+      }
       await abortableSleep(waitMs, signal);
     }
   }
@@ -194,6 +310,17 @@ const SKIP_DIRS = new Set([
 
 const GLOB_MAX_RESULTS = 500;
 const GREP_MAX_MATCHES = 200;
+
+/** Per-session cumulative cap on bytes returned by Read/Glob/Grep. The agent
+ *  tool-loop transcript (mostly file contents) is what blows the model's
+ *  context window: GLM-5's is 202,752 tokens, and we saw 207k-token overflows
+ *  on large repos. ~400 KB of tool output is roughly 110-130k tokens of code,
+ *  leaving headroom for the prompt, reasoning, and the JSON answer. Past the
+ *  cap, further tool calls return a notice telling the model to finalize. */
+const TOOL_OUTPUT_BUDGET_BYTES = 400_000;
+/** Per-file cap so a single huge file can't dominate the budget in one Read.
+ *  Truncated reads carry a notice pointing the model at Grep for specifics. */
+const READ_FILE_OUTPUT_CAP_BYTES = 80_000;
 
 /**
  * Detector backed by the Vercel AI SDK's `generateText` for hunt/walker
@@ -310,7 +437,7 @@ export class VercelAgentDetector implements Detector {
     const base = buildAgentPrompt(args);
     const prompt = `${base}\n\n${jsonOutputInstruction(false)}`;
     try {
-      const { text } = await this.metered(
+      const gen = await this.metered(
         () =>
           generateText({
             model: this.model,
@@ -327,7 +454,17 @@ export class VercelAgentDetector implements Detector {
           }),
         args.signal,
       );
-      const result = await this.parseOrReformat(text, false, args.signal);
+      let result: DetectionResultType;
+      try {
+        result = await this.parseOrReformat(gen.text, false, args.signal);
+      } catch (parseErr) {
+        // Empty / unparseable final message. Emit a one-line diagnostic
+        // (always, not gated on AGENTGG_DEBUG) so the logs show WHY: an empty
+        // completion, a length cutoff, or reasoning that never produced
+        // visible content. See logUnparseableGeneration.
+        logUnparseableGeneration(`runAgent:${args.agent.slug}`, gen);
+        throw parseErr;
+      }
       const fallback = args.candidates[0]?.filePath ?? "(unknown)";
       return result.findings.map((f) => hydrateFinding(f, args.agent, f.filePath ?? fallback));
     } catch (err) {
@@ -554,6 +691,17 @@ function buildTools(
     ? (name: string, arg: string) => console.log(`    ${name} ${arg.slice(0, 100)}`)
     : () => undefined;
 
+  // Per-session tool-output budget, shared across every tool call in this
+  // generateText loop (buildTools is constructed once per LLM session) so the
+  // running transcript can't outgrow the model's context window. A fresh
+  // buildTools — and thus a fresh budget — is created on each retry.
+  let bytesReturned = 0;
+  const budgetExhausted = () => bytesReturned >= TOOL_OUTPUT_BUDGET_BYTES;
+  const account = (out: string): string => {
+    bytesReturned += out.length;
+    return out;
+  };
+
   return {
     Read: tool({
       description: "Read the contents of a file. Path must be relative to the repository root.",
@@ -562,7 +710,8 @@ function buildTools(
       }),
       execute: async ({ path }) => {
         logTool("Read", path);
-        return readToolExecute(path, cwd, maxFileSizeKb, exclude);
+        if (budgetExhausted()) return budgetNotice();
+        return account(await readToolExecute(path, cwd, maxFileSizeKb, exclude));
       },
     }),
     Glob: tool({
@@ -573,7 +722,8 @@ function buildTools(
       }),
       execute: async ({ pattern }) => {
         logTool("Glob", pattern);
-        return globToolExecute(pattern, cwd, exclude);
+        if (budgetExhausted()) return budgetNotice();
+        return account(await globToolExecute(pattern, cwd, exclude));
       },
     }),
     Grep: tool({
@@ -589,10 +739,21 @@ function buildTools(
       }),
       execute: async ({ pattern, glob }) => {
         logTool("Grep", pattern);
-        return grepToolExecute(pattern, glob || undefined, cwd, exclude);
+        if (budgetExhausted()) return budgetNotice();
+        return account(await grepToolExecute(pattern, glob || undefined, cwd, exclude));
       },
     }),
   };
+}
+
+/** Returned by every tool once the per-session output budget is spent — an
+ *  explicit instruction to stop reading and emit findings now, rather than a
+ *  silent empty result the model might keep probing against. */
+function budgetNotice(): string {
+  return (
+    `Error: per-session read budget reached (~${Math.round(TOOL_OUTPUT_BUDGET_BYTES / 1024)} KB). ` +
+    `Do not read more files. Output your final findings JSON now, based on what you have already examined.`
+  );
 }
 
 /** A path is excluded (treated as deleted) when it matches any exclude
@@ -627,7 +788,15 @@ async function readToolExecute(
         return `Error: File exceeds size limit (${Math.round(s.size / 1024)}KB > ${maxFileSizeKb}KB). Skipped.`;
       }
     }
-    return await readFile(absolutePath, "utf-8");
+    const content = await readFile(absolutePath, "utf-8");
+    if (content.length > READ_FILE_OUTPUT_CAP_BYTES) {
+      return (
+        `${content.slice(0, READ_FILE_OUTPUT_CAP_BYTES)}\n\n` +
+        `... [truncated: file is ${Math.round(content.length / 1024)} KB; showing the first ` +
+        `${Math.round(READ_FILE_OUTPUT_CAP_BYTES / 1024)} KB. Use Grep to locate specific lines.]`
+      );
+    }
+    return content;
   } catch (err) {
     return `Error reading file: ${(err as Error).message}`;
   }
@@ -853,4 +1022,50 @@ export function extractCallUsage(result: unknown): CallUsage {
 /** A finite positive number, else 0. Token counts are never negative. */
 function numberish(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
+}
+
+/**
+ * Explain an empty/unparseable agent response in one log line. `finishReason`
+ * is the discriminator we were missing:
+ *
+ *   - "length"            output budget consumed (often by reasoning tokens)
+ *                         before any visible text was produced.
+ *   - "stop", textChars=0, reasoningChars>0
+ *                         model ended the turn writing only into the reasoning
+ *                         channel — the answer never reached `content`, or this
+ *                         provider/SDK version dropped a reasoning-only answer.
+ *   - "stop", textChars=0, reasoningChars=0, completionTokens>0
+ *                         tokens were emitted but neither text nor reasoning
+ *                         surfaced — the provider mapped the answer somewhere
+ *                         this SDK version doesn't read.
+ *   - "tool-calls"        ended mid tool-loop (cross-check steps vs maxTurns).
+ *
+ * Always logs (not gated on AGENTGG_DEBUG) — capturing this in production is
+ * the whole point. Reads every field defensively so a provider that omits one
+ * degrades to a 0/"unknown" rather than throwing inside the error path.
+ */
+function logUnparseableGeneration(label: string, result: unknown): void {
+  const r = (result ?? {}) as {
+    text?: unknown;
+    reasoning?: unknown;
+    finishReason?: unknown;
+    usage?: { promptTokens?: unknown; completionTokens?: unknown };
+    steps?: Array<{ text?: unknown; finishReason?: unknown; toolCalls?: unknown[] }>;
+  };
+  const textChars = typeof r.text === "string" ? r.text.length : 0;
+  const reasoningChars = typeof r.reasoning === "string" ? r.reasoning.length : 0;
+  const finishReason = typeof r.finishReason === "string" ? r.finishReason : "unknown";
+  const promptTokens = numberish(r.usage?.promptTokens);
+  const completionTokens = numberish(r.usage?.completionTokens);
+  const steps = Array.isArray(r.steps) ? r.steps : [];
+  const last = steps[steps.length - 1];
+  const lastFinish = last && typeof last.finishReason === "string" ? last.finishReason : "n/a";
+  const lastToolCalls = last && Array.isArray(last.toolCalls) ? last.toolCalls.length : 0;
+  const lastTextChars = last && typeof last.text === "string" ? last.text.length : 0;
+  console.warn(
+    `[${label}] unparseable model response: finishReason=${finishReason} ` +
+      `textChars=${textChars} reasoningChars=${reasoningChars} ` +
+      `promptTokens=${promptTokens} completionTokens=${completionTokens} ` +
+      `steps=${steps.length} lastStep(finish=${lastFinish},toolCalls=${lastToolCalls},textChars=${lastTextChars})`,
+  );
 }
