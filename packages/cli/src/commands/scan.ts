@@ -93,6 +93,15 @@ interface ScanOpts {
   maxTurns?: number;
   /** Candidate files per agent batch. Overrides the agent's `where.maxFilesPerBatch`. */
   maxFilesPerBatch?: number;
+  /**
+   * Cap the candidate files reviewed per agent: when an agent's `where`
+   * resolves to more than this many candidates (after prefilter), keep the
+   * first N in the walker's deterministic order and drop the rest. A
+   * guardrail against an over-broad agent blowing up cost/time on a large
+   * repo. Unset = no cap. Independent of resume state, so the same N files
+   * are chosen across runs.
+   */
+  maxFilesPerAgent?: number;
   /** SDK reasoning effort. Maps to `effort` option. */
   effort?: "low" | "medium" | "high" | "max";
   /** SDK thinking mode. `adaptive` lets the model decide per call; `off` skips entirely. */
@@ -643,6 +652,8 @@ export async function runScan(
     // drains the pool.
     const concurrency = Math.max(1, opts.concurrency ?? 5);
     let cachedAgentCount = 0;
+    // Agents whose candidate list was truncated by `--max-files-per-agent`.
+    let cappedAgentCount = 0;
     const diffArg =
       opts.diff && diffPatch !== undefined ? { commit: opts.diff, patch: diffPatch } : undefined;
     type AgentRuntime = {
@@ -722,12 +733,30 @@ export async function runScan(
         const hits = evaluatePreFilter(content, agent.where.preFilter);
         if (hits.length === 0) continue;
         candidates.push({ filePath: relPath, content, hits });
-        touchedFiles.add(relPath);
       }
+
+      // `--max-files-per-agent` cap: review at most N candidate files per
+      // agent — keep the first N in the walker's deterministic order and
+      // drop the rest. A guardrail so an over-broad agent (e.g. one matching
+      // every .ts file) can't blow up cost/time on a large repo. Stable walk
+      // order means the same N files are chosen across runs, so per-file
+      // resume stays consistent. Unset = no cap.
+      if (opts.maxFilesPerAgent !== undefined && candidates.length > opts.maxFilesPerAgent) {
+        const dropped = candidates.length - opts.maxFilesPerAgent;
+        cappedAgentCount++;
+        candidates.length = opts.maxFilesPerAgent;
+        console.log(
+          `  ${agent.slug}: capped to ${opts.maxFilesPerAgent} candidate file(s) (--max-files-per-agent; ${dropped} dropped)`,
+        );
+      }
+      // Only the candidates the agent will actually review count as scanned.
+      for (const c of candidates) touchedFiles.add(c.filePath);
+
       // Deterministic "how much work" signals for this agent, fixed before
       // any LLM call: files it reviews and total pre-filter anchor matches.
       const filesReviewed = candidates.length;
       const hitCount = candidates.reduce((sum, c) => sum + c.hits.length, 0);
+
       if (candidates.length === 0) {
         if (opts.verbose) console.log(`  ${agent.slug}: no candidate files`);
         try {
@@ -950,7 +979,7 @@ export async function runScan(
       console.log(
         `  Agents: ${ranCount} ran, ${cachedAgentCount} reused from prior run${
           cachedAgentCount > 0 ? " (pass --rescan to force a full re-run)" : ""
-        }`,
+        }${cappedAgentCount > 0 ? `; ${cappedAgentCount} capped by --max-files-per-agent` : ""}`,
       );
     }
 
@@ -1582,6 +1611,11 @@ export function registerScanCommand(program: Command): void {
     .option(
       "--max-files-per-batch <n>",
       "Walker mode: candidate files packed into one investigation batch. Overrides the agent's `maxFilesPerBatch`. Default 5. Different from --concurrency: batch size = files per LLM session; --concurrency = sessions in parallel.",
+      (v) => parseInt(v, 10),
+    )
+    .option(
+      "--max-files-per-agent <n>",
+      "Cap the candidate files each agent reviews: if an agent's scope resolves to more than <n> files (after prefilter), keep the first <n> in scan order and drop the rest. A guardrail against an over-broad agent blowing up cost/time on a large repo. No cap by default. Different from --max-files-per-batch, which only sets how many files pack into one LLM session.",
       (v) => parseInt(v, 10),
     )
     .option(

@@ -236,6 +236,45 @@ describe("scan --no-summary", () => {
   });
 });
 
+describe("scan --max-files-per-agent", () => {
+  it("caps the agent to N candidate files, reviewing only N and dropping the rest", async () => {
+    suppressLogs();
+    // server.js (from beforeEach) + two more → 3 .js candidates for plain-agent.
+    writeFileSync(join(projectRoot, "a.js"), "const a = 1;", "utf8");
+    writeFileSync(join(projectRoot, "b.js"), "const b = 2;", "utf8");
+
+    await runScan(
+      projectRoot,
+      { template: [agentPlain], output: outputDir, maxFilesPerAgent: 2 },
+      env,
+    );
+
+    // The agent still runs, but over at most 2 distinct candidate files.
+    expect(detectorMock.runAgent).toHaveBeenCalled();
+    const reviewed = new Set(
+      detectorMock.runAgent.mock.calls.flatMap((call) => call[0].candidates.map((c) => c.filePath)),
+    );
+    expect(reviewed.size).toBe(2);
+    // Only the 2 reviewed files get persisted records — the 3rd was dropped.
+    expect(loadAllFileRecords(outputDir).length).toBe(2);
+  });
+
+  it("reviews every candidate when the cap is at or above the candidate count", async () => {
+    suppressLogs();
+    writeFileSync(join(projectRoot, "a.js"), "const a = 1;", "utf8");
+    writeFileSync(join(projectRoot, "b.js"), "const b = 2;", "utf8");
+
+    await runScan(
+      projectRoot,
+      { template: [agentPlain], output: outputDir, maxFilesPerAgent: 5 },
+      env,
+    );
+
+    expect(detectorMock.runAgent).toHaveBeenCalled();
+    expect(loadAllFileRecords(outputDir).length).toBe(3);
+  });
+});
+
 describe("scan plan reuse", () => {
   it("reuses a prior plan, skipping the precondition for-loop on the next scan", async () => {
     suppressLogs();

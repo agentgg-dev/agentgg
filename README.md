@@ -6,7 +6,7 @@
 
 **Agentic SAST. White box. CI ready.**
 
-`agentgg` is an agentic SAST scanner. Its agents reason about your code — they follow imports, check the call graph, and confirm findings before flagging, instead of pattern-matching the way traditional SAST does. The catalog auto-downloads on first scan from [agentgg-dev/agentgg-agents](https://github.com/agentgg-dev/agentgg-agents). Run on your full repo or on a git diff for PR reviews. There's **one kind of agent**: a tool-enabled investigation (Read/Glob/Grep) that declares **where** to look (file types, paths, content regex) and an optional **precondition** that decides whether it's even worth running on this repo. Every scan opens with a fast **recon** pass that briefs the agents on what the project is. Interrupted scans resume on re-run: completed agents are skipped, only new or changed work hits the LLM again. Past incidents become new detectors via `agentgg create`, which distills a security report into a reusable repo-shaped agent.
+`agentgg` is an agentic SAST scanner. Its agents reason about your code — they follow imports, check the call graph, and confirm findings before flagging, instead of pattern-matching the way traditional SAST does. The catalog auto-downloads on first scan from [agentgg-dev/agentgg-agents](https://github.com/agentgg-dev/agentgg-agents). Run on your full repo or on a git diff for PR reviews. Each agent is a tool-enabled investigation (Read/Glob/Grep) that declares **where** to look (file types, paths, content regex) and an optional **precondition** that decides whether it's even worth running on this repo. Every scan opens with a fast **recon** pass that briefs the agents on what the project is. Interrupted scans resume on re-run: completed agents are skipped, only new or changed work hits the LLM again. Past incidents become new detectors via `agentgg create`, which distills a security report into a reusable repo-shaped agent.
 
 **[agentgg.dev](https://agentgg.dev)** · [Agents catalog](https://github.com/agentgg-dev/agentgg-agents) · [Report a bug](https://github.com/agentgg-dev/agentgg/issues/new/choose) · [Report a security issue](https://github.com/agentgg-dev/agentgg/security)
 
@@ -203,7 +203,7 @@ Run the default agent set (`~/.agentgg/agentgg-agents/base/`):
 agentgg scan ./src -o ./out
 ```
 
-Every scan makes LLM calls; cost scales with files × agents × phases. The biggest levers are scoping the scan (`--diff`, `--only`, `--exclude`, `--max-file-size`) and picking which agents run (`-t`). Ollama runs locally for free. `--concurrency` controls parallelism, not total cost.
+Every scan makes LLM calls; cost scales with files × agents × phases. The biggest levers are scoping the scan (`--diff`, `--only`, `--exclude`, `--max-file-size`, `--max-files-per-agent`) and picking which agents run (`-t`). Ollama runs locally for free. `--concurrency` controls parallelism, not total cost.
 
 A single slug:
 
@@ -376,10 +376,13 @@ Override the default glob exclusions / restrict to specific paths:
 ```bash
 agentgg scan ./src --exclude "**/migrations/**" --exclude "vendor/**" -o ./out
 agentgg scan ./src --only "src/api/**/*.ts" --only "src/handlers/**/*.ts" -o ./out
-agentgg scan ./src --max-file-size 200 -o ./out      # skip files larger than 200 KB
+agentgg scan ./src --max-file-size 200 -o ./out          # skip files larger than 200 KB
+agentgg scan ./src --max-files-per-agent 30 -o ./out     # each agent reviews at most 30 files
 ```
 
 By default the scan skips a built-in exclude set — lockfiles, minified bundles, binary assets, `node_modules`, `dist`, `.git`, and the scan-results directory. Pass `--no-default-excludes` to scan everything, or set `where.useDefaultExcludes: false` on a single agent. CLI `--exclude` paths are always treated as deleted (invisible to every agent).
+
+`--max-files-per-agent` is a per-agent ceiling: when an agent's `where` resolves to more candidate files than the cap, it reviews the first `<n>` (in the walker's deterministic scan order) and drops the rest, rather than being skipped. A guardrail so one over-broad agent can't blow up cost or time on a large repo. Different from `--max-files-per-batch`, which only sets how many files pack into a single LLM session.
 
 ### Use a one-off credential or model without saving it
 
@@ -528,6 +531,7 @@ Run `agentgg <command> --help` for the full flag list on any subcommand.
 --no-recon                      skip the recon survey AND precondition gating; run every -t agent unconditionally
 --no-summary                    skip writing the markdown report (summary.md + findings/*.md); state still persists
 --max-files-per-batch <n>       candidate files per agent batch (overrides the agent's where.maxFilesPerBatch)
+--max-files-per-agent <n>       cap the candidate files each agent reviews — keep the first <n> in scan order, drop the rest (guardrail against an over-broad agent; no cap by default)
 --concurrency <n>               max LLM sessions in flight across the whole scan — agent batches, validation, and scoring all draw from one pool (default 5)
 --dedup                         run a final de-duplication pass that clusters same-root-cause findings per source file (off by default)
 --delete-duplicates             with --dedup, physically remove duplicate findings instead of just marking them
