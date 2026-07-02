@@ -355,3 +355,56 @@ describe("scan resume — RunMeta + persistence", () => {
     expect(process.listenerCount("SIGINT")).toBe(before);
   });
 });
+
+describe("scan — --max-batches cap", () => {
+  // The fixture has 2 files (server.js, util.js); maxFilesPerBatch:1 makes
+  // each file its own batch, so batch count is predictable.
+  it("stops after the given number of batches", async () => {
+    suppressLogs();
+    await runScan(
+      projectRoot,
+      { template: [agentA], output: outputDir, maxFilesPerBatch: 1, maxBatches: 1 },
+      env,
+    );
+    // 2 batches available, capped to 1 → runAgent called once.
+    expect(detectorMock.runAgent).toHaveBeenCalledTimes(1);
+    expect(ranFiles().length).toBe(1);
+  });
+
+  it("caps across all agents combined, not per agent", async () => {
+    suppressLogs();
+    // 2 agents × 2 files @ maxFilesPerBatch:1 = 4 batches; cap to 3.
+    await runScan(
+      projectRoot,
+      { template: [agentA, agentB], output: outputDir, maxFilesPerBatch: 1, maxBatches: 3 },
+      env,
+    );
+    expect(detectorMock.runAgent).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not cap when the batch count is at or below the limit", async () => {
+    suppressLogs();
+    await runScan(
+      projectRoot,
+      { template: [agentA], output: outputDir, maxFilesPerBatch: 1, maxBatches: 99 },
+      env,
+    );
+    expect(ranFiles().sort()).toEqual(["server.js", "util.js"]);
+  });
+
+  it("re-runs an agent whose batches were dropped on the next (uncapped) scan", async () => {
+    suppressLogs();
+    await runScan(
+      projectRoot,
+      { template: [agentA], output: outputDir, maxFilesPerBatch: 1, maxBatches: 1 },
+      env,
+    );
+    // Only 1 of 2 batches ran → no completion sidecar → agent is not cached.
+    detectorMock.runAgent.mockClear();
+    await runScan(projectRoot, { template: [agentA], output: outputDir, maxFilesPerBatch: 1 }, env);
+    expect(detectorMock.runAgent).toHaveBeenCalled();
+    // Both files end up analyzed once the cap is lifted.
+    expect(readFileRecord(outputDir, "test-detector-a", "server.js")).not.toBeNull();
+    expect(readFileRecord(outputDir, "test-detector-a", "util.js")).not.toBeNull();
+  });
+});

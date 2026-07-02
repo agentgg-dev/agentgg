@@ -112,6 +112,16 @@ interface ScanOpts {
    * are chosen across runs.
    */
   maxFilesPerAgent?: number;
+  /**
+   * Cap the TOTAL agent batches run across the whole scan (all agents). Once
+   * Phase 1 has enqueued every (agent, batch) pair, the pool is truncated to
+   * this many in enqueue order and the rest are dropped. A whole-scan cost/
+   * time guardrail — siblings (`maxFilesPerAgent`) cap per-agent instead. An
+   * agent whose batches are dropped writes no completion sidecar, so it
+   * re-runs next time (per-file resume lifts the batches that did run).
+   * Unset = no cap.
+   */
+  maxBatches?: number;
   /** SDK reasoning effort. Maps to `effort` option. */
   effort?: "low" | "medium" | "high" | "max";
   /** SDK thinking mode. `adaptive` lets the model decide per call; `off` skips entirely. */
@@ -883,6 +893,19 @@ export async function runScan(
       for (const batch of batches) batchQueue.push({ agent, batch });
     }
 
+    // `--max-batches` cap: keep at most N (agent, batch) pairs across the
+    // whole scan in enqueue order, drop the rest. A truncated/dropped agent
+    // keeps `rt.remaining > 0`, so it writes no completion sidecar and re-runs
+    // next time (per-file resume lifts what ran). Do NOT lower `remaining` to
+    // the kept count — that would wrongly mark a truncated agent complete.
+    if (opts.maxBatches !== undefined && batchQueue.length > opts.maxBatches) {
+      const dropped = batchQueue.length - opts.maxBatches;
+      batchQueue.length = opts.maxBatches;
+      console.log(
+        `  Capping to ${opts.maxBatches} batch(es) across all agents (--max-batches; ${dropped} dropped, those agents re-run next scan)`,
+      );
+    }
+
     // -------- Phase 2: drain the batch pool --------
     // One bounded worker pool over every enqueued (agent, batch) pair.
     // Batches from different agents run concurrently up to `concurrency`.
@@ -1638,6 +1661,11 @@ export function registerScanCommand(program: Command): void {
     .option(
       "--max-files-per-agent <n>",
       "Cap the candidate files each agent reviews: if an agent's scope resolves to more than <n> files (after prefilter), keep the first <n> in scan order and drop the rest. A guardrail against an over-broad agent blowing up cost/time on a large repo. No cap by default. Different from --max-files-per-batch, which only sets how many files pack into one LLM session.",
+      (v) => parseInt(v, 10),
+    )
+    .option(
+      "--max-batches <n>",
+      "Cap the TOTAL number of agent batches run across the whole scan (all agents combined). Once batches are enqueued, the pool is truncated to <n> in enqueue order and the rest are dropped, then the scan stops. A whole-scan cost/time guardrail — different from --max-files-per-agent (per-agent file cap) and --concurrency (parallel sessions). Agents whose batches are dropped re-run on the next scan. No cap by default.",
       (v) => parseInt(v, 10),
     )
     .option(

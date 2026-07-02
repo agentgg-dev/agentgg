@@ -203,7 +203,7 @@ Run the default agent set (`~/.agentgg/agentgg-agents/base/`):
 agentgg scan ./src -o ./out
 ```
 
-Every scan makes LLM calls; cost scales with files × agents × phases. The biggest levers are scoping the scan (`--diff`, `--only`, `--exclude`, `--max-file-size`, `--max-files-per-agent`) and picking which agents run (`-t`). Ollama runs locally for free. `--concurrency` controls parallelism, not total cost.
+Every scan makes LLM calls; cost scales with files × agents × phases. The biggest levers are scoping the scan (`--diff`, `--only`, `--exclude`, `--max-file-size`, `--max-files-per-agent`, `--max-batches`) and picking which agents run (`-t`). Ollama runs locally for free. `--concurrency` controls parallelism, not total cost.
 
 A single slug:
 
@@ -388,11 +388,14 @@ agentgg scan ./src --exclude "**/migrations/**" --exclude "vendor/**" -o ./out
 agentgg scan ./src --only "src/api/**/*.ts" --only "src/handlers/**/*.ts" -o ./out
 agentgg scan ./src --max-file-size 200 -o ./out          # skip files larger than 200 KB
 agentgg scan ./src --max-files-per-agent 30 -o ./out     # each agent reviews at most 30 files
+agentgg scan ./src --max-batches 50 -o ./out             # run at most 50 agent batches this scan
 ```
 
 By default the scan skips a built-in exclude set — lockfiles, minified bundles, binary assets, `node_modules`, `dist`, `.git`, and the scan-results directory. Pass `--no-default-excludes` to scan everything, or set `where.useDefaultExcludes: false` on a single agent. CLI `--exclude` paths are always treated as deleted (invisible to every agent).
 
 `--max-files-per-agent` is a per-agent ceiling: when an agent's `where` resolves to more candidate files than the cap, it reviews the first `<n>` (in the walker's deterministic scan order) and drops the rest, rather than being skipped. A guardrail so one over-broad agent can't blow up cost or time on a large repo. Different from `--max-files-per-batch`, which only sets how many files pack into a single LLM session.
+
+`--max-batches` is a whole-scan ceiling on the number of agent batches. Once every `(agent, batch)` pair is enqueued, the pool is truncated to `<n>` (in enqueue order) and the rest are dropped before any LLM call runs. Agents whose batches are dropped write no completion sidecar, so a later scan picks them up where this one stopped — a way to spread a large scan across several runs or cap the spend of a single run. Different from `--concurrency`, which bounds how many batches run in parallel, not how many run at all.
 
 ### Use a one-off credential or model without saving it
 
@@ -543,6 +546,7 @@ Run `agentgg <command> --help` for the full flag list on any subcommand.
 --no-summary                    skip writing the markdown report (summary.md + findings/*.md); state still persists
 --max-files-per-batch <n>       candidate files per agent batch (overrides the agent's where.maxFilesPerBatch)
 --max-files-per-agent <n>       cap the candidate files each agent reviews — keep the first <n> in scan order, drop the rest (guardrail against an over-broad agent; no cap by default)
+--max-batches <n>               cap the total agent batches run this scan — keep the first <n> in enqueue order, drop the rest (dropped agents re-run next scan; no cap by default)
 --concurrency <n>               max LLM sessions in flight across the whole scan — agent batches, validation, and scoring all draw from one pool (default 5)
 --dedup                         run a final de-duplication pass that clusters same-root-cause findings per source file (off by default)
 --delete-duplicates             with --dedup, physically remove duplicate findings instead of just marking them
