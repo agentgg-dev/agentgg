@@ -30,6 +30,7 @@ import { loadAllAgents } from "../agent-catalog.js";
 import { installOfficialAgents } from "../agents-install.js";
 import { runConcurrent } from "../concurrent.js";
 import { resolveDedup } from "../deduper.js";
+import { loadDefaultScope } from "../default-scope.js";
 import type { AgentCandidate } from "../detect.js";
 import { FatalScanError, handleDetectorError } from "../diagnostics.js";
 import { listChangedFiles, loadCommitPatch } from "../diff.js";
@@ -48,15 +49,24 @@ import { printReady } from "./view.js";
 
 interface ScanOpts {
   /**
-   * Path to a SECURITY.md-style scope document. Two meanings:
+   * Scope document control. Commander gives three shapes:
+   *   - a string: path to a SECURITY.md-style scope doc (`--scope <path>`).
+   *   - `undefined`: flag omitted → the bundled default scope is used
+   *     (see `loadDefaultScope`), so validation always has trust-boundary
+   *     rules to reason about `out-of-scope`.
+   *   - `false`: `--no-scope` → opt out of scope entirely (no default).
+   *
+   * A resolved scope doc has two meanings downstream:
    *   - with --validate: scope context is threaded into full validation
    *     so the model can return `out-of-scope` alongside the usual
    *     confirmed / false-positive / uncertain verdicts.
-   *   - WITHOUT --validate: triggers scope-only validation. The model
-   *     never sees the source, only the finding metadata + this scope
-   *     doc, and only `out-of-scope` verdicts are persisted. Cheap.
+   *   - WITHOUT --validate: an EXPLICIT `--scope <path>` triggers cheap
+   *     scope-only validation (the model never sees the source, only the
+   *     finding metadata + scope doc, and only `out-of-scope` persists).
+   *     The bundled default never triggers this on its own — a plain
+   *     detection-only scan stays detection-only.
    */
-  scope?: string;
+  scope?: string | boolean;
   output?: string;
   validate?: boolean;
   provider?: string;
@@ -360,24 +370,31 @@ export async function runScan(
         ? [...excludePatterns]
         : [...DEFAULT_EXCLUDES, ...excludePatterns];
 
-    // Read scope file once if --scope is set. Passed verbatim into the
-    // validator prompt so `out-of-scope` becomes a meaningful verdict.
-    // Missing-file is fatal: the user explicitly asked for scope.
+    // Resolve the scope document. An explicit `--scope <path>` is read
+    // verbatim (missing file is fatal — the user asked for it). With the
+    // flag omitted we fall back to the bundled default scope so the
+    // validator always has trust-boundary rules to reason about
+    // `out-of-scope`. `--no-scope` (opts.scope === false) opts out.
+    // Passed verbatim into the validator prompt.
     let scopeContent: string | undefined;
-    if (opts.scope) {
+    if (typeof opts.scope === "string") {
       const scopePath = resolve(opts.scope);
       try {
         scopeContent = readFileSync(scopePath, "utf8");
       } catch (err) {
         throw new Error(`--scope: cannot read ${scopePath}: ${(err as Error).message}`);
       }
+    } else if (opts.scope !== false) {
+      scopeContent = loadDefaultScope();
     }
 
-    // `--scope` without `--validate` triggers scope-only validation:
-    // a cheap, file-read-free pre-filter that classifies each finding
-    // against the scope document alone. `--validate` with or without
-    // `--scope` runs the full source-reading classifier.
-    const scopeOnlyValidate = !opts.validate && !!scopeContent;
+    // Scope-only validation (a cheap, file-read-free pre-filter that
+    // classifies each finding against the scope doc alone) is triggered
+    // ONLY by an explicit `--scope <path>` without `--validate`. The
+    // bundled default must never silently turn a detection-only scan into
+    // a validation run, so it does not count here. `--validate` (with or
+    // without `--scope`) runs the full source-reading classifier.
+    const scopeOnlyValidate = !opts.validate && typeof opts.scope === "string";
 
     const walkCfg: WalkConfig = {
       excludePatterns: walkExcludes,
@@ -399,7 +416,8 @@ export async function runScan(
       );
     }
     if (opts.validate) {
-      console.log(`Validation: full${scopeContent ? ` (scope: ${opts.scope})` : ""}`);
+      const scopeLabel = typeof opts.scope === "string" ? opts.scope : "default";
+      console.log(`Validation: full${scopeContent ? ` (scope: ${scopeLabel})` : ""}`);
     } else if (scopeOnlyValidate) {
       console.log(
         `Validation: scope-only (scope: ${opts.scope}; only out-of-scope verdicts persisted)`,
@@ -1550,7 +1568,11 @@ export function registerScanCommand(program: Command): void {
     .argument("<path>", "path to the codebase to scan")
     .option(
       "--scope <path>",
-      "path to a SECURITY.md-style scope file. With --validate, scope rules are threaded into the full classifier (verdicts include `out-of-scope`). WITHOUT --validate, triggers scope-only validation: the model never re-reads the source and only persists `out-of-scope` verdicts (cheap pre-filter).",
+      "path to a SECURITY.md-style scope file. With --validate, scope rules are threaded into the full classifier (verdicts include `out-of-scope`). WITHOUT --validate, triggers scope-only validation: the model never re-reads the source and only persists `out-of-scope` verdicts (cheap pre-filter). When omitted, a bundled default scope (trust-boundary rules) is used with --validate; pass --no-scope to disable it.",
+    )
+    .option(
+      "--no-scope",
+      "disable the bundled default scope (skip trust-boundary filtering during validation)",
     )
     .option("-o, --output <path>", "output directory for findings", "./scan-results/")
     .option(

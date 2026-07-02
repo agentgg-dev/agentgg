@@ -239,13 +239,22 @@ agentgg scan ./src -t sql-injection --validate -o ./out
 
 Each finding gets a `validation` section in its markdown file and a verdict count in `summary.md`.
 
-### Use a scope file to mark out-of-scope findings
+### Scope: filter findings by trust boundary
 
-Pass any text file the validator should consult as scope context (your security policy, an audit-scope doc, internal notes, etc.). Without `--scope`, the `out-of-scope` verdict is withheld. The model would just be guessing.
+During validation, findings are checked against a **scope document** — the trust-boundary rules that decide whether a defect is actually exploitable. A built-in default scope applies automatically, so `out-of-scope` is a real verdict out of the box:
 
 ```bash
-agentgg scan ./src --validate --scope ./scope.md -o ./out
+agentgg scan ./src --validate -o ./out               # uses the built-in default scope
 ```
+
+Override it with your own policy (any text file: a security policy, an audit-scope doc, internal notes), or turn scope filtering off entirely:
+
+```bash
+agentgg scan ./src --validate --scope ./scope.md -o ./out   # your scope instead of the default
+agentgg scan ./src --validate --no-scope -o ./out           # no scope filtering at all
+```
+
+Scope only matters where validation runs. The default applies to `scan --validate` and to any `revalidate` (which always validates); a plain `scan` without `--validate` is detection-only and never consults it.
 
 ### Score findings
 
@@ -261,9 +270,10 @@ Detect once, validate later (or with a different model / scope):
 
 ```bash
 agentgg scan ./src -t sql-injection -o ./out         # detect only
-agentgg revalidate ./out                              # validate everything pending
-agentgg revalidate ./out --scope ./scope.md          # re-classify with scope
-agentgg revalidate ./out --force                     # re-classify everything
+agentgg revalidate ./out                              # validate pending (uses the default scope)
+agentgg revalidate ./out --scope ./scope.md          # re-classify with your scope
+agentgg revalidate ./out --no-scope                  # re-classify with no scope filtering
+agentgg revalidate ./out --force                     # re-classify everything (already-validated too)
 ```
 
 ### Plan first, then run
@@ -498,7 +508,7 @@ Short reasoning citing the unsafe code element.
 |---|---|
 | `agentgg init` | One-time setup wizard. Pick a provider (Anthropic / OpenAI / Ollama / Bedrock / Vertex) and paste credentials. Re-run to merge in another provider without overwriting the first. |
 | `agentgg recon <path>` | Run only phases 1–2 — the recon survey + precondition planning — writing `recon.json` + `plan.json` to `--output`. No detection. A cheap preview of what a scan would run; a later `scan` on the same `--output` reuses the brief and plan. |
-| `agentgg scan <path>` | Run a security scan: recon → precondition gating → run queued agents → validate → score → report, writing findings + state to `--output`. Supports `--diff` for PR review, `--validate` for second-pass classification, `--scope` for SECURITY.md-style rules, `--no-recon` to run every `-t` agent without gating, and `--no-summary` to defer the report. Reuses a cached recon brief + plan; resumes by default. |
+| `agentgg scan <path>` | Run a security scan: recon → precondition gating → run queued agents → validate → score → report, writing findings + state to `--output`. Supports `--diff` for PR review, `--validate` for second-pass classification (which applies a built-in trust-boundary scope by default — override with `--scope`, disable with `--no-scope`), `--no-recon` to run every `-t` agent without gating, and `--no-summary` to defer the report. Reuses a cached recon brief + plan; resumes by default. |
 | `agentgg status [output-dir]` | Print a summary of a scan's output dir: file counts (analyzed / validated / pending), finding counts, validation verdicts, recent runs. Pass `--json` for machine-readable. |
 | `agentgg revalidate [output-dir]` | Re-run the validation phase against findings already on disk. Skips detection entirely. Use to validate with a different model, scope, or after editing the validator prompt. `--no-summary` defers the report render. |
 | `agentgg score [output-dir]` | Standalone CVSS 3.1 scoring pass over persisted findings. The agent picks the 8 base metrics; the score and severity bucket are computed deterministically. `--no-summary` defers the report render. |
@@ -523,7 +533,8 @@ Run `agentgg <command> --help` for the full flag list on any subcommand.
                                 comma- or whitespace-separated; repeatable
 -o, --output <path>             output directory (default ./scan-results/)
 --validate                      run a second-pass validation phase per finding
---scope <path>                  scope file the validator consults (enables `out-of-scope`)
+--scope <path>                  scope doc the validator consults for trust-boundary rules; overrides the built-in default (enables `out-of-scope`)
+--no-scope                      disable the built-in default scope (skip trust-boundary filtering during validation)
 --rescan                        re-analyze files even if a prior run covered them
 --revalidate-all                re-validate findings that already have a verdict
 --diff <commit>                 scope scan to a commit or range; each agent's candidate files are intersected with the touched files and the patch is injected as a focus hint (accepts `<ref>`, `a..b`, or `a...b`)

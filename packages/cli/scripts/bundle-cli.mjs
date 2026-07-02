@@ -75,6 +75,18 @@ try {
   log(`WARNING: failed to copy built-in agents: ${err.message}`);
 }
 
+// The bundled default scope doc (src/scope/default-scope.md) is read at
+// runtime relative to the bundle via import.meta.url — same explicit-copy
+// requirement as the agent markdown above.
+const scopeSrc = resolve(cliRoot, "src", "scope");
+const scopeDest = resolve(cliRoot, "dist", "scope");
+try {
+  cpSync(scopeSrc, scopeDest, { recursive: true });
+  log(`Copied default scope → ${scopeDest}`);
+} catch (err) {
+  log(`WARNING: failed to copy default scope: ${err.message}`);
+}
+
 // chmod +x is a no-op on Windows but matters on macOS/Linux installs.
 try {
   chmodSync(outfile, 0o755);

@@ -11,6 +11,7 @@ import {
 } from "@agentgg/core";
 import type { Command } from "commander";
 import { runConcurrent } from "../concurrent.js";
+import { loadDefaultScope } from "../default-scope.js";
 import { handleDetectorError } from "../diagnostics.js";
 import { loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
 import { buildCredentialsFromOpts, validateProviderFlags } from "../providers/index.js";
@@ -20,14 +21,20 @@ import { buildInvocation } from "./invocation.js";
 
 interface RevalidateOpts {
   /**
-   * Path to a SECURITY.md-style scope document. Two meanings, matching
-   * `scan`:
+   * Scope document control, matching `scan`:
+   *   - a string: path to a SECURITY.md-style scope doc (`--scope <path>`).
+   *   - `undefined`: flag omitted → the bundled default scope is used.
+   *   - `false`: `--no-scope` → opt out of scope entirely.
+   *
+   * A resolved scope doc has two meanings:
    *   - with --validate: threaded into full validation; `out-of-scope`
    *     joins the usual confirmed/false-positive/uncertain verdicts.
-   *   - WITHOUT --validate: triggers scope-only validation — the model
-   *     never re-reads source; only `out-of-scope` is persisted.
+   *   - WITHOUT --validate: an EXPLICIT `--scope <path>` triggers
+   *     scope-only validation — the model never re-reads source; only
+   *     `out-of-scope` is persisted. The bundled default never triggers
+   *     this on its own.
    */
-  scope?: string;
+  scope?: string | boolean;
   /**
    * Force full validation (re-reads source). Without this, `--scope`
    * alone runs scope-only; absence of both runs full validation with
@@ -103,23 +110,28 @@ export async function runRevalidate(
   // each task, so cancelled findings retain their prior state.
   const revalidateAbortController = new AbortController();
 
-  // Re-read --scope at revalidate time. Treat a missing path as fatal
-  // (same fail-fast contract scan uses).
+  // Resolve --scope at revalidate time, matching scan: an explicit path
+  // is re-read (missing path is fatal — same fail-fast contract); the
+  // flag omitted falls back to the bundled default scope; `--no-scope`
+  // (opts.scope === false) opts out entirely.
   let scopeContent: string | undefined;
-  if (opts.scope) {
+  if (typeof opts.scope === "string") {
     const scopePath = resolve(opts.scope);
     try {
       scopeContent = readFileSync(scopePath, "utf8");
     } catch (err) {
       throw new Error(`--scope: cannot read ${scopePath}: ${(err as Error).message}`);
     }
+  } else if (opts.scope !== false) {
+    scopeContent = loadDefaultScope();
   }
 
-  // `--scope` without `--validate` selects the cheap scope-only path.
-  // `--validate` (with or without `--scope`) selects full re-reading
-  // validation. Absence of both is the historical revalidate default
-  // (full validation, no scope context).
-  const scopeOnlyValidate = !opts.validate && !!scopeContent;
+  // Scope-only validation is selected ONLY by an explicit `--scope <path>`
+  // without `--validate`; the bundled default never triggers it. So
+  // absence of both flags stays revalidate's full-validation default —
+  // now with default scope context threaded in. `--validate` (with or
+  // without `--scope`) always runs full re-reading validation.
+  const scopeOnlyValidate = !opts.validate && typeof opts.scope === "string";
 
   const records = loadAllFileRecords(outputDir);
   if (records.length === 0) {
@@ -149,7 +161,8 @@ export async function runRevalidate(
   console.log(`Revalidating ${tasks.length} finding(s) in ${outputDir}`);
   console.log(`  Root:        ${rootPath}`);
   console.log(`  Provider:    ${detector.name}`);
-  if (scopeContent) console.log(`  Scope:       ${opts.scope}`);
+  if (scopeContent)
+    console.log(`  Scope:       ${typeof opts.scope === "string" ? opts.scope : "default"}`);
   if (scopeOnlyValidate) {
     console.log(
       `  Mode:        scope-only (file content not read; only out-of-scope verdicts persisted)`,
@@ -332,11 +345,15 @@ export function registerRevalidateCommand(program: Command): void {
     )
     .option(
       "--scope <path>",
-      "path to a SECURITY.md-style scope file. With --validate, scope rules are threaded into the full classifier (verdicts include `out-of-scope`). WITHOUT --validate, triggers scope-only validation: the model never re-reads the source and only persists `out-of-scope` verdicts (cheap pre-filter).",
+      "path to a SECURITY.md-style scope file. With --validate, scope rules are threaded into the full classifier (verdicts include `out-of-scope`). WITHOUT --validate, triggers scope-only validation: the model never re-reads the source and only persists `out-of-scope` verdicts (cheap pre-filter). When omitted, a bundled default scope (trust-boundary rules) is used; pass --no-scope to disable it.",
+    )
+    .option(
+      "--no-scope",
+      "disable the bundled default scope (skip trust-boundary filtering during validation)",
     )
     .option(
       "--validate",
-      "force full validation (re-reads source) even when --scope is set. Without this, `--scope` alone selects the cheap scope-only path; absence of both runs full validation with no scope context.",
+      "force full validation (re-reads source) even when --scope is set. Without this, an explicit `--scope <path>` selects the cheap scope-only path; absence of both runs full validation with the default scope context.",
     )
     .option(
       "--root <path>",
