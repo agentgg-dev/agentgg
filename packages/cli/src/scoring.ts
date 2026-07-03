@@ -1,7 +1,8 @@
-import type { CvssScore, Finding } from "@agentgg/core";
+import type { CvssScore, Finding, ReconReport } from "@agentgg/core";
 import { buildCvssScore } from "@agentgg/core";
 import { z } from "zod";
 import { languageFromPath } from "./detect.js";
+import { renderReconForPrompt } from "./recon.js";
 
 /**
  * Shape the scoring agent is asked to produce. Only the 8 CVSS 3.1 base
@@ -85,28 +86,40 @@ export function asCvssScore(llm: LlmScore): CvssScore {
 /**
  * Prompt the scoring agent sees for one finding. It receives the
  * finding's narrative + the full file content (same shape as the
- * validator) and is asked to pick the 8 CVSS 3.1 base metrics. The
- * prompt teaches each metric by example so we don't depend on the
- * model having internalised the CVSS rubric.
+ * validator), optionally the project recon brief, and is asked to pick
+ * the 8 CVSS 3.1 base metrics. The prompt teaches each metric so we
+ * don't depend on the model having internalised the CVSS rubric.
+ *
+ * The recon brief, when present, anchors the deployment-dependent
+ * metrics (Attack Vector, Privileges Required) that the file alone
+ * can't disclose. Without it the model defaults to a network-reachable,
+ * pre-auth worst case and nearly everything scores CRITICAL.
  */
-export function buildScorePrompt(args: { finding: Finding; fileContent: string }): string {
-  const { finding, fileContent } = args;
+export function buildScorePrompt(args: {
+  finding: Finding;
+  fileContent: string;
+  recon?: ReconReport;
+}): string {
+  const { finding, fileContent, recon } = args;
   const lang = languageFromPath(finding.filePath);
   const lineHint = finding.lineRange
     ? `lines ${finding.lineRange[0]}–${finding.lineRange[1]}`
     : "unspecified lines";
+  const reconBlock = recon ? `\n${renderReconForPrompt(recon)}\n` : "";
 
   return `You are scoring a confirmed security finding on the CVSS 3.1 base
 metrics. You will NOT pick the numeric score yourself — your job is to
 choose the 8 metric values and write a short justification. The score
 and severity bucket are computed deterministically afterward.
 
-Pick each metric based on the worst plausible exploitation of the
-vulnerability AS WRITTEN in the source below. Don't speculate about
-hardening that isn't visible in the code. If the code shows a real
-auth check that gates the sink, reflect that in Privileges Required;
-if there's no such check, score it as None.
-
+Score the MOST LIKELY realistic exploitation of the vulnerability AS
+WRITTEN in the source below, not the worst case you can imagine. CVSS
+measures a representative real attack, not a theoretical maximum. Don't
+speculate about hardening that isn't visible in the code, and don't
+inflate metrics to cover exotic scenarios the code doesn't support. If
+the code shows a real auth check that gates the sink, reflect that in
+Privileges Required; if there's no such check, score it as None.
+${reconBlock}
 ## The finding
 
 **Title:** ${finding.title}
@@ -134,15 +147,21 @@ ${fileContent}
 
 ## Metric reference (CVSS 3.1 base metrics)
 
-- **Attack Vector (AV):** N (remote over network), A (adjacent network
-  — same LAN/Bluetooth/etc.), L (local — attacker needs shell/CLI),
-  P (physical access required). Pick the lowest privilege channel
-  through which an attacker can reach the sink.
+- **Attack Vector (AV):** N (remote over network), A (adjacent network,
+  same LAN/Bluetooth/etc.), L (local, attacker needs shell/CLI), P
+  (physical access required). Use the recon brief to place the target:
+  if it is a local CLI, desktop app, build tool, or a library with no
+  network listener, AV is Local unless THIS finding sits on a genuinely
+  network-reachable path (an HTTP handler, a parser of remote input,
+  etc.). Reserve Network for sinks a remote attacker can actually reach.
 - **Attack Complexity (AC):** L (no specific conditions beyond the
   attacker's own action), H (race conditions, specific configuration,
   attacker preparation, or chained pre-requisites).
 - **Privileges Required (PR):** N (no auth needed), L (any
-  authenticated user), H (admin / privileged account).
+  authenticated user), H (admin / privileged account). Match the auth
+  actually present: reserve None for paths reachable before login. If
+  the recon auth model or the code shows the sink sits behind
+  authentication, PR is Low or High.
 - **User Interaction (UI):** N (works against the system directly),
   R (a victim must click a link / open a file / etc.).
 - **Scope (S):** U (impact stays in the vulnerable component), C
@@ -150,22 +169,35 @@ ${fileContent}
   escape, SSRF reaching internal services, stored XSS executing in
   another origin, container escape, etc.). Picking C is significant —
   only do it when the bug genuinely transcends the component boundary.
-- **Confidentiality / Integrity / Availability (C, I, A):**
+- **Confidentiality / Integrity / Availability (C, I, A):** rate each
+  dimension independently against the realistic exploit.
   - H = total or near-total impact on this dimension within the
     affected component
   - L = some impact but attacker has limited control over what
   - N = no impact
+  The three are usually NOT all High. Most bugs hit one dimension and
+  barely touch the others: a data leak affects confidentiality, not
+  integrity or availability; a crash or resource-exhaustion affects
+  availability, not confidentiality. Reserve H for a dimension the
+  attacker genuinely and fully controls, and use N freely for
+  dimensions the exploit does not touch.
 
 ## Your task
 
 Return the 8 metric values plus a 2–4 sentence justification that
 references the specific code element or exploitation chain. If the
-PoC is unauthenticated and pre-auth, PR must be N — do not paper over
+PoC is unauthenticated and pre-auth, PR must be N: do not paper over
 missing auth. Conversely, if the only sink is gated by a verified
 admin middleware, PR is H.
 
+Score the realistic case. A CRITICAL rating should fall out of the
+metrics only when the bug is genuinely remote-reachable, needs little
+or no privilege, and does severe harm. It should not be the default:
+a locally exploitable bug, one behind authentication, or one with
+impact confined to a single dimension is usually Medium or High.
+
 Be honest about uncertainty: if a code path could be reachable with or
 without authentication depending on configuration not shown here, pick
-the metric that reflects the worst plausible code-visible state, and
-flag that in your justification.`;
+the metric that reflects the most likely code-visible state, and flag
+that in your justification.`;
 }

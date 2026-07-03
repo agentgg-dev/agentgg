@@ -1,4 +1,4 @@
-import type { CvssScore, Finding } from "@agentgg/core";
+import type { CvssScore, Finding, ReconReport } from "@agentgg/core";
 import { generateObject, type LanguageModelV1 } from "ai";
 import { AgentSpec } from "../agent-spec.js";
 import { buildDedupePrompt, LlmDedup } from "../deduper.js";
@@ -297,6 +297,7 @@ export class MultiProviderDetector implements Detector {
   async scoreFinding(args: {
     finding: Finding;
     fileContent: string;
+    recon?: ReconReport;
     signal?: AbortSignal;
   }): Promise<CvssScore> {
     try {

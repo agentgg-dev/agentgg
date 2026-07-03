@@ -1,4 +1,4 @@
-import type { CvssScore, Finding } from "@agentgg/core";
+import type { CvssScore, Finding, ReconReport } from "@agentgg/core";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
@@ -219,6 +219,7 @@ export class ClaudeAgentDetector implements Detector {
   async scoreFinding(args: {
     finding: Finding;
     fileContent: string;
+    recon?: ReconReport;
     signal?: AbortSignal;
   }): Promise<CvssScore> {
     // Single-turn, no tools — same constraint as validation: the

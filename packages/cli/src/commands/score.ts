@@ -5,6 +5,7 @@ import {
   completeRun,
   createRunMeta,
   loadAllFileRecords,
+  readReconReport,
   readScanMeta,
   writeFileRecord,
   writeRunMeta,
@@ -73,6 +74,12 @@ export async function runScore(
     );
   }
   const rootPath = opts.root ? resolve(opts.root) : scanMeta.root;
+
+  // Recon brief, if the scan produced one. It anchors the deployment-
+  // dependent CVSS metrics (Attack Vector, Privileges Required) so a
+  // local CLI/library target isn't scored as a network-reachable
+  // service. Absent (older scan, or --no-recon) → scored without it.
+  const recon = readReconReport(outputDir) ?? undefined;
 
   const config = loadOrSynthesizeConfig(env, opts.provider);
   const credentials: CredentialOverrides = {
@@ -182,6 +189,7 @@ export async function runScore(
       const cvss = await detector.scoreFinding({
         finding,
         fileContent: content,
+        recon,
         signal: scoreAbortController.signal,
       });
       // Mutate in place — the record holds the same Finding object.

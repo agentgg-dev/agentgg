@@ -1230,6 +1230,7 @@ export async function runScan(
             const cvss = await detector.scoreFinding({
               finding,
               fileContent: content,
+              recon,
               signal: scanAbortController.signal,
             });
             finding.cvss = cvss;

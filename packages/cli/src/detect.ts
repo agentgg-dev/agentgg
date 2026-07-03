@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { extname } from "node:path";
-import type { Agent, CvssScore, Finding } from "@agentgg/core";
+import type { Agent, CvssScore, Finding, ReconReport } from "@agentgg/core";
 import { z } from "zod";
 import type { AgentSpec } from "./agent-spec.js";
 import type { UsageMeter } from "./usage-meter.js";
@@ -212,8 +212,16 @@ export interface Detector {
    * in `scoring.asCvssScore`. Same prompting shape as validation
    * (finding + file content), so the model can ground its metric
    * choices in the actual code rather than the detector's prose.
+   *
+   * `recon` is the project brief. It anchors the deployment-dependent
+   * metrics (Attack Vector, Privileges Required) that the file alone
+   * can't disclose — a local CLI/library target should not be scored as
+   * a network-reachable service. Optional so a bare `score` run without
+   * a recon.json still works.
    */
-  scoreFinding(args: { finding: Finding; fileContent: string } & AbortableArgs): Promise<CvssScore>;
+  scoreFinding(
+    args: { finding: Finding; fileContent: string; recon?: ReconReport } & AbortableArgs,
+  ): Promise<CvssScore>;
 
   /**
    * De-duplication phase — the final gather pass. Given every finding for

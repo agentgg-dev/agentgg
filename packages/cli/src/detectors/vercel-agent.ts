@@ -1,6 +1,6 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
-import type { CvssScore, Finding } from "@agentgg/core";
+import type { CvssScore, Finding, ReconReport } from "@agentgg/core";
 import { generateObject, generateText, type LanguageModelV1, tool } from "ai";
 import { minimatch } from "minimatch";
 import { z } from "zod";
@@ -546,6 +546,7 @@ export class VercelAgentDetector implements Detector {
   async scoreFinding(args: {
     finding: Finding;
     fileContent: string;
+    recon?: ReconReport;
     signal?: AbortSignal;
   }): Promise<CvssScore> {
     try {
