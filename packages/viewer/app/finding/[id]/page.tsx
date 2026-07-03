@@ -43,14 +43,12 @@ export default async function FindingPage({ params }: { params: Promise<{ id: st
             <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider border border-bg-border bg-bg/40 text-amber">
               {finding.agentSlug}
             </span>
-            <div className="ml-auto flex items-center gap-2">
-              <CopyMarkdownButton markdown={findingToMarkdown(finding)} />
-              <CopyMarkdownButton
-                markdown={findingToGhsaMarkdown(finding)}
-                label="Copy GHSA"
-                title="Copy this finding as a GHSA-style advisory (title, summary, details, PoC, CVSS score, references)"
-              />
-            </div>
+            <CopyMarkdownButton
+              markdown={findingToGhsaMarkdown(finding)}
+              label="Copy GHSA"
+              title="Copy this finding as a GHSA-style advisory (title, summary, details, PoC, CVSS score, references)"
+              className="ml-auto"
+            />
           </div>
 
           <h1 className="text-2xl md:text-3xl font-bold tracking-tight text-ink leading-tight">
@@ -186,80 +184,11 @@ function MetaField({ label, children }: { label: string; children: React.ReactNo
 }
 
 /**
- * Serialize a finding to a single self-contained markdown block — what we'd
- * paste into a Slack thread, a Linear ticket, or a PR review. Mirrors the
- * GHSA section order the rest of the viewer reflects (Summary / Details /
- * PoC / Impact / Validation / CVSS / References) so a copied finding reads
- * the same as the page does. `details`/`poc`/`impact`/`validation.reasoning`/
- * `dedup.reasoning`/`cvss.justification` are already markdown bodies; we
- * concatenate without re-escaping.
- */
-function findingToMarkdown(f: Finding): string {
-  const out: string[] = [];
-  out.push(`# ${f.title}`, "");
-
-  const facts: string[] = [];
-  facts.push(`**Severity:** ${f.severity ?? "unscored"}`);
-  if (f.validation) facts.push(`**Verdict:** ${f.validation.verdict}`);
-  facts.push(`**Agent:** \`${f.agentSlug}\``);
-  facts.push(`**Class:** \`${f.vulnSlug}\``);
-  facts.push(`**Location:** \`${f.filePath}${locationSuffix(f)}\``);
-  facts.push(`**Confidence:** ${Math.round(f.confidence * 100)}%`);
-  if (f.cvss) {
-    facts.push(`**CVSS:** ${f.cvss.baseScore.toFixed(1)} (\`${f.cvss.vector}\`)`);
-  }
-  // Two-space line breaks render as one paragraph (GitHub, Linear, mrkdwn)
-  // instead of collapsing into a single line.
-  out.push(facts.join("  \n"), "");
-
-  out.push("## Summary", "", f.summary, "");
-  out.push("## Details", "", f.details, "");
-  out.push("## Proof of concept", "", f.poc, "");
-  out.push("## Impact", "", f.impact, "");
-
-  if (f.validation) {
-    out.push("## Validation", "", `**Verdict:** ${f.validation.verdict}`);
-    if (f.validation.scopeRef) out.push(`**Scope:** ${f.validation.scopeRef}`);
-    out.push("", f.validation.reasoning, "");
-  }
-
-  if (f.dedup) {
-    out.push(
-      "## Duplicate",
-      "",
-      `Folded into primary \`${f.dedup.duplicateOf}\`.`,
-      "",
-      f.dedup.reasoning,
-      "",
-    );
-  }
-
-  if (f.cvss) {
-    out.push(
-      "## CVSS 3.1",
-      "",
-      `Vector: \`${f.cvss.vector}\`  \nBase score: **${f.cvss.baseScore.toFixed(1)}** (${f.cvss.severity})`,
-      "",
-      f.cvss.justification,
-      "",
-    );
-  }
-
-  if (f.references.length > 0) {
-    out.push("## References", "");
-    for (const ref of f.references) out.push(`- ${ref}`);
-    out.push("");
-  }
-
-  out.push(`*Finding ID: \`${f.id}\`*`);
-  return out.join("\n");
-}
-
-/**
- * Leaner GHSA-style advisory: only the fields a GitHub Security Advisory body
- * carries — title, summary, details, PoC, the CVSS score + vector selections
- * (no justification prose), and references. Drops the internal triage metadata
- * (agent, verdict, dedup, confidence, finding ID) that findingToMarkdown emits.
+ * Serialize a finding as a GHSA-style advisory: only the fields a GitHub
+ * Security Advisory body carries — title, summary, details, PoC, the CVSS
+ * score + vector selections (no justification prose), and references. The
+ * internal triage metadata (agent, verdict, dedup, confidence, finding ID)
+ * is intentionally omitted.
  */
 function findingToGhsaMarkdown(f: Finding): string {
   const out: string[] = [];
@@ -282,11 +211,4 @@ function findingToGhsaMarkdown(f: Finding): string {
     out.push("");
   }
   return out.join("\n").trimEnd();
-}
-
-function locationSuffix(f: Finding): string {
-  if (!f.lineRange) return "";
-  const [a, b] = f.lineRange;
-  if (a === b) return `:${a}`;
-  return `:${a}-${b}`;
 }
