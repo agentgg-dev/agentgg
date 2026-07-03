@@ -96,9 +96,9 @@ interface ScanOpts {
    * `--auto-exclude`: before recon, ask the model which folders are not
    * worth security-scanning (tests, fixtures, generated code, vendored
    * deps, docs, sample data) and fold them in as if they were CLI
-   * `--exclude` paths. Off by default: a scan never silently skips code
-   * unless asked. The chosen folders are always logged (with reasons in
-   * `--verbose`).
+   * `--exclude` paths. On by default (Commander default `true`); pass
+   * `--no-auto-exclude` to scan the whole tree. The chosen folders are
+   * always logged (with reasons in `--verbose`).
    */
   autoExclude?: boolean;
   /** Re-analyze files even when a prior FileRecord covers them with the same contentHash. */
@@ -161,11 +161,11 @@ interface ScanOpts {
    */
   summary?: boolean;
   /**
-   * Run the CVSS 3.1 scoring phase after detection (and after validation
-   * when --validate is set). The scoring agent picks the 8 base metrics
-   * per finding; the score and severity bucket are computed
-   * deterministically in Node from those choices. When `--validate` was
-   * passed, findings the validator marked false-positive or out-of-scope
+   * Run the CVSS 3.1 scoring phase after detection (and after validation).
+   * On by default (Commander default `true`); pass `--no-score` to skip it.
+   * The scoring agent picks the 8 base metrics per finding; the score and
+   * severity bucket are computed deterministically in Node from those
+   * choices. Findings the validator marked false-positive or out-of-scope
    * are skipped to avoid paying for findings that won't ship.
    */
   score?: boolean;
@@ -173,7 +173,8 @@ interface ScanOpts {
   rescore?: boolean;
   /**
    * Run the de-duplication phase at the very end (after detect/validate/
-   * score). Groups shippable findings by source file across agents, folds
+   * score). On by default (Commander default `true`); pass `--no-dedup` to
+   * skip it. Groups shippable findings by source file across agents, folds
    * same-root-cause findings under one primary, and marks the rest with a
    * `dedup` field so the report collapses them. The final gather step —
    * it needs every finding for a file co-located, so it cannot be
@@ -1649,7 +1650,12 @@ export function registerScanCommand(program: Command): void {
     .option("-o, --output <path>", "output directory for findings", "./scan-results/")
     .option(
       "--validate",
-      "run a full second-pass LLM validation phase per finding (slower; reduces false positives). Combine with --scope to thread scope rules into the classifier.",
+      "run a full second-pass LLM validation phase per finding (slower; reduces false positives). Combine with --scope to thread scope rules into the classifier. On by default; disable with --no-validate.",
+      true,
+    )
+    .option(
+      "--no-validate",
+      "skip the full second-pass validation phase (it runs by default). Detection findings ship unvalidated.",
     )
     .option(
       "--rescan",
@@ -1743,7 +1749,12 @@ export function registerScanCommand(program: Command): void {
     )
     .option(
       "--score",
-      "Run the CVSS 3.1 scoring phase after detection (and after --validate when set). The agent picks the 8 base metrics; the score and severity bucket are computed deterministically. Findings the validator marked false-positive or out-of-scope are skipped.",
+      "Run the CVSS 3.1 scoring phase after detection (and after validation). The agent picks the 8 base metrics; the score and severity bucket are computed deterministically. Findings the validator marked false-positive or out-of-scope are skipped. On by default; disable with --no-score.",
+      true,
+    )
+    .option(
+      "--no-score",
+      "skip the CVSS 3.1 scoring phase (it runs by default). Findings ship without a severity score.",
     )
     .option(
       "--rescore",
@@ -1751,7 +1762,12 @@ export function registerScanCommand(program: Command): void {
     )
     .option(
       "--dedup",
-      "Run the de-duplication phase at the very end (after detect/validate/score). Groups findings by source file across agents, folds same-root-cause findings under one primary, and marks the rest with a `dedup` field so the report collapses them. The final gather step — it sees all of a file's findings, so it can't be distributed like the earlier phases.",
+      "Run the de-duplication phase at the very end (after detect/validate/score). Groups findings by source file across agents, folds same-root-cause findings under one primary, and marks the rest with a `dedup` field so the report collapses them. The final gather step — it sees all of a file's findings, so it can't be distributed like the earlier phases. On by default; disable with --no-dedup.",
+      true,
+    )
+    .option(
+      "--no-dedup",
+      "skip the de-duplication phase (it runs by default). Duplicate findings across agents are all kept in the report.",
     )
     .option(
       "--delete-duplicates",
@@ -1785,7 +1801,12 @@ export function registerScanCommand(program: Command): void {
     )
     .option(
       "--auto-exclude",
-      "Before scanning, let the model pick folders not worth reviewing (tests, fixtures, generated/vendored code, docs, sample data) and skip them like --exclude paths. Off by default; chosen folders are logged (reasons shown with --verbose).",
+      "Before scanning, let the model pick folders not worth reviewing (tests, fixtures, generated/vendored code, docs, sample data) and skip them like --exclude paths. On by default; chosen folders are always logged (reasons shown with --verbose). Disable with --no-auto-exclude to scan the whole tree.",
+      true,
+    )
+    .option(
+      "--no-auto-exclude",
+      "don't let the model pick folders to skip (auto-exclude runs by default). The whole tree is scanned except your explicit --exclude paths.",
     )
     .option("-v, --verbose", "verbose output")
     .action(async (path: string, opts: ScanOpts) => {

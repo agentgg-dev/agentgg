@@ -9,8 +9,8 @@ One-page reference for what's wired and how. User-facing docs are in [README.md]
 1. **Recon** — one tool-enabled survey of the repo via the built-in recon agent ([`src/agents/recon.md`](packages/cli/src/agents/recon.md), loaded by [`recon-agent.ts`](packages/cli/src/recon-agent.ts)). Produces a concise `ReconReport` → `state/recon.json`. Cached by `reconHash` (root + `fingerprint` tags); `--re-recon` forces a refresh, `--no-recon` skips it entirely. The brief is injected into precondition prompt checks and into every agent's detection prompt.
 2. **Precondition** — for each selected agent, decide queued vs skipped ([`precondition.ts`](packages/cli/src/precondition.ts)). The decisions (with reasons) are written to `state/plan.json` **before any agent runs**. Reused like recon: when a `plan.json` already matches the recon brief and covers the `-t` selection, the for-loop is skipped and its decisions are lifted from disk (`--re-recon` re-evaluates; `--no-recon` bypasses gating and queues every `-t` agent).
 3. **Run** — each queued agent runs over its `where` file set, in batches.
-4. **Validate** (`--validate` / `--scope`) and **Score** (`--score`) — second-pass passes over the findings.
-5. **Report** — per-finding `findings/*.md` + `summary.md`. Skippable with `--no-summary` (state still persists); regenerate later with `agentgg summary`.
+4. **Validate** (`--scope` for rules), **Score**, and **Dedup** — second-pass passes over the findings. All three run by default; disable individually with `--no-validate` / `--no-score` / `--no-dedup`.
+5. **Report** — per-finding `findings/*.md` + `summary.md`. Skippable with `--no-summary` (state still persists); regenerate later with `agentgg summary`. `--serve` (opt-in) boots the viewer once the report is written.
 
 Each phase is also a standalone command over the same `--output` dir, sharing the artifacts above: **`agentgg recon`** (phases 1–2 only, no detection), **`agentgg revalidate`** (phase 4 validate), **`agentgg score`** (phase 4 score), **`agentgg summary`** (phase 5). `recon` writes `recon.json` + `plan.json` that a later `scan` reuses — the durable plan→run hand-off.
 
@@ -68,7 +68,7 @@ Providers are standalone modules under [`providers/`](packages/cli/src/providers
 
 The walker is a **pure enumerator** — it applies only the `excludePatterns` it's handed and carries no built-in policy. The shared default skip set (`node_modules`, `.git`, build dirs, lockfiles, binaries) lives as data in `DEFAULT_EXCLUDES` ([`walker.ts`](packages/cli/src/walker.ts)) and is merged in by `scan.ts`. It can be dropped globally (`--no-default-excludes`) or per-agent (`where.useDefaultExcludes: false`). CLI `--exclude` paths are always applied (treated as deleted) and, on the Vercel tool path, enforced at the tool layer so a tool read can't reach them. (The Claude Agent SDK's built-in tools aren't bounded, so there it's prompt-level only.)
 
-`--auto-exclude` ([`smart-exclude.ts`](packages/cli/src/smart-exclude.ts)) adds one opt-in step that runs **before recon**: a no-tools LLM call classifies the directory layout and returns folders not worth scanning (tests, fixtures, docs, generated output, vendored deps). Those globs are folded into `excludePatterns` exactly like a CLI `--exclude`, so recon, the precondition census, and every agent inherit them (and they fold into the resume scope signature). It only removes folders. A pass failure is advisory — the scan continues with no auto-excludes.
+Auto-exclude ([`smart-exclude.ts`](packages/cli/src/smart-exclude.ts)) is **on by default** (`--no-auto-exclude` disables it) and runs **before recon**: a no-tools LLM call classifies the directory layout and returns folders not worth scanning (tests, fixtures, docs, generated output, vendored deps). Those globs are folded into `excludePatterns` exactly like a CLI `--exclude`, so recon, the precondition census, and every agent inherit them (and they fold into the resume scope signature). It only removes folders. A pass failure is advisory — the scan continues with no auto-excludes.
 
 ## Persistence & resume
 
@@ -99,7 +99,7 @@ Resume:
 
 Three Detector methods, so any provider participates without bespoke wiring:
 - **`validateFinding`** — full classifier; re-reads source → `confirmed` / `false-positive` / `out-of-scope` / `uncertain` + reasoning. Used by `--validate` and `agentgg revalidate`.
-- **`validateFindingByScope`** — cheap variant, no source read; only `out-of-scope` / `uncertain`. Triggered by `--scope` without `--validate` (a pre-filter before the full validator).
+- **`validateFindingByScope`** — cheap variant, no source read; only `out-of-scope` / `uncertain`. Triggered by an explicit `--scope <path>` combined with `--no-validate` (a pre-filter that stands in for the full validator when it's turned off).
 - **`scoreFinding`** — picks the 8 CVSS 3.1 base metrics; vector string, base score, and severity bucket are computed deterministically in [`scoring.asCvssScore`](packages/cli/src/scoring.ts). Triggered by `--score` or `agentgg score`.
 
 ## CLI flags
@@ -115,9 +115,11 @@ Three Detector methods, so any provider participates without bespoke wiring:
 | `--effort` / `--thinking` | provider-dependent | Reasoning knobs mapped to provider-native options where supported. |
 | `--diff <commit>` | agent runs | Each agent's candidate list is intersected with the touched files; the commit patch is injected as a focus hint. Accepts `<ref>`, `a..b`, `a...b`. |
 | `--exclude` / `--only` / `--max-file-size` / `--no-default-excludes` | file selection | Walk filters. `--exclude` = deleted; `--only` restricts; `--no-default-excludes` drops the built-in skip set. |
-| `--auto-exclude` | file selection (pre-recon) | Opt-in LLM pass that picks non-runtime folders to skip, folded in like `--exclude`. Off by default; logged (reasons under `--verbose`). |
-| `--validate` / `--revalidate-all` / `--scope` | post-detection | Validation passes (see above). |
-| `--score` / `--rescore` | post-detection | CVSS scoring pass. |
+| `--auto-exclude` / `--no-auto-exclude` | file selection (pre-recon) | LLM pass that picks non-runtime folders to skip, folded in like `--exclude`. **On by default**; `--no-auto-exclude` disables. Logged (reasons under `--verbose`). |
+| `--validate` / `--no-validate` / `--revalidate-all` / `--scope` | post-detection | Validation passes (see above). **On by default**; `--no-validate` for a detection-only run. |
+| `--score` / `--no-score` / `--rescore` | post-detection | CVSS scoring pass. **On by default**; `--no-score` to skip. |
+| `--dedup` / `--no-dedup` / `--delete-duplicates` | post-detection | De-duplication pass, clustering same-root-cause findings per file. **On by default**; `--no-dedup` to skip. |
+| `--serve [port]` | after report | Boot the local web UI when the scan finishes. Opt-in (default port 3737). |
 
 ## Frontmatter vs CLI precedence
 

@@ -55,8 +55,8 @@ Requires Node.js 20+ and pnpm 9+. See [CONTRIBUTING.md](https://github.com/agent
 
 ```bash
 agentgg init                                                       # one-time: pick a provider, paste a key
-agentgg scan ./src --validate -o ./out                             # scan everything, validate findings
-agentgg scan ./src --diff origin/main...HEAD --validate -o ./out   # PR-style: scan only what changed
+agentgg scan ./src -o ./out                                        # scan everything (validate/score/dedup on by default)
+agentgg scan ./src --diff origin/main...HEAD -o ./out              # PR-style: scan only what changed
 agentgg status ./out                                               # what got found / validated / when
 agentgg view ./out                                                 # browse findings in a local web UI
 agentgg scan ./src --serve -o ./out                                # scan, then boot the UI when done
@@ -229,12 +229,12 @@ A `.txt` list file (one slug or path per line):
 agentgg scan ./src -t ./agents.txt -o ./out
 ```
 
-### Add validation
+### Validation
 
-The validation phase is a second-pass LLM call per finding that re-reads the source and classifies as `confirmed` / `false-positive` / `out-of-scope` / `uncertain`. Off by default. Opt in:
+The validation phase is a second-pass LLM call per finding that re-reads the source and classifies as `confirmed` / `false-positive` / `out-of-scope` / `uncertain`. **On by default.** Turn it off for a detection-only run:
 
 ```bash
-agentgg scan ./src -t sql-injection --validate -o ./out
+agentgg scan ./src -t sql-injection --no-validate -o ./out
 ```
 
 Each finding gets a `validation` section in its markdown file and a verdict count in `summary.md`.
@@ -244,24 +244,25 @@ Each finding gets a `validation` section in its markdown file and a verdict coun
 During validation, findings are checked against a **scope document** — the trust-boundary rules that decide whether a defect is actually exploitable. A built-in default scope applies automatically, so `out-of-scope` is a real verdict out of the box:
 
 ```bash
-agentgg scan ./src --validate -o ./out               # uses the built-in default scope
+agentgg scan ./src -o ./out                          # validation + built-in default scope, both on by default
 ```
 
 Override it with your own policy (any text file: a security policy, an audit-scope doc, internal notes), or turn scope filtering off entirely:
 
 ```bash
-agentgg scan ./src --validate --scope ./scope.md -o ./out   # your scope instead of the default
-agentgg scan ./src --validate --no-scope -o ./out           # no scope filtering at all
+agentgg scan ./src --scope ./scope.md -o ./out       # your scope instead of the default
+agentgg scan ./src --no-scope -o ./out               # no scope filtering at all
 ```
 
-Scope only matters where validation runs. The default applies to `scan --validate` and to any `revalidate` (which always validates); a plain `scan` without `--validate` is detection-only and never consults it.
+Scope only matters where validation runs. Because validation is on by default, the default scope applies to a plain `scan` and to any `revalidate` (which always validates). A detection-only run (`--no-validate`) never consults it.
 
-### Score findings
+### Scoring
 
-Add `--score` during scan, or run `agentgg score ./out` afterward, to attach a CVSS 3.1 severity to each finding.
+The CVSS 3.1 scoring phase attaches a severity to each finding. **On by default** during scan; turn it off with `--no-score`, or run `agentgg score ./out` afterward.
 
 ```bash
-agentgg scan ./src --validate --score -o ./out
+agentgg scan ./src -o ./out                          # scoring on by default
+agentgg scan ./src --no-score -o ./out               # skip scoring
 ```
 
 ### Re-run only the validation phase
@@ -393,7 +394,7 @@ agentgg scan ./src --max-batches 50 -o ./out             # run at most 50 agent 
 
 By default the scan skips a built-in exclude set — lockfiles, minified bundles, binary assets, `node_modules`, `dist`, `.git`, and the scan-results directory. Pass `--no-default-excludes` to scan everything, or set `where.useDefaultExcludes: false` on a single agent. CLI `--exclude` paths are always treated as deleted (invisible to every agent).
 
-Pass `--auto-exclude` (off by default) to let the model pick additional non-runtime folders — tests, fixtures, docs, generated output, vendored dependencies — to skip before the scan starts. It runs one cheap pass over the directory layout ahead of recon, so recon and every agent inherit the result. Its picks are always logged (with a reason per folder under `--verbose`) and combine with any manual `--exclude` paths; it only ever removes folders, never adds them back.
+Auto-exclude (**on by default**; disable with `--no-auto-exclude`) lets the model pick additional non-runtime folders — tests, fixtures, docs, generated output, vendored dependencies — to skip before the scan starts. It runs one cheap pass over the directory layout ahead of recon, so recon and every agent inherit the result. Its picks are always logged (with a reason per folder under `--verbose`) and combine with any manual `--exclude` paths; it only ever removes folders, never adds them back.
 
 `--max-files-per-agent` is a per-agent ceiling: when an agent's `where` resolves to more candidate files than the cap, it reviews the first `<n>` (in the walker's deterministic scan order) and drops the rest, rather than being skipped. A guardrail so one over-broad agent can't blow up cost or time on a large repo. Different from `--max-files-per-batch`, which only sets how many files pack into a single LLM session.
 
@@ -537,7 +538,8 @@ Run `agentgg <command> --help` for the full flag list on any subcommand.
 -t, --template <value>          slug, .md path, directory, or .txt list file;
                                 comma- or whitespace-separated; repeatable
 -o, --output <path>             output directory (default ./scan-results/)
---validate                      run a second-pass validation phase per finding
+--validate / --no-validate      second-pass validation phase per finding (on by default; --no-validate for a detection-only run)
+--score / --no-score            CVSS 3.1 scoring phase (on by default; --no-score to skip)
 --scope <path>                  scope doc the validator consults for trust-boundary rules; overrides the built-in default (enables `out-of-scope`)
 --no-scope                      disable the built-in default scope (skip trust-boundary filtering during validation)
 --rescan                        re-analyze files even if a prior run covered them
@@ -550,13 +552,14 @@ Run `agentgg <command> --help` for the full flag list on any subcommand.
 --max-files-per-agent <n>       cap the candidate files each agent reviews — keep the first <n> in scan order, drop the rest (guardrail against an over-broad agent; no cap by default)
 --max-batches <n>               cap the total agent batches run this scan — keep the first <n> in enqueue order, drop the rest (dropped agents re-run next scan; no cap by default)
 --concurrency <n>               max LLM sessions in flight across the whole scan — agent batches, validation, and scoring all draw from one pool (default 5)
---dedup                         run a final de-duplication pass that clusters same-root-cause findings per source file (off by default)
---delete-duplicates             with --dedup, physically remove duplicate findings instead of just marking them
+--dedup / --no-dedup            final de-duplication pass that clusters same-root-cause findings per source file (on by default; --no-dedup to skip)
+--delete-duplicates             with dedup, physically remove duplicate findings instead of just marking them
 --exclude <pattern>             path/glob to exclude — treated as deleted (repeatable; additive)
 --only <pattern>                restrict scan to matching globs (repeatable)
 --max-file-size <kb>            skip files larger than this (default 500)
 --no-default-excludes           don't apply the built-in excludes (node_modules, .git, lockfiles, binaries)
---auto-exclude                  let the model pick non-runtime folders (tests, docs, generated, vendored) to skip up front (off by default; logged)
+--auto-exclude / --no-auto-exclude  model picks non-runtime folders (tests, docs, generated, vendored) to skip up front (on by default; logged; --no-auto-exclude to disable)
+--serve [port]                  boot the local web UI when the scan finishes (opt-in; default port 3737)
 --provider <name>               anthropic | openai | ollama | bedrock | vertex (overrides config default)
 --api-key <key>                 one-shot API key for anthropic / openai (not persisted)
 --oauth-token <token>           one-shot Anthropic OAuth token (not persisted)
