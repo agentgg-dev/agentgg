@@ -203,7 +203,7 @@ Run the default agent set (`~/.agentgg/agentgg-agents/base/`):
 agentgg scan ./src -o ./out
 ```
 
-Every scan makes LLM calls; cost scales with files × agents × phases. The biggest levers are scoping the scan (`--diff`, `--only`, `--exclude`, `--max-file-size`, `--max-files-per-agent`, `--max-batches`) and picking which agents run (`-t`). Ollama runs locally for free. `--concurrency` controls parallelism, not total cost.
+Every scan makes LLM calls; cost scales with files × agents × phases. The biggest levers are scoping the scan (`--diff`, `--only`, `--exclude`, `--auto-exclude`, `--max-file-size`, `--max-files-per-agent`, `--max-batches`) and picking which agents run (`-t`). Ollama runs locally for free. `--concurrency` controls parallelism, not total cost.
 
 A single slug:
 
@@ -393,6 +393,8 @@ agentgg scan ./src --max-batches 50 -o ./out             # run at most 50 agent 
 
 By default the scan skips a built-in exclude set — lockfiles, minified bundles, binary assets, `node_modules`, `dist`, `.git`, and the scan-results directory. Pass `--no-default-excludes` to scan everything, or set `where.useDefaultExcludes: false` on a single agent. CLI `--exclude` paths are always treated as deleted (invisible to every agent).
 
+Pass `--auto-exclude` (off by default) to let the model pick additional non-runtime folders — tests, fixtures, docs, generated output, vendored dependencies — to skip before the scan starts. It runs one cheap pass over the directory layout ahead of recon, so recon and every agent inherit the result. Its picks are always logged (with a reason per folder under `--verbose`) and combine with any manual `--exclude` paths; it only ever removes folders, never adds them back.
+
 `--max-files-per-agent` is a per-agent ceiling: when an agent's `where` resolves to more candidate files than the cap, it reviews the first `<n>` (in the walker's deterministic scan order) and drops the rest, rather than being skipped. A guardrail so one over-broad agent can't blow up cost or time on a large repo. Different from `--max-files-per-batch`, which only sets how many files pack into a single LLM session.
 
 `--max-batches` is a whole-scan ceiling on the number of agent batches. Once every `(agent, batch)` pair is enqueued, the pool is truncated to `<n>` (in enqueue order) and the rest are dropped before any LLM call runs. Agents whose batches are dropped write no completion sidecar, so a later scan picks them up where this one stopped — a way to spread a large scan across several runs or cap the spend of a single run. Different from `--concurrency`, which bounds how many batches run in parallel, not how many run at all.
@@ -554,6 +556,7 @@ Run `agentgg <command> --help` for the full flag list on any subcommand.
 --only <pattern>                restrict scan to matching globs (repeatable)
 --max-file-size <kb>            skip files larger than this (default 500)
 --no-default-excludes           don't apply the built-in excludes (node_modules, .git, lockfiles, binaries)
+--auto-exclude                  let the model pick non-runtime folders (tests, docs, generated, vendored) to skip up front (off by default; logged)
 --provider <name>               anthropic | openai | ollama | bedrock | vertex (overrides config default)
 --api-key <key>                 one-shot API key for anthropic / openai (not persisted)
 --oauth-token <token>           one-shot Anthropic OAuth token (not persisted)

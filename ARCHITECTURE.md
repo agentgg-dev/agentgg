@@ -38,6 +38,7 @@ There is one agent shape — no `mode`. Every agent declares a `precondition`, a
 Backend-agnostic ([`detect.ts`](packages/cli/src/detect.ts)). One `Detector` is held for the whole scan:
 
 - `recon` — tool-enabled survey → `ReconResult`.
+- `suggestExcludes` — `--auto-exclude` only; one no-tools call over the directory layout → folder globs to skip (`SuggestExcludesResult`).
 - `checkPrecondition` — one-shot LLM relevance gate (no tools) → `{ relevant, reason }`.
 - `runAgent` — tool-enabled investigation over a batch of seeded files → `Finding[]`.
 - `validateFinding` / `validateFindingByScope` — second-pass classifier.
@@ -66,6 +67,8 @@ Providers are standalone modules under [`providers/`](packages/cli/src/providers
 ## File selection & default excludes
 
 The walker is a **pure enumerator** — it applies only the `excludePatterns` it's handed and carries no built-in policy. The shared default skip set (`node_modules`, `.git`, build dirs, lockfiles, binaries) lives as data in `DEFAULT_EXCLUDES` ([`walker.ts`](packages/cli/src/walker.ts)) and is merged in by `scan.ts`. It can be dropped globally (`--no-default-excludes`) or per-agent (`where.useDefaultExcludes: false`). CLI `--exclude` paths are always applied (treated as deleted) and, on the Vercel tool path, enforced at the tool layer so a tool read can't reach them. (The Claude Agent SDK's built-in tools aren't bounded, so there it's prompt-level only.)
+
+`--auto-exclude` ([`smart-exclude.ts`](packages/cli/src/smart-exclude.ts)) adds one opt-in step that runs **before recon**: a no-tools LLM call classifies the directory layout and returns folders not worth scanning (tests, fixtures, docs, generated output, vendored deps). Those globs are folded into `excludePatterns` exactly like a CLI `--exclude`, so recon, the precondition census, and every agent inherit them (and they fold into the resume scope signature). It only removes folders. A pass failure is advisory — the scan continues with no auto-excludes.
 
 ## Persistence & resume
 
@@ -112,6 +115,7 @@ Three Detector methods, so any provider participates without bespoke wiring:
 | `--effort` / `--thinking` | provider-dependent | Reasoning knobs mapped to provider-native options where supported. |
 | `--diff <commit>` | agent runs | Each agent's candidate list is intersected with the touched files; the commit patch is injected as a focus hint. Accepts `<ref>`, `a..b`, `a...b`. |
 | `--exclude` / `--only` / `--max-file-size` / `--no-default-excludes` | file selection | Walk filters. `--exclude` = deleted; `--only` restricts; `--no-default-excludes` drops the built-in skip set. |
+| `--auto-exclude` | file selection (pre-recon) | Opt-in LLM pass that picks non-runtime folders to skip, folded in like `--exclude`. Off by default; logged (reasons under `--verbose`). |
 | `--validate` / `--revalidate-all` / `--scope` | post-detection | Validation passes (see above). |
 | `--score` / `--rescore` | post-detection | CVSS scoring pass. |
 
