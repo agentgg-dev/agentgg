@@ -1,5 +1,4 @@
-import type { SuggestExcludesResult } from "./detect.js";
-import type { Detector } from "./detect.js";
+import type { Detector, SuggestExcludesResult } from "./detect.js";
 import { loadExcludeInstructions } from "./exclude-agent.js";
 import { collectAllFiles } from "./walker.js";
 

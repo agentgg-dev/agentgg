@@ -389,9 +389,7 @@ export async function runScan(
     const smartExcludes: string[] = [];
     if (opts.autoExclude) {
       const baselineWalk =
-        opts.defaultExcludes === false
-          ? [...cliExcludes]
-          : [...DEFAULT_EXCLUDES, ...cliExcludes];
+        opts.defaultExcludes === false ? [...cliExcludes] : [...DEFAULT_EXCLUDES, ...cliExcludes];
       try {
         const suggestions = await runSmartExclude({
           rootDir: root,
