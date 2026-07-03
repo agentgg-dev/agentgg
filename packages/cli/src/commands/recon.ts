@@ -17,6 +17,7 @@ import { loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
 import { selectAgents } from "../precondition.js";
 import { buildCredentialsFromOpts, validateProviderFlags } from "../providers/index.js";
 import { runRecon } from "../recon.js";
+import { runSmartExclude } from "../smart-exclude.js";
 import { resolveTemplates } from "../template.js";
 import { createUsageMeter, type UsageMeter } from "../usage-meter.js";
 import { DEFAULT_EXCLUDES, type WalkConfig } from "../walker.js";
@@ -37,6 +38,9 @@ interface ReconOpts {
   only?: string[];
   maxFileSize?: number; // KB
   defaultExcludes?: boolean;
+  /** Run the smart-exclude LLM pass before recon and fold its globs into the
+   *  walk. Off by default; the chosen globs are recorded in plan.json. */
+  autoExclude?: boolean;
   maxTurns?: number;
   /** Re-run recon even when a cached brief exists for this output dir. */
   reRecon?: boolean;
@@ -154,9 +158,47 @@ export async function runReconCommand(
 
     const project = fingerprint(root);
 
-    const excludePatterns = [...(opts.exclude ?? [])];
+    const cliExcludes = [...(opts.exclude ?? [])];
     const includePatterns = opts.only ?? [];
     const maxFileSizeBytes = (opts.maxFileSize ?? 500) * 1024;
+
+    // --auto-exclude: one LLM pass, BEFORE recon, that picks non-runtime
+    // folders to skip and folds them into the walk — so recon, the
+    // precondition census, and the persisted plan all inherit them. Advisory:
+    // a pass failure degrades to "no auto-excludes" rather than aborting.
+    // Off by default. The chosen globs are written to plan.json so a
+    // distributed runner (e.g. the platform's agent workers) can replay them
+    // as --exclude without paying for the pass N times.
+    const smartExcludes: string[] = [];
+    if (opts.autoExclude) {
+      const baselineWalk =
+        opts.defaultExcludes === false ? [...cliExcludes] : [...DEFAULT_EXCLUDES, ...cliExcludes];
+      try {
+        const suggestions = await runSmartExclude({
+          rootDir: root,
+          detector,
+          excludePatterns: baselineWalk,
+          includePatterns,
+          maxFileSizeBytes,
+          signal: reconAbortController.signal,
+        });
+        for (const s of suggestions) smartExcludes.push(s.glob);
+        if (smartExcludes.length > 0) {
+          console.log(
+            `Auto-excluded ${smartExcludes.length} folder(s): ${smartExcludes.join(", ")}`,
+          );
+          if (opts.verbose) {
+            for (const s of suggestions) console.log(`    ${s.glob}: ${s.reason}`);
+          }
+        } else {
+          console.log("Auto-exclude: nothing to drop; planning the whole tree.");
+        }
+      } catch (err) {
+        console.warn(`Auto-exclude pass failed (continuing without it): ${(err as Error).message}`);
+      }
+    }
+
+    const excludePatterns = [...cliExcludes, ...smartExcludes];
     const walkExcludes =
       opts.defaultExcludes === false
         ? [...excludePatterns]
@@ -220,6 +262,9 @@ export async function runReconCommand(
         reconHash: recon.reconHash,
         rootPath: root,
         decisions: selection.decisions,
+        // Present (even if []) only when the pass ran, so a reader can tell
+        // "auto-exclude didn't run" from "ran, chose nothing".
+        autoExcludes: opts.autoExclude ? smartExcludes : undefined,
       });
     } catch (err) {
       if (opts.verbose) console.error(`  plan: failed to write: ${(err as Error).message}`);
@@ -330,6 +375,10 @@ export function registerReconCommand(program: Command): void {
     .option(
       "--no-default-excludes",
       "Don't apply the shared default exclude set (node_modules, .git, build dirs, lockfiles, binaries).",
+    )
+    .option(
+      "--auto-exclude",
+      "Before recon, let the model pick non-runtime folders (tests, fixtures, generated/vendored code, docs, sample data) to skip, folded into the walk so recon + the precondition plan inherit them. Off by default. The chosen globs are recorded in plan.json (reasons shown with --verbose).",
     )
     .option("-v, --verbose", "verbose output")
     .action(async (path: string, opts: ReconOpts) => {

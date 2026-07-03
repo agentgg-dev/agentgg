@@ -547,6 +547,11 @@ export const ScanPlan = z.object({
   rootPath: z.string(),
   /** One entry per selected agent, in selection order. */
   decisions: z.array(PreconditionDecisionRecord),
+  /** Folders the `--auto-exclude` pass chose to skip, as globs, folded into
+   *  the walk before recon. Present only when recon ran with --auto-exclude;
+   *  omitted (not []) otherwise so a distributed runner can tell "pass didn't
+   *  run" from "pass ran, found nothing". */
+  autoExcludes: z.array(z.string()).optional(),
 });
 export type ScanPlan = z.infer<typeof ScanPlan>;
 

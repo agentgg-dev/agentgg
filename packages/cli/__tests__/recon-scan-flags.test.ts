@@ -68,6 +68,7 @@ const detectorMock = vi.hoisted(() => ({
     async (_args: { agent: { slug: string }; candidates: { filePath: string }[] }) =>
       [] as Finding[],
   ),
+  suggestExcludes: vi.fn(async () => ({ excludes: [] as { glob: string; reason: string }[] })),
 }));
 
 vi.mock("../src/llm.js", async () => {
@@ -79,6 +80,7 @@ vi.mock("../src/llm.js", async () => {
       recon: detectorMock.recon,
       checkPrecondition: detectorMock.checkPrecondition,
       runAgent: detectorMock.runAgent,
+      suggestExcludes: detectorMock.suggestExcludes,
     }),
   };
 });
@@ -132,6 +134,7 @@ beforeEach(() => {
   detectorMock.runAgent.mockImplementation(async ({ agent, candidates }) =>
     candidates.map((c) => mockFinding(agent.slug, c.filePath)),
   );
+  detectorMock.suggestExcludes.mockImplementation(async () => ({ excludes: [] }));
 });
 
 afterEach(() => {
@@ -143,6 +146,7 @@ afterEach(() => {
   detectorMock.recon.mockReset();
   detectorMock.checkPrecondition.mockReset();
   detectorMock.runAgent.mockReset();
+  detectorMock.suggestExcludes.mockReset();
   for (const h of process.listeners("SIGINT")) {
     process.removeListener("SIGINT", h);
   }
@@ -199,6 +203,46 @@ describe("runReconCommand", () => {
       env,
     );
     expect(detectorMock.recon).toHaveBeenCalledTimes(2); // forced re-survey
+  });
+});
+
+describe("recon --auto-exclude", () => {
+  it("runs the smart-exclude pass once and records the chosen globs in plan.json", async () => {
+    suppressLogs();
+    detectorMock.suggestExcludes.mockImplementation(async () => ({
+      excludes: [{ glob: "tests/**", reason: "test fixtures" }],
+    }));
+
+    await runReconCommand(
+      projectRoot,
+      { template: [agentPlain], output: outputDir, autoExclude: true },
+      env,
+    );
+
+    expect(detectorMock.suggestExcludes).toHaveBeenCalledTimes(1);
+    expect(readScanPlan(outputDir)?.autoExcludes).toEqual(["tests/**"]);
+  });
+
+  it("writes autoExcludes: [] when the pass runs but chooses nothing", async () => {
+    suppressLogs();
+    // Default mock returns { excludes: [] }.
+    await runReconCommand(
+      projectRoot,
+      { template: [agentPlain], output: outputDir, autoExclude: true },
+      env,
+    );
+
+    expect(detectorMock.suggestExcludes).toHaveBeenCalledTimes(1);
+    // [] (ran, found nothing) is distinct from undefined (didn't run).
+    expect(readScanPlan(outputDir)?.autoExcludes).toEqual([]);
+  });
+
+  it("omits autoExcludes and skips the pass entirely when the flag is off", async () => {
+    suppressLogs();
+    await runReconCommand(projectRoot, { template: [agentPlain], output: outputDir }, env);
+
+    expect(detectorMock.suggestExcludes).not.toHaveBeenCalled();
+    expect(readScanPlan(outputDir)?.autoExcludes).toBeUndefined();
   });
 });
 
