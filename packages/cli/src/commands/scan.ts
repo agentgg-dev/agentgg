@@ -108,7 +108,7 @@ interface ScanOpts {
   /**
    * Max tool-use turns per LLM session. When set, applies uniformly to every
    * agent batch, recon, and the validator. When unset, agent runs use the
-   * agent's `where.maxTurnsPerBatch` (default 30), recon uses 50, validator 30.
+   * agent's `where.maxTurnsPerBatch` (default 30), recon uses 50, validator 50.
    */
   maxTurns?: number;
   /** Candidate files per agent batch. Overrides the agent's `where.maxFilesPerBatch`. */
@@ -298,7 +298,7 @@ export async function runScan(
       model: opts.model,
       credentials,
       verbose: opts.verbose,
-      validateMaxTurns: opts.maxTurns ?? 30,
+      validateMaxTurns: opts.maxTurns ?? 50,
       effort: opts.effort,
       thinking: opts.thinking,
     });
@@ -1148,6 +1148,7 @@ export async function runScan(
               finding,
               fileContent: content,
               scope: scopeContent,
+              root,
               signal: scanAbortController.signal,
             });
             finding.validation = {
@@ -1705,7 +1706,7 @@ export function registerScanCommand(program: Command): void {
     )
     .option(
       "--max-turns <n>",
-      "Max tool-use turns per LLM session. When set, applies uniformly to every agent batch, recon, and the validator. When unset: agent batches use the agent's `where.maxTurnsPerBatch` (default 30), recon 50, validator 30.",
+      "Max tool-use turns per LLM session. When set, applies uniformly to every agent batch, recon, and the validator. When unset: agent batches use the agent's `where.maxTurnsPerBatch` (default 30), recon 50, validator 50.",
       (v) => parseInt(v, 10),
     )
     .option(

@@ -28,6 +28,7 @@ function buildDetector(config: UserConfig, options: ResolveOptions): Detector {
     effort: options.effort,
     thinking: options.thinking,
     verbose: options.verbose,
+    validateMaxTurns: options.validateMaxTurns,
   });
 }
 

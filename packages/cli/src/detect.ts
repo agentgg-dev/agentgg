@@ -224,6 +224,15 @@ export interface Detector {
       fileContent: string;
       /** Optional scope document; threaded into the validator prompt verbatim. */
       scope?: string;
+      /**
+       * Repository root. When provided, the validator runs tool-enabled
+       * (Read/Glob/Grep rooted here) so it can trace the exploit chain
+       * ACROSS files — e.g. follow a REST endpoint through a service
+       * layer to the sink, catching an intermediate filter/guard that the
+       * finding's single file doesn't reveal. When omitted, the validator
+       * falls back to a single-shot judgement over `fileContent` alone.
+       */
+      root?: string;
     } & AbortableArgs,
   ): Promise<{
     verdict: "confirmed" | "false-positive" | "out-of-scope" | "uncertain";

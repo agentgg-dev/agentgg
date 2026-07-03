@@ -291,6 +291,10 @@ export interface VercelAgentDetectorOpts {
   effort?: Effort;
   thinking?: Thinking;
   verbose?: boolean;
+  /** Max tool-loop steps for the tool-enabled validateFinding path. Sourced
+   *  from the `--validate-max-turns` CLI flag (same knob the claude detector
+   *  uses); defaults to 50 when unset. */
+  validateMaxTurns?: number;
   /** Fallback model used only for final JSON extraction when the tool-call model
    *  returns malformed JSON. Useful for Ollama where structuredOutputs conflicts
    *  with tool calling but is needed to get reliable JSON output. */
@@ -339,6 +343,7 @@ export class VercelAgentDetector implements Detector {
   private readonly effort?: Effort;
   private readonly thinking?: Thinking;
   private readonly verbose: boolean;
+  private readonly validateMaxTurns: number;
   private meter?: UsageMeter;
 
   constructor(name: string, model: LanguageModelV1, opts: VercelAgentDetectorOpts = {}) {
@@ -349,6 +354,7 @@ export class VercelAgentDetector implements Detector {
     this.effort = opts.effort;
     this.thinking = opts.thinking;
     this.verbose = opts.verbose ?? false;
+    this.validateMaxTurns = opts.validateMaxTurns ?? 50;
   }
 
   attachUsageMeter(meter: UsageMeter): void {
@@ -528,22 +534,45 @@ export class VercelAgentDetector implements Detector {
     finding: Finding;
     fileContent: string;
     scope?: string;
+    root?: string;
     signal?: AbortSignal;
   }) {
     try {
-      const { object } = await this.metered(
+      // Single-shot path (no root): judge the embedded file content only.
+      if (!args.root) {
+        const { object } = await this.metered(
+          () =>
+            generateObject({
+              model: this.model,
+              schema: LlmValidation,
+              mode: "json",
+              prompt: buildValidatePrompt(args),
+              providerOptions: this.providerOptionsArg(),
+              abortSignal: args.signal,
+            }),
+          args.signal,
+        );
+        return asValidationField(object);
+      }
+      // Tool-enabled path: same generateText + tool-loop shape as hunt
+      // (runAgent), so the validator can Read/Glob/Grep across files to
+      // trace the exploit chain. Structured output is recovered from the
+      // final message via parseValidation (with a structuredModel reformat
+      // fallback), because this SDK can't combine tools with generateObject.
+      const prompt = `${buildValidatePrompt(args)}\n\n${validationJsonInstruction()}`;
+      const gen = await this.metered(
         () =>
-          generateObject({
+          generateText({
             model: this.model,
-            schema: LlmValidation,
-            mode: "json",
-            prompt: buildValidatePrompt(args),
+            prompt,
+            tools: buildTools(resolve(args.root as string), undefined, this.verbose, []),
+            maxSteps: this.validateMaxTurns + 1,
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
           }),
         args.signal,
       );
-      return asValidationField(object);
+      return asValidationField(await this.parseValidation(gen.text, args.signal));
     } catch (err) {
       debugLog("VercelAgentDetector.validateFinding", err);
       throw err;
@@ -641,6 +670,26 @@ export class VercelAgentDetector implements Detector {
         schema: DetectionResult,
         mode: "json",
         prompt: `The following is a completed security analysis. Extract all confirmed findings into structured JSON.\n\n${text}\n\n${jsonOutputInstruction(multiAgent)}`,
+        abortSignal: signal,
+      });
+      this.meter?.record(extractCallUsage(reformat), this.structuredModel.modelId);
+      return reformat.object;
+    }
+  }
+
+  /** Parse an LlmValidation verdict from the tool-loop's final text, with a
+   *  structuredModel reformat fallback. Mirrors parseOrReformat but for the
+   *  tool-enabled validateFinding path. */
+  private async parseValidation(text: string, signal?: AbortSignal): Promise<LlmValidation> {
+    try {
+      return LlmValidation.parse(extractJSON(text));
+    } catch (extractErr) {
+      if (!this.structuredModel) throw extractErr;
+      const reformat = await generateObject({
+        model: this.structuredModel,
+        schema: LlmValidation,
+        mode: "json",
+        prompt: `The following is a completed validation of a security finding. Extract the verdict into structured JSON.\n\n${text}\n\n${validationJsonInstruction()}`,
         abortSignal: signal,
       });
       this.meter?.record(extractCallUsage(reformat), this.structuredModel.modelId);
@@ -944,6 +993,16 @@ function derivedProviderKey(name: string): "anthropic" | "openai" | "ollama" | u
   if (name.startsWith("openai")) return "openai";
   if (name.startsWith("ollama")) return "ollama";
   return undefined;
+}
+
+function validationJsonInstruction(): string {
+  return `## Output format
+
+After tracing the finding across the code, output your verdict as a single JSON object matching EXACTLY this shape — no prose, no markdown fences, no trailing text:
+
+{"verdict":"confirmed","reasoning":"Short reasoning citing a specific code element.","confidence":0.9}
+
+\`verdict\` MUST be one of "confirmed", "false-positive", "out-of-scope", or "uncertain". \`confidence\` is a decimal 0.0–1.0 (not a percentage).`;
 }
 
 function jsonOutputInstruction(multiAgent: boolean): string {

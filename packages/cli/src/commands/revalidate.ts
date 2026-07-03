@@ -253,6 +253,7 @@ export async function runRevalidate(
         finding,
         fileContent: content,
         scope: scopeContent,
+        root: rootPath,
         signal: revalidateAbortController.signal,
       });
       // Mutate in place — the record points to the same Finding
@@ -376,9 +377,9 @@ export function registerRevalidateCommand(program: Command): void {
     .option("--model <name>", "One-shot model override for the selected provider (not persisted)")
     .option(
       "--validate-max-turns <n>",
-      "Max tool-use turns per validator call (default: 30). Bump if the validator hits the turn cap.",
+      "Max tool-use turns per validator call (default: 50). Bump if the validator hits the turn cap.",
       (v) => parseInt(v, 10),
-      30,
+      50,
     )
     .option(
       "--exclude-false-positives",

@@ -32,19 +32,25 @@ function buildDetector(config: UserConfig, options: ResolveOptions): Detector {
   const agentDetector = new VercelAgentDetector("ollama", toolModel, {
     ...baseOpts,
     verbose: options.verbose,
+    validateMaxTurns: options.validateMaxTurns,
     structuredModel,
   });
   return {
     name: "ollama",
-    // Tool-using work (recon survey, agent runs) goes through the Vercel
-    // tool-loop detector (best-effort JSON); tool-less work (precondition
-    // gate, validate, score) uses generateObject for strict output.
+    // Tool-using work (recon survey, agent runs, and now validation —
+    // which traces the exploit chain across files) goes through the Vercel
+    // tool-loop detector (best-effort JSON, with the structuredModel
+    // reformat fallback); the remaining tool-less work (precondition gate,
+    // scope-only validate, score) uses generateObject for strict output.
     recon: (args) => agentDetector.recon(args),
     // Tool-less classification of the directory tree — strict output path.
     suggestExcludes: (args) => fileDetector.suggestExcludes(args),
     checkPrecondition: (args) => fileDetector.checkPrecondition(args),
     runAgent: (args) => agentDetector.runAgent(args),
-    validateFinding: (args) => fileDetector.validateFinding(args),
+    // Tool-enabled: reuses the Vercel detector's Read/Glob/Grep loop so
+    // ollama can traverse the repo during validation like every other
+    // provider. Falls back to a single-shot judgement when no root is set.
+    validateFinding: (args) => agentDetector.validateFinding(args),
     validateFindingByScope: (args) => fileDetector.validateFindingByScope(args),
     scoreFinding: (args) => fileDetector.scoreFinding(args),
     dedupeFindings: (args) => fileDetector.dedupeFindings(args),

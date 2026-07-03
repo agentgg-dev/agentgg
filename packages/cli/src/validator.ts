@@ -55,8 +55,15 @@ export function buildValidatePrompt(args: {
    * — without scope context, that verdict would be guesswork.
    */
   scope?: string;
+  /**
+   * When set, the validator is running tool-enabled (Read/Glob/Grep
+   * rooted at the repo). The prompt then tells the model to trace the
+   * exploit chain across files rather than judging the embedded file in
+   * isolation. When omitted, the model only has the embedded file.
+   */
+  root?: string;
 }): string {
-  const { finding, fileContent, scope } = args;
+  const { finding, fileContent, scope, root } = args;
   const lang = languageFromPath(finding.filePath);
   const lineHint = finding.lineRange
     ? `lines ${finding.lineRange[0]}–${finding.lineRange[1]}`
@@ -86,6 +93,38 @@ ${scope}
   const scopeVerdictNote = scope
     ? ""
     : "\nNo scope document was supplied for this run, so `out-of-scope` is not a valid verdict — use `uncertain` if you would otherwise have picked it.\n";
+
+  // Tool-enabled runs (root set) get an explicit instruction to trace the
+  // exploit chain across files. The embedded file below is only the
+  // finding's OWN file — for a cross-file chain (endpoint → service →
+  // sink) the mitigating guard often lives in a DIFFERENT file the model
+  // must open itself.
+  const tracingBlock = root
+    ? `
+## Trace the chain across files — do not judge this file in isolation
+
+You have Read/Glob/Grep tools rooted at the repository. The source
+below is only the finding's own file (\`${finding.filePath}\`). Many
+findings are cross-file: an entry point in one file reaches the sink in
+another through a service or repository layer, and a validation/filter
+step in between can neutralize the reported bug (or, conversely, a
+missing guard upstream can confirm it).
+
+Before deciding, actually investigate:
+- Grep for the sink method / endpoint named in the finding to locate its
+  callers and the request handler that reaches it.
+- Read those intermediate files. Confirm whether the untrusted input
+  really flows to the sink UNCHANGED, or whether an intermediate step
+  filters, allowlists, or otherwise constrains it (e.g. the input is used
+  only to look up / select an already-trusted value, not as the sink
+  argument itself).
+- Check the actual auth/authorization gating on the real entry point.
+
+Only after tracing the reachable path end to end should you classify.
+A finding whose reported mechanism is broken by an intermediate guard is
+a false-positive even if the sink file, read alone, looks unsafe.
+`
+    : "";
 
   return `You are reviewing a security finding produced by another agent.
 Your job is to classify it by re-examining the source code yourself.
@@ -122,7 +161,7 @@ ${finding.impact}
 \`\`\`${lang}
 ${fileContent}
 \`\`\`
-${scopeBlock}
+${tracingBlock}${scopeBlock}
 ## Your task
 
 Return a verdict (${verdictOptions}), a short reasoning (max 4

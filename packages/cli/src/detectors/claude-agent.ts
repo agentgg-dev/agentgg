@@ -103,7 +103,7 @@ export class ClaudeAgentDetector implements Detector {
     this.oauthToken = opts.oauthToken;
     this.model = opts.model;
     this.verbose = opts.verbose ?? false;
-    this.validateMaxTurns = opts.validateMaxTurns ?? 30;
+    this.validateMaxTurns = opts.validateMaxTurns ?? 50;
     this.effort = opts.effort;
     this.thinking = opts.thinking;
     this.name = opts.oauthToken ? "anthropic-oauth" : "anthropic-api";
@@ -204,17 +204,21 @@ export class ClaudeAgentDetector implements Detector {
     finding: Finding;
     fileContent: string;
     scope?: string;
+    root?: string;
     signal?: AbortSignal;
   }) {
     const prompt = buildValidatePrompt(args);
-    // Single-turn: `tools: []` removes all built-in tools from the
-    // model's context, so the validator can't burn turns on speculative
-    // Grep/Read calls. validateMaxTurns kept as-is pending separate
-    // revert of the workaround budget.
+    // Tool-enabled when a repo root is supplied: the validator gets
+    // Read/Glob/Grep (same as the hunt phase) so it can trace the exploit
+    // chain across files and catch an intermediate guard the finding's own
+    // file doesn't reveal, spending up to validateMaxTurns exploring.
+    // Without a root it degrades to a single-shot judgement over the
+    // embedded file content.
     const validated = await this.runStructured({
       prompt,
-      tools: [],
+      tools: args.root ? ["Read", "Glob", "Grep"] : [],
       maxTurns: this.validateMaxTurns,
+      cwd: args.root,
       schema: LlmValidation,
       signal: args.signal,
     });
