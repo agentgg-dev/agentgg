@@ -6,9 +6,13 @@ import { useCallback, useState } from "react";
 export default function CopyMarkdownButton({
   markdown,
   className = "",
+  label = "Copy",
+  title = "Copy this finding as markdown",
 }: {
   markdown: string;
   className?: string;
+  label?: string;
+  title?: string;
 }) {
   const [copied, setCopied] = useState(false);
   const [failed, setFailed] = useState(false);
@@ -30,7 +34,7 @@ export default function CopyMarkdownButton({
     <button
       type="button"
       onClick={onClick}
-      title="Copy this finding as markdown"
+      title={title}
       className={`inline-flex items-center gap-1.5 rounded border border-bg-border bg-bg/40 px-2 py-0.5 text-[10px] font-mono uppercase tracking-wider text-ink-dim transition-colors hover:border-amber/40 hover:text-amber ${className}`}
     >
       {copied ? (
@@ -46,7 +50,7 @@ export default function CopyMarkdownButton({
       ) : (
         <>
           <Copy className="w-3 h-3" />
-          <span>Copy</span>
+          <span>{label}</span>
         </>
       )}
     </button>

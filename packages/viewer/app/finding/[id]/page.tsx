@@ -43,7 +43,14 @@ export default async function FindingPage({ params }: { params: Promise<{ id: st
             <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider border border-bg-border bg-bg/40 text-amber">
               {finding.agentSlug}
             </span>
-            <CopyMarkdownButton markdown={findingToMarkdown(finding)} className="ml-auto" />
+            <div className="ml-auto flex items-center gap-2">
+              <CopyMarkdownButton markdown={findingToMarkdown(finding)} />
+              <CopyMarkdownButton
+                markdown={findingToGhsaMarkdown(finding)}
+                label="Copy GHSA"
+                title="Copy this finding as a GHSA-style advisory (title, summary, details, PoC, CVSS score, references)"
+              />
+            </div>
           </div>
 
           <h1 className="text-2xl md:text-3xl font-bold tracking-tight text-ink leading-tight">
@@ -246,6 +253,35 @@ function findingToMarkdown(f: Finding): string {
 
   out.push(`*Finding ID: \`${f.id}\`*`);
   return out.join("\n");
+}
+
+/**
+ * Leaner GHSA-style advisory: only the fields a GitHub Security Advisory body
+ * carries — title, summary, details, PoC, the CVSS score + vector selections
+ * (no justification prose), and references. Drops the internal triage metadata
+ * (agent, verdict, dedup, confidence, finding ID) that findingToMarkdown emits.
+ */
+function findingToGhsaMarkdown(f: Finding): string {
+  const out: string[] = [];
+  out.push(`# ${f.title}`, "");
+  out.push("## Summary", "", f.summary, "");
+  out.push("## Details", "", f.details, "");
+  out.push("## Proof of concept", "", f.poc, "");
+  if (f.cvss) {
+    // Two-space line breaks keep score + vector as one paragraph.
+    out.push(
+      "## CVSS",
+      "",
+      `Base score: ${f.cvss.baseScore.toFixed(1)}  \nVector: \`${f.cvss.vector}\``,
+      "",
+    );
+  }
+  if (f.references.length > 0) {
+    out.push("## References", "");
+    for (const ref of f.references) out.push(`- ${ref}`);
+    out.push("");
+  }
+  return out.join("\n").trimEnd();
 }
 
 function locationSuffix(f: Finding): string {
