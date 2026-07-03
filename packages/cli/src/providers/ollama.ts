@@ -40,6 +40,8 @@ function buildDetector(config: UserConfig, options: ResolveOptions): Detector {
     // tool-loop detector (best-effort JSON); tool-less work (precondition
     // gate, validate, score) uses generateObject for strict output.
     recon: (args) => agentDetector.recon(args),
+    // Tool-less classification of the directory tree — strict output path.
+    suggestExcludes: (args) => fileDetector.suggestExcludes(args),
     checkPrecondition: (args) => fileDetector.checkPrecondition(args),
     runAgent: (args) => agentDetector.runAgent(args),
     validateFinding: (args) => fileDetector.validateFinding(args),

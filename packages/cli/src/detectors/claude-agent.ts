@@ -7,6 +7,7 @@ import { buildDedupePrompt, LlmDedup } from "../deduper.js";
 import {
   buildAgentPrompt,
   buildCreateAgentPrompt,
+  buildExcludePrompt,
   buildPreconditionPrompt,
   buildReconPrompt,
   type CreateAgentArgs,
@@ -18,6 +19,8 @@ import {
   type ReconArgs,
   ReconResult,
   type RunAgentArgs,
+  type SuggestExcludesArgs,
+  SuggestExcludesResult,
 } from "../detect.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import type { CallUsage, UsageMeter } from "../usage-meter.js";
@@ -127,6 +130,20 @@ export class ClaudeAgentDetector implements Detector {
       maxTurns: args.maxTurns,
       cwd: args.rootDir,
       schema: ReconResult,
+      signal: args.signal,
+    });
+  }
+
+  async suggestExcludes(
+    args: SuggestExcludesArgs & { signal?: AbortSignal },
+  ): Promise<SuggestExcludesResult> {
+    // Single structured call, no tools: the directory tree is in the
+    // prompt, so the model classifies folders rather than exploring.
+    return this.runStructured({
+      prompt: buildExcludePrompt(args),
+      tools: [],
+      maxTurns: 3,
+      schema: SuggestExcludesResult,
       signal: args.signal,
     });
   }

@@ -40,6 +40,7 @@ import { selectAgents } from "../precondition.js";
 import { buildCredentialsFromOpts, validateProviderFlags } from "../providers/index.js";
 import { renderReconForPrompt, runRecon } from "../recon.js";
 import { findingFilenameSlug, writeMarkdownReport } from "../reporters/md.js";
+import { runSmartExclude } from "../smart-exclude.js";
 import { resolveTemplates } from "../template.js";
 import { createUsageMeter, type UsageMeter } from "../usage-meter.js";
 import { DEFAULT_VIEWER_PORT, openBrowser, startViewer } from "../viewer-server.js";
@@ -91,6 +92,15 @@ interface ScanOpts {
    * opt-out is `where.useDefaultExcludes`.
    */
   defaultExcludes?: boolean;
+  /**
+   * `--auto-exclude`: before recon, ask the model which folders are not
+   * worth security-scanning (tests, fixtures, generated code, vendored
+   * deps, docs, sample data) and fold them in as if they were CLI
+   * `--exclude` paths. Off by default: a scan never silently skips code
+   * unless asked. The chosen folders are always logged (with reasons in
+   * `--verbose`).
+   */
+  autoExclude?: boolean;
   /** Re-analyze files even when a prior FileRecord covers them with the same contentHash. */
   rescan?: boolean;
   /** Re-validate findings even when they already have a verdict on disk. */
@@ -366,9 +376,49 @@ export async function runScan(
     // CLI `--exclude` paths are treated as DELETED: invisible to recon,
     // the precondition census, and every agent's file selection. They're
     // applied everywhere and can't be opted out of by a template.
-    const excludePatterns = [...(opts.exclude ?? [])];
+    const cliExcludes = [...(opts.exclude ?? [])];
     const includePatterns = opts.only ?? [];
     const maxFileSizeBytes = (opts.maxFileSize ?? 500) * 1024;
+
+    // `--auto-exclude`: before anything else reads the tree, let the model
+    // pick folders not worth scanning and fold them in as if the user had
+    // typed them as `--exclude`. This runs FIRST (ahead of recon) so recon,
+    // the precondition census, and every agent all inherit the excludes.
+    // Advisory: a pass failure degrades to "no auto-excludes" rather than
+    // aborting the scan. Off by default, and always logged.
+    const smartExcludes: string[] = [];
+    if (opts.autoExclude) {
+      const baselineWalk =
+        opts.defaultExcludes === false
+          ? [...cliExcludes]
+          : [...DEFAULT_EXCLUDES, ...cliExcludes];
+      try {
+        const suggestions = await runSmartExclude({
+          rootDir: root,
+          detector,
+          excludePatterns: baselineWalk,
+          includePatterns,
+          maxFileSizeBytes,
+          signal: scanAbortController.signal,
+        });
+        for (const s of suggestions) smartExcludes.push(s.glob);
+        if (suggestions.length > 0) {
+          console.log(`Auto-excluded ${suggestions.length} folder(s): ${smartExcludes.join(", ")}`);
+          if (opts.verbose) {
+            for (const s of suggestions) console.log(`    ${s.glob}: ${s.reason}`);
+          }
+        } else {
+          console.log("Auto-exclude: nothing to drop; scanning the whole tree.");
+        }
+      } catch (err) {
+        console.warn(
+          `  auto-exclude: pass did not complete (${(err as Error).message}); continuing without it.`,
+        );
+      }
+    }
+
+    // The full deleted set: CLI `--exclude` plus any smart excludes.
+    const excludePatterns = [...cliExcludes, ...smartExcludes];
 
     // The baseline walk excludes = the shared default set + the deleted
     // CLI paths. Recon and the precondition census use this. Per-agent
@@ -1734,6 +1784,10 @@ export function registerScanCommand(program: Command): void {
     .option(
       "--no-default-excludes",
       "Don't apply the shared default exclude set (node_modules, .git, build dirs, lockfiles, binaries). Scans everything except your explicit --exclude paths. Per-agent opt-out is `where.useDefaultExcludes: false`.",
+    )
+    .option(
+      "--auto-exclude",
+      "Before scanning, let the model pick folders not worth reviewing (tests, fixtures, generated/vendored code, docs, sample data) and skip them like --exclude paths. Off by default; chosen folders are logged (reasons shown with --verbose).",
     )
     .option("-v, --verbose", "verbose output")
     .action(async (path: string, opts: ScanOpts) => {

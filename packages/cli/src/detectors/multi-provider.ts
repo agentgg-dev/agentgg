@@ -5,6 +5,7 @@ import { buildDedupePrompt, LlmDedup } from "../deduper.js";
 import {
   buildAgentPrompt,
   buildCreateAgentPrompt,
+  buildExcludePrompt,
   buildPreconditionPrompt,
   buildReconPrompt,
   type CreateAgentArgs,
@@ -16,6 +17,8 @@ import {
   type ReconArgs,
   ReconResult,
   type RunAgentArgs,
+  type SuggestExcludesArgs,
+  SuggestExcludesResult,
 } from "../detect.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import type { UsageMeter } from "../usage-meter.js";
@@ -145,6 +148,34 @@ export class MultiProviderDetector implements Detector {
       if (process.env.AGENTGG_DEBUG) {
         const util = await import("node:util");
         console.error("---- MultiProviderDetector recon error ----");
+        console.error(util.inspect(err, { depth: 5, colors: false }));
+        console.error("-------------------------------------------");
+      }
+      throw err;
+    }
+  }
+
+  async suggestExcludes(
+    args: SuggestExcludesArgs & { signal?: AbortSignal },
+  ): Promise<SuggestExcludesResult> {
+    // No-tools structured call: the directory tree is in the prompt, so
+    // the model classifies folders directly (same shape as scoreFinding).
+    try {
+      const { object } = await this.metered(() =>
+        generateObject({
+          model: this.model,
+          schema: SuggestExcludesResult,
+          mode: "json",
+          prompt: buildExcludePrompt(args),
+          providerOptions: this.providerOptionsArg(),
+          abortSignal: args.signal,
+        }),
+      );
+      return object;
+    } catch (err) {
+      if (process.env.AGENTGG_DEBUG) {
+        const util = await import("node:util");
+        console.error("---- MultiProviderDetector suggestExcludes error ----");
         console.error(util.inspect(err, { depth: 5, colors: false }));
         console.error("-------------------------------------------");
       }

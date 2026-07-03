@@ -116,6 +116,34 @@ export const PreconditionCheck = z.object({
 export type PreconditionCheck = z.infer<typeof PreconditionCheck>;
 
 /**
+ * Output of the smart-exclude pass: directory globs the LLM judged not
+ * worth security-scanning (tests, fixtures, generated code, vendored
+ * deps, docs, sample data). Each is applied exactly like a CLI
+ * `--exclude` path, so the pass runs FIRST, before recon, and everything
+ * downstream inherits the excludes. `reason` is shown in verbose logs so
+ * the user can see (and sanity-check) what got dropped.
+ */
+export const SuggestExcludesResult = z.object({
+  excludes: z
+    .array(
+      z.object({
+        glob: z
+          .string()
+          .describe(
+            "A minimatch directory glob to exclude, e.g. `test`, `**/__tests__`, `docs`, `third_party`.",
+          ),
+        reason: z
+          .string()
+          .describe("One short line on why this folder is not worth security-scanning."),
+      }),
+    )
+    .describe(
+      "Folders NOT worth scanning. Empty when the whole tree is worth scanning. Be conservative: excluding a folder means its code is never reviewed.",
+    ),
+});
+export type SuggestExcludesResult = z.infer<typeof SuggestExcludesResult>;
+
+/**
  * Backend-agnostic contract. Each backend (Vercel AI SDK, Claude Agent
  * SDK) implements this. The orchestrator (scan.ts) doesn't care which
  * one it got — just that the contract holds.
@@ -153,6 +181,16 @@ export interface Detector {
    * they can see.
    */
   recon(args: ReconArgs & AbortableArgs): Promise<ReconResult>;
+
+  /**
+   * Smart-exclude pass — opt-in (`--auto-exclude`), run once BEFORE recon.
+   * Given the directory layout, the model picks folders not worth
+   * security-scanning; the orchestrator applies them like CLI `--exclude`
+   * paths so recon and every agent inherit them. A single structured
+   * call, NO tools: the tree is already in the prompt, so the model just
+   * classifies folders rather than exploring the repo.
+   */
+  suggestExcludes(args: SuggestExcludesArgs & AbortableArgs): Promise<SuggestExcludesResult>;
 
   /**
    * Precondition `prompt` gate — decide whether an agent is relevant to
@@ -412,6 +450,49 @@ Static fingerprint (a starting hint, may be incomplete): ${tags}
 Skip files matching any of these patterns:
 ${excludeLines}
 ${includeBlock}Skip files larger than ${args.maxFileSizeKb}KB.`;
+}
+
+export interface SuggestExcludesArgs {
+  /**
+   * The smart-exclude agent's instructions (body of the built-in
+   * `exclude.md`). The engine only appends the directory tree and the
+   * output reminder around these.
+   */
+  instructions: string;
+  /**
+   * A compact, depth-limited rendering of the repository's directory
+   * layout (folders with file counts). This is the ONLY view the model
+   * gets: the pass is no-tools, so the tree stands in for exploration.
+   */
+  dirTree: string;
+}
+
+/**
+ * Wrap the smart-exclude agent's instructions with the directory tree and
+ * the output reminder. No scope/tool mechanics: this is a single no-tools
+ * structured call that classifies the folders it is shown.
+ */
+export function buildExcludePrompt(args: SuggestExcludesArgs): string {
+  return `${args.instructions}
+
+---
+
+## Directory layout
+
+Below is every directory in the repository, by full path, with the
+number of files under it. The count is only the folder's size, shown for
+context. It is NOT a reason to exclude: a large folder of application
+source must still be scanned, and a tiny vendored or test folder should
+still be dropped. Nested folders are shown at any depth. Decide from the
+paths and folder names. Folders already pruned by default excludes
+(node_modules, .git, build output, binaries) are not shown.
+
+\`\`\`
+${args.dirTree}
+\`\`\`
+
+Return the folder globs to exclude, each with a one-line reason. Return
+an empty list if the whole tree is worth scanning.`;
 }
 
 /**

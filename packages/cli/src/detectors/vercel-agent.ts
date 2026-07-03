@@ -9,6 +9,7 @@ import { buildDedupePrompt, LlmDedup } from "../deduper.js";
 import {
   buildAgentPrompt,
   buildCreateAgentPrompt,
+  buildExcludePrompt,
   buildPreconditionPrompt,
   buildReconPrompt,
   type CreateAgentArgs,
@@ -21,6 +22,8 @@ import {
   type ReconArgs,
   ReconResult,
   type RunAgentArgs,
+  type SuggestExcludesArgs,
+  SuggestExcludesResult,
 } from "../detect.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import type { CallUsage, UsageMeter } from "../usage-meter.js";
@@ -394,6 +397,31 @@ export class VercelAgentDetector implements Detector {
       return await this.parseRecon(text, args.signal);
     } catch (err) {
       debugLog("VercelAgentDetector.recon", err);
+      throw err;
+    }
+  }
+
+  async suggestExcludes(
+    args: SuggestExcludesArgs & { signal?: AbortSignal },
+  ): Promise<SuggestExcludesResult> {
+    // No-tools structured call: the directory tree is in the prompt, so
+    // the model classifies folders directly (same shape as scoreFinding).
+    try {
+      const { object } = await this.metered(
+        () =>
+          generateObject({
+            model: this.model,
+            schema: SuggestExcludesResult,
+            mode: "json",
+            prompt: buildExcludePrompt(args),
+            providerOptions: this.providerOptionsArg(),
+            abortSignal: args.signal,
+          }),
+        args.signal,
+      );
+      return object;
+    } catch (err) {
+      debugLog("VercelAgentDetector.suggestExcludes", err);
       throw err;
     }
   }
