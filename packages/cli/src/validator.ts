@@ -120,21 +120,36 @@ Before deciding, actually investigate:
   argument itself).
 - Check the actual auth/authorization gating on the real entry point.
 
-Only after tracing the reachable path end to end should you classify.
-A finding whose reported mechanism is broken by an intermediate guard is
-a false-positive even if the sink file, read alone, looks unsafe.
+Only after tracing the reachable path end to end should you classify. If
+the reported mechanism is broken by an intermediate guard (for example
+the input only selects an already-trusted value rather than being the
+sink argument): return 'false-positive' when no real vulnerability
+remains, or 'uncertain' when a weaker or different real issue remains (a
+different entry point, or one reachable only by a privileged actor). Do
+NOT confirm the original writeup in that case.
 `
     : "";
 
   return `You are reviewing a security finding produced by another agent.
 Your job is to classify it by re-examining the source code yourself.
 
-Be skeptical. Detection agents often over-report. A finding is only
-"confirmed" if you can identify the specific unsafe code element AND
-articulate how an attacker would exploit it given the surrounding
-context (auth middleware, framework defaults, calling conventions,
-etc.). When in doubt, say "uncertain" — false negatives in the
-validator (calling a real bug FP) are worse than uncertain verdicts.
+Be skeptical. Detection agents over-report. Reserve 'confirmed' for
+findings you are certain are a genuine, exploitable security
+vulnerability: the kind you would stake a CVE, a security advisory, or a
+published proof-of-concept on. That means you traced the exact unsafe
+code element AND a concrete, working exploit path from an
+attacker-reachable entry point, AND the finding as reported matches that
+path. If you are not that certain, do not confirm.
+
+Use 'uncertain' whenever a real issue is plausible but you cannot stand
+behind the report as written: the reported entry point turns out to be a
+filter or guard, the described PoC does not actually work as stated, the
+true exploit path runs through a different endpoint than the title
+claims, exploitation depends on a privileged or otherwise trusted actor,
+or you could not fully verify reachability. 'uncertain' is the correct
+home for "there is probably something here, but not the clean, certain,
+report-it-upstream finding that was described." Confirming a shaky or
+mischaracterized finding is worse than an honest 'uncertain'.
 
 ## The finding
 
@@ -167,11 +182,11 @@ ${tracingBlock}${scopeBlock}
 Return a verdict (${verdictOptions}), a short reasoning (max 4
 sentences, cite a specific code element), and your confidence.
 ${scopeVerdictNote}
-If you find that the detector's PoC wouldn't actually work (wrong
-endpoint shape, missing auth bypass step, etc.), that's strong
-evidence for false-positive. If the code legitimately matches what the
-detector described and the exploit chain is reachable from an untrusted
-input, that's confirmed.`;
+'confirmed' requires ALL of: you traced a working exploit path end to
+end, it is reachable by the relevant attacker, and the finding as
+reported is accurate. If the PoC as written would not work but a real
+issue may still exist, return 'uncertain', not 'confirmed'. If there is
+no real vulnerability at all, return 'false-positive'.`;
 }
 
 /**
