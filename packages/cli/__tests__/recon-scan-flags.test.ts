@@ -317,6 +317,22 @@ describe("scan --max-files-per-agent", () => {
     expect(detectorMock.runAgent).toHaveBeenCalled();
     expect(loadAllFileRecords(outputDir).length).toBe(3);
   });
+
+  it("treats maxFilesPerAgent false (--no-max-files-per-agent) as no cap", async () => {
+    suppressLogs();
+    writeFileSync(join(projectRoot, "a.js"), "const a = 1;", "utf8");
+    writeFileSync(join(projectRoot, "b.js"), "const b = 2;", "utf8");
+
+    // `--no-max-files-per-agent` sets the opt to false → no cap, every file reviewed.
+    await runScan(
+      projectRoot,
+      { template: [agentPlain], output: outputDir, maxFilesPerAgent: false },
+      env,
+    );
+
+    expect(detectorMock.runAgent).toHaveBeenCalled();
+    expect(loadAllFileRecords(outputDir).length).toBe(3);
+  });
 });
 
 describe("scan plan reuse", () => {

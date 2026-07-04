@@ -83,7 +83,12 @@ interface ScanOpts {
   verbose?: boolean;
   exclude?: string[];
   only?: string[];
-  maxFileSize?: number; // KB
+  /**
+   * Max file size in KB; the walker skips anything larger. Defaults to 500.
+   * `--no-max-file-size` sets this to `false`, which lifts the size cap
+   * entirely (scan files of any size).
+   */
+  maxFileSize?: number | false; // KB, or false (--no-max-file-size) to disable the cap
   /**
    * Apply the shared `DEFAULT_EXCLUDES` set (node_modules, .git, build
    * dirs, lockfiles, binaries). Defaults to true. Commander stores
@@ -118,10 +123,11 @@ interface ScanOpts {
    * resolves to more than this many candidates (after prefilter), keep the
    * first N in the walker's deterministic order and drop the rest. A
    * guardrail against an over-broad agent blowing up cost/time on a large
-   * repo. Unset = no cap. Independent of resume state, so the same N files
-   * are chosen across runs.
+   * repo. Defaults to 300 when unset (both CLI and programmatic callers).
+   * `--no-max-files-per-agent` sets this to `false`, disabling the cap.
+   * Independent of resume state, so the same N files are chosen across runs.
    */
-  maxFilesPerAgent?: number;
+  maxFilesPerAgent?: number | false;
   /**
    * Cap the TOTAL agent batches run across the whole scan (all agents). Once
    * Phase 1 has enqueued every (agent, batch) pair, the pool is truncated to
@@ -129,9 +135,10 @@ interface ScanOpts {
    * time guardrail — siblings (`maxFilesPerAgent`) cap per-agent instead. An
    * agent whose batches are dropped writes no completion sidecar, so it
    * re-runs next time (per-file resume lifts the batches that did run).
-   * Unset = no cap.
+   * Defaults to 250 when unset (both CLI and programmatic callers).
+   * `--no-max-batches` sets this to `false`, disabling the cap.
    */
-  maxBatches?: number;
+  maxBatches?: number | false;
   /** SDK reasoning effort. Maps to `effort` option. */
   effort?: "low" | "medium" | "high" | "max";
   /** SDK thinking mode. `adaptive` lets the model decide per call; `off` skips entirely. */
@@ -379,7 +386,12 @@ export async function runScan(
     // applied everywhere and can't be opted out of by a template.
     const cliExcludes = [...(opts.exclude ?? [])];
     const includePatterns = opts.only ?? [];
-    const maxFileSizeBytes = (opts.maxFileSize ?? 500) * 1024;
+    // `--no-max-file-size` (opts.maxFileSize === false) lifts the size cap.
+    // Infinity flows cleanly through the byte comparison and the KB-typed
+    // recon/detector configs; the resume scope stores a JSON-safe sentinel.
+    const maxFileSizeKb =
+      opts.maxFileSize === false ? Number.POSITIVE_INFINITY : (opts.maxFileSize ?? 500);
+    const maxFileSizeBytes = maxFileSizeKb * 1024; // Infinity * 1024 === Infinity
 
     // `--auto-exclude`: before anything else reads the tree, let the model
     // pick folders not worth scanning and fold them in as if the user had
@@ -580,7 +592,7 @@ export async function runScan(
         fingerprintTags: project.tags,
         excludePatterns: walkExcludes,
         includePatterns,
-        maxFileSizeKb: opts.maxFileSize ?? 500,
+        maxFileSizeKb,
         maxTurns: opts.maxTurns ?? 50,
         force: opts.reRecon,
         signal: scanAbortController.signal,
@@ -601,7 +613,9 @@ export async function runScan(
       diff: opts.diff,
       excludePatterns: [...excludePatterns],
       includePatterns: [...includePatterns],
-      maxFileSizeKb: opts.maxFileSize ?? 500,
+      // JSON-safe: Infinity would serialize to null and break resume compares,
+      // so store -1 as the "no cap" sentinel. Consistent on both write and read.
+      maxFileSizeKb: Number.isFinite(maxFileSizeKb) ? maxFileSizeKb : -1,
       rootPath: root,
       reconHash: recon.reconHash,
     };
@@ -728,6 +742,14 @@ export async function runScan(
     // cheap: walk + prefilter + resume, no LLM — and enqueues them; Phase 2
     // drains the pool.
     const concurrency = Math.max(1, opts.concurrency ?? 5);
+    // Cost/time guardrails. Default 300 files/agent and 250 batches/scan;
+    // an unset opt (programmatic caller) gets the same defaults as the CLI.
+    // `--no-max-files-per-agent` / `--no-max-batches` set the opt to `false`,
+    // which resolves to Infinity here so the `> 0` cap checks never fire.
+    const maxFilesPerAgent =
+      opts.maxFilesPerAgent === false ? Number.POSITIVE_INFINITY : (opts.maxFilesPerAgent ?? 300);
+    const maxBatches =
+      opts.maxBatches === false ? Number.POSITIVE_INFINITY : (opts.maxBatches ?? 250);
     let cachedAgentCount = 0;
     // Agents whose candidate list was truncated by `--max-files-per-agent`.
     let cappedAgentCount = 0;
@@ -817,13 +839,14 @@ export async function runScan(
       // drop the rest. A guardrail so an over-broad agent (e.g. one matching
       // every .ts file) can't blow up cost/time on a large repo. Stable walk
       // order means the same N files are chosen across runs, so per-file
-      // resume stays consistent. Unset = no cap.
-      if (opts.maxFilesPerAgent !== undefined && candidates.length > opts.maxFilesPerAgent) {
-        const dropped = candidates.length - opts.maxFilesPerAgent;
+      // resume stays consistent. Default 300; --no-max-files-per-agent (→
+      // Infinity) disables it.
+      if (maxFilesPerAgent > 0 && candidates.length > maxFilesPerAgent) {
+        const dropped = candidates.length - maxFilesPerAgent;
         cappedAgentCount++;
-        candidates.length = opts.maxFilesPerAgent;
+        candidates.length = maxFilesPerAgent;
         console.log(
-          `  ${agent.slug}: capped to ${opts.maxFilesPerAgent} candidate file(s) (--max-files-per-agent; ${dropped} dropped)`,
+          `  ${agent.slug}: capped to ${maxFilesPerAgent} candidate file(s) (--max-files-per-agent; ${dropped} dropped)`,
         );
       }
       // Only the candidates the agent will actually review count as scanned.
@@ -947,11 +970,12 @@ export async function runScan(
     // keeps `rt.remaining > 0`, so it writes no completion sidecar and re-runs
     // next time (per-file resume lifts what ran). Do NOT lower `remaining` to
     // the kept count — that would wrongly mark a truncated agent complete.
-    if (opts.maxBatches !== undefined && batchQueue.length > opts.maxBatches) {
-      const dropped = batchQueue.length - opts.maxBatches;
-      batchQueue.length = opts.maxBatches;
+    // Default 250; --no-max-batches (→ Infinity) disables it.
+    if (maxBatches > 0 && batchQueue.length > maxBatches) {
+      const dropped = batchQueue.length - maxBatches;
+      batchQueue.length = maxBatches;
       console.log(
-        `  Capping to ${opts.maxBatches} batch(es) across all agents (--max-batches; ${dropped} dropped, those agents re-run next scan)`,
+        `  Capping to ${maxBatches} batch(es) across all agents (--max-batches; ${dropped} dropped, those agents re-run next scan)`,
       );
     }
 
@@ -973,7 +997,7 @@ export async function runScan(
           recon: reconBlock,
           candidates: batch,
           excludePatterns: rt.agentExcludes,
-          maxFileSizeKb: opts.maxFileSize ?? 500,
+          maxFileSizeKb,
           maxTurns: rt.maxTurns,
           diff: diffArg,
           signal: scanAbortController.signal,
@@ -1716,14 +1740,21 @@ export function registerScanCommand(program: Command): void {
     )
     .option(
       "--max-files-per-agent <n>",
-      "Cap the candidate files each agent reviews: if an agent's scope resolves to more than <n> files (after prefilter), keep the first <n> in scan order and drop the rest. A guardrail against an over-broad agent blowing up cost/time on a large repo. No cap by default. Different from --max-files-per-batch, which only sets how many files pack into one LLM session.",
+      "Cap the candidate files each agent reviews: if an agent's scope resolves to more than <n> files (after prefilter), keep the first <n> in scan order and drop the rest. A guardrail against an over-broad agent blowing up cost/time on a large repo. Default 300; pass --no-max-files-per-agent to disable the cap. Different from --max-files-per-batch, which only sets how many files pack into one LLM session.",
       (v) => parseInt(v, 10),
+      300,
+    )
+    .option(
+      "--no-max-files-per-agent",
+      "disable the per-agent candidate-file cap (review every file)",
     )
     .option(
       "--max-batches <n>",
-      "Cap the TOTAL number of agent batches run across the whole scan (all agents combined). Once batches are enqueued, the pool is truncated to <n> in enqueue order and the rest are dropped, then the scan stops. A whole-scan cost/time guardrail — different from --max-files-per-agent (per-agent file cap) and --concurrency (parallel sessions). Agents whose batches are dropped re-run on the next scan. No cap by default.",
+      "Cap the TOTAL number of agent batches run across the whole scan (all agents combined). Once batches are enqueued, the pool is truncated to <n> in enqueue order and the rest are dropped, then the scan stops. A whole-scan cost/time guardrail — different from --max-files-per-agent (per-agent file cap) and --concurrency (parallel sessions). Agents whose batches are dropped re-run on the next scan. Default 250; pass --no-max-batches to disable the cap.",
       (v) => parseInt(v, 10),
+      250,
     )
+    .option("--no-max-batches", "disable the whole-scan agent-batch cap (run every batch)")
     .option(
       "--effort <level>",
       "SDK reasoning effort for tool-using calls (recon, agent runs, validate). One of: low, medium, high, max. Default: SDK default (no override).",
@@ -1792,10 +1823,11 @@ export function registerScanCommand(program: Command): void {
     )
     .option(
       "--max-file-size <kb>",
-      "skip files larger than this in KB (default 500)",
+      "skip files larger than this in KB (default 500; pass --no-max-file-size to scan files of any size)",
       (v) => parseInt(v, 10),
       500,
     )
+    .option("--no-max-file-size", "don't skip large files (scan files of any size)")
     .option(
       "--no-default-excludes",
       "Don't apply the shared default exclude set (node_modules, .git, build dirs, lockfiles, binaries). Scans everything except your explicit --exclude paths. Per-agent opt-out is `where.useDefaultExcludes: false`.",

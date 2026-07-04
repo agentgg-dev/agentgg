@@ -387,18 +387,21 @@ Override the default glob exclusions / restrict to specific paths:
 ```bash
 agentgg scan ./src --exclude "**/migrations/**" --exclude "vendor/**" -o ./out
 agentgg scan ./src --only "src/api/**/*.ts" --only "src/handlers/**/*.ts" -o ./out
-agentgg scan ./src --max-file-size 200 -o ./out          # skip files larger than 200 KB
-agentgg scan ./src --max-files-per-agent 30 -o ./out     # each agent reviews at most 30 files
-agentgg scan ./src --max-batches 50 -o ./out             # run at most 50 agent batches this scan
+agentgg scan ./src --max-file-size 200 -o ./out          # skip files larger than 200 KB (default 500)
+agentgg scan ./src --max-files-per-agent 30 -o ./out     # each agent reviews at most 30 files (default 300)
+agentgg scan ./src --max-batches 50 -o ./out             # run at most 50 agent batches this scan (default 250)
+agentgg scan ./src --no-max-files-per-agent --no-max-batches --no-max-file-size -o ./out   # disable every cap (fully uncapped)
 ```
 
 By default the scan skips a built-in exclude set — lockfiles, minified bundles, binary assets, `node_modules`, `dist`, `.git`, and the scan-results directory. Pass `--no-default-excludes` to scan everything, or set `where.useDefaultExcludes: false` on a single agent. CLI `--exclude` paths are always treated as deleted (invisible to every agent).
 
 Auto-exclude (**on by default**; disable with `--no-auto-exclude`) lets the model pick additional non-runtime folders — tests, fixtures, docs, generated output, vendored dependencies — to skip before the scan starts. It runs one cheap pass over the directory layout ahead of recon, so recon and every agent inherit the result. Its picks are always logged (with a reason per folder under `--verbose`) and combine with any manual `--exclude` paths; it only ever removes folders, never adds them back.
 
-`--max-files-per-agent` is a per-agent ceiling: when an agent's `where` resolves to more candidate files than the cap, it reviews the first `<n>` (in the walker's deterministic scan order) and drops the rest, rather than being skipped. A guardrail so one over-broad agent can't blow up cost or time on a large repo. Different from `--max-files-per-batch`, which only sets how many files pack into a single LLM session.
+`--max-files-per-agent` is a per-agent ceiling (**default 300**): when an agent's `where` resolves to more candidate files than the cap, it reviews the first `<n>` (in the walker's deterministic scan order) and drops the rest, rather than being skipped. A guardrail so one over-broad agent can't blow up cost or time on a large repo. Pass `--no-max-files-per-agent` to disable the cap. Different from `--max-files-per-batch`, which only sets how many files pack into a single LLM session.
 
-`--max-batches` is a whole-scan ceiling on the number of agent batches. Once every `(agent, batch)` pair is enqueued, the pool is truncated to `<n>` (in enqueue order) and the rest are dropped before any LLM call runs. Agents whose batches are dropped write no completion sidecar, so a later scan picks them up where this one stopped — a way to spread a large scan across several runs or cap the spend of a single run. Different from `--concurrency`, which bounds how many batches run in parallel, not how many run at all.
+`--max-batches` is a whole-scan ceiling on the number of agent batches (**default 250**). Once every `(agent, batch)` pair is enqueued, the pool is truncated to `<n>` (in enqueue order) and the rest are dropped before any LLM call runs. Agents whose batches are dropped write no completion sidecar, so a later scan picks them up where this one stopped — a way to spread a large scan across several runs or cap the spend of a single run. Pass `--no-max-batches` to disable the cap. Different from `--concurrency`, which bounds how many batches run in parallel, not how many run at all.
+
+`--max-file-size` (**default 500 KB**) skips files larger than the limit before any agent sees them. Pass `--no-max-file-size` to scan files of any size.
 
 ### Use a one-off credential or model without saving it
 
@@ -549,14 +552,17 @@ Run `agentgg <command> --help` for the full flag list on any subcommand.
 --no-recon                      skip the recon survey AND precondition gating; run every -t agent unconditionally
 --no-summary                    skip writing the markdown report (summary.md + findings/*.md); state still persists
 --max-files-per-batch <n>       candidate files per agent batch (overrides the agent's where.maxFilesPerBatch)
---max-files-per-agent <n>       cap the candidate files each agent reviews — keep the first <n> in scan order, drop the rest (guardrail against an over-broad agent; no cap by default)
---max-batches <n>               cap the total agent batches run this scan — keep the first <n> in enqueue order, drop the rest (dropped agents re-run next scan; no cap by default)
+--max-files-per-agent <n>       cap the candidate files each agent reviews — keep the first <n> in scan order, drop the rest (guardrail against an over-broad agent; default 300, --no-max-files-per-agent disables)
+--no-max-files-per-agent        disable the per-agent candidate-file cap (review every file)
+--max-batches <n>               cap the total agent batches run this scan — keep the first <n> in enqueue order, drop the rest (dropped agents re-run next scan; default 250, --no-max-batches disables)
+--no-max-batches                disable the whole-scan agent-batch cap (run every batch)
 --concurrency <n>               max LLM sessions in flight across the whole scan — agent batches, validation, and scoring all draw from one pool (default 5)
 --dedup / --no-dedup            final de-duplication pass that clusters same-root-cause findings per source file (on by default; --no-dedup to skip)
 --delete-duplicates             with dedup, physically remove duplicate findings instead of just marking them
 --exclude <pattern>             path/glob to exclude — treated as deleted (repeatable; additive)
 --only <pattern>                restrict scan to matching globs (repeatable)
---max-file-size <kb>            skip files larger than this (default 500)
+--max-file-size <kb>            skip files larger than this (default 500; --no-max-file-size disables)
+--no-max-file-size              don't skip large files (scan files of any size)
 --no-default-excludes           don't apply the built-in excludes (node_modules, .git, lockfiles, binaries)
 --auto-exclude / --no-auto-exclude  model picks non-runtime folders (tests, docs, generated, vendored) to skip up front (on by default; logged; --no-auto-exclude to disable)
 --serve [port]                  boot the local web UI when the scan finishes (opt-in; default port 3737)

@@ -392,6 +392,18 @@ describe("scan — --max-batches cap", () => {
     expect(ranFiles().sort()).toEqual(["server.js", "util.js"]);
   });
 
+  it("treats maxBatches false (--no-max-batches) as no cap (runs every batch)", async () => {
+    suppressLogs();
+    // `--no-max-batches` sets the opt to false → no cap, every batch runs.
+    await runScan(
+      projectRoot,
+      { template: [agentA], output: outputDir, maxFilesPerBatch: 1, maxBatches: false },
+      env,
+    );
+    expect(detectorMock.runAgent).toHaveBeenCalledTimes(2);
+    expect(ranFiles().sort()).toEqual(["server.js", "util.js"]);
+  });
+
   it("re-runs an agent whose batches were dropped on the next (uncapped) scan", async () => {
     suppressLogs();
     await runScan(
