@@ -286,6 +286,8 @@ agentgg recon ./src -t base -o ./out     # phase 1–2 only: writes recon.json +
 agentgg scan  ./src -t base -o ./out     # reuses the brief + plan, runs the queued agents
 ```
 
+`recon` runs the same default `--auto-exclude` pass as `scan` (and records the chosen globs in `plan.json`), so the preview faithfully reflects what the scan would skip. Pass `--no-auto-exclude` to plan the whole tree.
+
 To skip recon and gating entirely and run exactly the agents you pass (no project brief, no precondition filtering):
 
 ```bash

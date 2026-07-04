@@ -38,8 +38,15 @@ interface ReconOpts {
   only?: string[];
   maxFileSize?: number; // KB
   defaultExcludes?: boolean;
-  /** Run the smart-exclude LLM pass before recon and fold its globs into the
-   *  walk. Off by default; the chosen globs are recorded in plan.json. */
+  /**
+   * `--auto-exclude`: before recon, let the model pick non-runtime folders to
+   * skip and fold them into the walk, so recon + the precondition plan inherit
+   * them. On by default (Commander default `true`), matching `scan` so this
+   * dry-run faithfully previews what a scan would do; pass `--no-auto-exclude`
+   * to plan the whole tree. Chosen globs are recorded in plan.json (reasons
+   * under `--verbose`). The default lives on the CLI — a programmatic caller
+   * that leaves this unset gets the pass OFF (same as `scan`).
+   */
   autoExclude?: boolean;
   maxTurns?: number;
   /** Re-run recon even when a cached brief exists for this output dir. */
@@ -166,9 +173,10 @@ export async function runReconCommand(
     // folders to skip and folds them into the walk — so recon, the
     // precondition census, and the persisted plan all inherit them. Advisory:
     // a pass failure degrades to "no auto-excludes" rather than aborting.
-    // Off by default. The chosen globs are written to plan.json so a
-    // distributed runner (e.g. the platform's agent workers) can replay them
-    // as --exclude without paying for the pass N times.
+    // On by default (Commander default `true`), matching scan; --no-auto-exclude
+    // opts out. The chosen globs are written to plan.json so a distributed
+    // runner (e.g. the platform's agent workers) can replay them as --exclude
+    // without paying for the pass N times.
     const smartExcludes: string[] = [];
     if (opts.autoExclude) {
       const baselineWalk =
@@ -378,7 +386,12 @@ export function registerReconCommand(program: Command): void {
     )
     .option(
       "--auto-exclude",
-      "Before recon, let the model pick non-runtime folders (tests, fixtures, generated/vendored code, docs, sample data) to skip, folded into the walk so recon + the precondition plan inherit them. Off by default. The chosen globs are recorded in plan.json (reasons shown with --verbose).",
+      "Before recon, let the model pick non-runtime folders (tests, fixtures, generated/vendored code, docs, sample data) to skip, folded into the walk so recon + the precondition plan inherit them. On by default (matches scan, so this dry-run previews what a scan would do); disable with --no-auto-exclude. The chosen globs are recorded in plan.json (reasons shown with --verbose).",
+      true,
+    )
+    .option(
+      "--no-auto-exclude",
+      "don't let the model pick folders to skip (auto-exclude runs by default); plan the whole tree except your explicit --exclude paths.",
     )
     .option("-v, --verbose", "verbose output")
     .action(async (path: string, opts: ReconOpts) => {
