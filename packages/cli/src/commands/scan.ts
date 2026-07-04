@@ -103,7 +103,9 @@ interface ScanOpts {
    * deps, docs, sample data) and fold them in as if they were CLI
    * `--exclude` paths. On by default (Commander default `true`); pass
    * `--no-auto-exclude` to scan the whole tree. The chosen folders are
-   * always logged (with reasons in `--verbose`).
+   * always logged (with reasons in `--verbose`). When a prior `recon` or
+   * `scan` against the same `--output` dir already chose auto-excludes,
+   * they're reused (no second LLM pass); `--re-recon` forces a fresh pass.
    */
   autoExclude?: boolean;
   /** Re-analyze files even when a prior FileRecord covers them with the same contentHash. */
@@ -401,30 +403,56 @@ export async function runScan(
     // aborting the scan. Off by default, and always logged.
     const smartExcludes: string[] = [];
     if (opts.autoExclude) {
-      const baselineWalk =
-        opts.defaultExcludes === false ? [...cliExcludes] : [...DEFAULT_EXCLUDES, ...cliExcludes];
-      try {
-        const suggestions = await runSmartExclude({
-          rootDir: root,
-          detector,
-          excludePatterns: baselineWalk,
-          includePatterns,
-          maxFileSizeBytes,
-          signal: scanAbortController.signal,
-        });
-        for (const s of suggestions) smartExcludes.push(s.glob);
-        if (suggestions.length > 0) {
-          console.log(`Auto-excluded ${suggestions.length} folder(s): ${smartExcludes.join(", ")}`);
-          if (opts.verbose) {
-            for (const s of suggestions) console.log(`    ${s.glob}: ${s.reason}`);
-          }
+      // Reuse the auto-exclude globs a prior `recon` (or `scan`) already chose
+      // for this output dir when they exist — the same plan→run hand-off that
+      // reuses the recon brief and precondition plan below. This pass runs
+      // BEFORE recon, so it can't be keyed on reconHash (not computed yet); the
+      // scanned root is the guard, and `--re-recon` forces a fresh pass to
+      // mirror how it re-runs the survey + plan. `autoExcludes` is present on
+      // the plan only when the pass previously ran, so `undefined` (pass never
+      // ran / plan absent) correctly falls through to deriving it now.
+      const priorPlan = readScanPlan(outDir);
+      const cachedExcludes =
+        !opts.reRecon && priorPlan?.rootPath === root ? priorPlan.autoExcludes : undefined;
+      if (cachedExcludes !== undefined) {
+        for (const g of cachedExcludes) smartExcludes.push(g);
+        if (cachedExcludes.length > 0) {
+          console.log(
+            `Auto-exclude: reusing ${cachedExcludes.length} folder(s) from ${outDir}\\state\\plan.json: ${cachedExcludes.join(", ")} (pass --re-recon to re-derive).`,
+          );
         } else {
-          console.log("Auto-exclude: nothing to drop; scanning the whole tree.");
+          console.log(
+            `Auto-exclude: reusing prior result from ${outDir}\\state\\plan.json (nothing to drop; pass --re-recon to re-derive).`,
+          );
         }
-      } catch (err) {
-        console.warn(
-          `  auto-exclude: pass did not complete (${(err as Error).message}); continuing without it.`,
-        );
+      } else {
+        const baselineWalk =
+          opts.defaultExcludes === false ? [...cliExcludes] : [...DEFAULT_EXCLUDES, ...cliExcludes];
+        try {
+          const suggestions = await runSmartExclude({
+            rootDir: root,
+            detector,
+            excludePatterns: baselineWalk,
+            includePatterns,
+            maxFileSizeBytes,
+            signal: scanAbortController.signal,
+          });
+          for (const s of suggestions) smartExcludes.push(s.glob);
+          if (suggestions.length > 0) {
+            console.log(
+              `Auto-excluded ${suggestions.length} folder(s): ${smartExcludes.join(", ")}`,
+            );
+            if (opts.verbose) {
+              for (const s of suggestions) console.log(`    ${s.glob}: ${s.reason}`);
+            }
+          } else {
+            console.log("Auto-exclude: nothing to drop; scanning the whole tree.");
+          }
+        } catch (err) {
+          console.warn(
+            `  auto-exclude: pass did not complete (${(err as Error).message}); continuing without it.`,
+          );
+        }
       }
     }
 
@@ -699,6 +727,11 @@ export async function runScan(
         reconHash: recon.reconHash,
         rootPath: root,
         decisions,
+        // Persist the auto-excludes in effect this run so a later scan against
+        // the same output dir reuses them instead of re-deriving (mirrors how
+        // `recon` records them). Present only when the pass ran or was reused;
+        // `--no-auto-exclude` writes `undefined`, matching recon's producer.
+        autoExcludes: opts.autoExclude ? smartExcludes : undefined,
       });
     } catch (err) {
       if (opts.verbose) console.error(`  plan: failed to write: ${(err as Error).message}`);
@@ -1834,7 +1867,7 @@ export function registerScanCommand(program: Command): void {
     )
     .option(
       "--auto-exclude",
-      "Before scanning, let the model pick folders not worth reviewing (tests, fixtures, generated/vendored code, docs, sample data) and skip them like --exclude paths. On by default; chosen folders are always logged (reasons shown with --verbose). Disable with --no-auto-exclude to scan the whole tree.",
+      "Before scanning, let the model pick folders not worth reviewing (tests, fixtures, generated/vendored code, docs, sample data) and skip them like --exclude paths. On by default; chosen folders are always logged (reasons shown with --verbose). Reuses the folders a prior recon/scan chose for this --output dir when present (pass --re-recon to re-derive). Disable with --no-auto-exclude to scan the whole tree.",
       true,
     )
     .option(

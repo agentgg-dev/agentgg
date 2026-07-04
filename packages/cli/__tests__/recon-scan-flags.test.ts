@@ -362,3 +362,88 @@ describe("scan plan reuse", () => {
     expect(detectorMock.checkPrecondition).toHaveBeenCalled();
   });
 });
+
+describe("scan --auto-exclude reuse", () => {
+  beforeEach(() => {
+    detectorMock.suggestExcludes.mockImplementation(async () => ({
+      excludes: [{ glob: "tests/**", reason: "test fixtures" }],
+    }));
+  });
+
+  it("reuses the auto-excludes a prior recon chose, without a second LLM pass", async () => {
+    suppressLogs();
+    // recon derives + records the auto-excludes in plan.json.
+    await runReconCommand(
+      projectRoot,
+      { template: [agentPlain], output: outputDir, autoExclude: true },
+      env,
+    );
+    expect(detectorMock.suggestExcludes).toHaveBeenCalledTimes(1);
+
+    // scan reuses them from plan.json — no second smart-exclude pass.
+    detectorMock.suggestExcludes.mockClear();
+    await runScan(
+      projectRoot,
+      { template: [agentPlain], output: outputDir, autoExclude: true },
+      env,
+    );
+    expect(detectorMock.suggestExcludes).not.toHaveBeenCalled();
+    // The globs survive the scan's own plan.json rewrite so later scans reuse too.
+    expect(readScanPlan(outputDir)?.autoExcludes).toEqual(["tests/**"]);
+  });
+
+  it("reuses across repeated scans (first derives, second reuses)", async () => {
+    suppressLogs();
+    await runScan(
+      projectRoot,
+      { template: [agentPlain], output: outputDir, autoExclude: true },
+      env,
+    );
+    expect(detectorMock.suggestExcludes).toHaveBeenCalledTimes(1);
+    expect(readScanPlan(outputDir)?.autoExcludes).toEqual(["tests/**"]);
+
+    detectorMock.suggestExcludes.mockClear();
+    await runScan(
+      projectRoot,
+      { template: [agentPlain], output: outputDir, autoExclude: true },
+      env,
+    );
+    expect(detectorMock.suggestExcludes).not.toHaveBeenCalled();
+    expect(readScanPlan(outputDir)?.autoExcludes).toEqual(["tests/**"]);
+  });
+
+  it("--re-recon forces scan to re-derive the auto-excludes", async () => {
+    suppressLogs();
+    await runReconCommand(
+      projectRoot,
+      { template: [agentPlain], output: outputDir, autoExclude: true },
+      env,
+    );
+    expect(detectorMock.suggestExcludes).toHaveBeenCalledTimes(1);
+
+    detectorMock.suggestExcludes.mockClear();
+    await runScan(
+      projectRoot,
+      { template: [agentPlain], output: outputDir, autoExclude: true, reRecon: true },
+      env,
+    );
+    expect(detectorMock.suggestExcludes).toHaveBeenCalledTimes(1); // re-derived, not reused
+  });
+
+  it("derives fresh when the prior recon ran without --auto-exclude", async () => {
+    suppressLogs();
+    // recon without auto-exclude → plan.json carries no autoExcludes field.
+    await runReconCommand(projectRoot, { template: [agentPlain], output: outputDir }, env);
+    expect(readScanPlan(outputDir)?.autoExcludes).toBeUndefined();
+    expect(detectorMock.suggestExcludes).not.toHaveBeenCalled();
+
+    // Nothing to reuse → scan runs the pass itself and records the result.
+    await runScan(
+      projectRoot,
+      { template: [agentPlain], output: outputDir, autoExclude: true },
+      env,
+    );
+    expect(detectorMock.suggestExcludes).toHaveBeenCalledTimes(1);
+    expect(readScanPlan(outputDir)?.autoExcludes).toEqual(["tests/**"]);
+  });
+});
