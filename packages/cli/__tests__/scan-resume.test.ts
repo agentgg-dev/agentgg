@@ -80,6 +80,19 @@ vi.mock("../src/llm.js", async () => {
   };
 });
 
+// --diff shells out to git (listChangedFiles / loadCommitPatch). Stub that
+// boundary so the --diff tests stay hermetic and deterministic — no git repo,
+// no platform-specific git behavior. `changedFiles` is the set --diff scopes to.
+const diffMock = vi.hoisted(() => ({
+  changedFiles: [] as string[],
+  patch: "diff --git a/x b/x",
+}));
+
+vi.mock("../src/diff.js", () => ({
+  listChangedFiles: () => diffMock.changedFiles,
+  loadCommitPatch: () => diffMock.patch,
+}));
+
 import { runScan } from "../src/commands/scan.js";
 
 let agentggHome: string;
@@ -112,6 +125,9 @@ beforeEach(() => {
     schemaVersion: 1,
   };
   saveUserConfig(cfg, env);
+
+  // Reset the --diff stub; each --diff test sets its own changed-file set.
+  diffMock.changedFiles = [];
 
   detectorMock.recon.mockImplementation(async () => ({
     purpose: "test fixture",
@@ -418,5 +434,73 @@ describe("scan — --max-batches cap", () => {
     // Both files end up analyzed once the cap is lifted.
     expect(readFileRecord(outputDir, "test-detector-a", "server.js")).not.toBeNull();
     expect(readFileRecord(outputDir, "test-detector-a", "util.js")).not.toBeNull();
+  });
+});
+
+// --diff, --max-files-per-agent, and --max-batches are applied in the
+// provider-agnostic orchestrator (scan.ts), around the single Detector that
+// resolveDetector returns. Every provider funnels through that one seam, so
+// proving the composition here with the mock detector proves it for all five
+// providers — there is no per-provider copy of this logic to drift out of sync.
+// This is the guard: add an orchestration flag, cover it here, and it's
+// verified for anthropic/openai/bedrock/vertex/ollama at once.
+describe("scan — --diff composition (provider-agnostic orchestration)", () => {
+  function writeJsFiles(names: string[]) {
+    for (const n of names) writeFileSync(join(projectRoot, n), "const x = 1;\n", "utf8");
+  }
+
+  it("scopes candidates to the changed-file set", async () => {
+    suppressLogs();
+    writeJsFiles(["a.js", "b.js", "c.js"]);
+    diffMock.changedFiles = ["a.js", "c.js"];
+
+    await runScan(projectRoot, { template: [agentA], output: outputDir, diff: "HEAD" }, env);
+
+    // Only the changed files reach the detector; b.js and the beforeEach
+    // fixtures (server.js/util.js) are outside the diff and never scanned.
+    expect(ranFiles().sort()).toEqual(["a.js", "c.js"]);
+  });
+
+  it("applies --max-files-per-agent to the diff-scoped set", async () => {
+    suppressLogs();
+    writeJsFiles(["a.js", "b.js", "c.js"]);
+    diffMock.changedFiles = ["a.js", "b.js", "c.js"];
+
+    await runScan(
+      projectRoot,
+      {
+        template: [agentA],
+        output: outputDir,
+        diff: "HEAD",
+        maxFilesPerBatch: 1,
+        maxFilesPerAgent: 2,
+      },
+      env,
+    );
+
+    // 3 changed files; the per-agent cap applies AFTER the diff intersection,
+    // so exactly 2 are reviewed.
+    expect(ranFiles().length).toBe(2);
+  });
+
+  it("applies --max-batches to batches built from the diff-scoped set", async () => {
+    suppressLogs();
+    writeJsFiles(["a.js", "b.js", "c.js"]);
+    diffMock.changedFiles = ["a.js", "b.js", "c.js"];
+
+    await runScan(
+      projectRoot,
+      {
+        template: [agentA],
+        output: outputDir,
+        diff: "HEAD",
+        maxFilesPerBatch: 1,
+        maxBatches: 2,
+      },
+      env,
+    );
+
+    // 3 changed files @ 1 file/batch = 3 batches, capped to 2 → runAgent 2x.
+    expect(detectorMock.runAgent).toHaveBeenCalledTimes(2);
   });
 });

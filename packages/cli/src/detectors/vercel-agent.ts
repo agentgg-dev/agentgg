@@ -295,9 +295,11 @@ export interface VercelAgentDetectorOpts {
    *  from the `--validate-max-turns` CLI flag (same knob the claude detector
    *  uses); defaults to 50 when unset. */
   validateMaxTurns?: number;
-  /** Fallback model used only for final JSON extraction when the tool-call model
-   *  returns malformed JSON. Useful for Ollama where structuredOutputs conflicts
-   *  with tool calling but is needed to get reliable JSON output. */
+  /** Model used to re-shape malformed final JSON from a tool-loop into the
+   *  target schema (via strict `generateObject`). Defaults to the primary model
+   *  when unset, so every provider recovers from a weak model's schema slip
+   *  instead of dropping the whole batch. Ollama overrides it with its
+   *  `structuredOutputs: true` config, which the tool-calling model can't use. */
   structuredModel?: LanguageModelV1;
 }
 
@@ -344,12 +346,22 @@ export class VercelAgentDetector implements Detector {
   private readonly thinking?: Thinking;
   private readonly verbose: boolean;
   private readonly validateMaxTurns: number;
+  /** Object-generation mode for `generateObject`. Bedrock's SDK only supports
+   *  tool-mode; every other provider we drive supports json mode. */
+  private readonly objectMode: "json" | "tool";
   private meter?: UsageMeter;
 
   constructor(name: string, model: LanguageModelV1, opts: VercelAgentDetectorOpts = {}) {
     this.name = name;
     this.model = model;
-    this.structuredModel = opts.structuredModel;
+    // Default the reformat model to the primary one, so openai/bedrock/vertex
+    // recover from unparseable tool-loop JSON the same way ollama does (ollama
+    // passes a distinct structuredOutputs model explicitly).
+    this.structuredModel = opts.structuredModel ?? model;
+    // @ai-sdk/amazon-bedrock rejects json-mode object generation (it throws
+    // UnsupportedFunctionalityError) and supports only tool-mode; drive Bedrock
+    // through tool-mode and leave every other provider on json (unchanged).
+    this.objectMode = name === "bedrock" ? "tool" : "json";
     this.providerKey = opts.providerKey ?? derivedProviderKey(name);
     this.effort = opts.effort;
     this.thinking = opts.thinking;
@@ -418,7 +430,7 @@ export class VercelAgentDetector implements Detector {
           generateObject({
             model: this.model,
             schema: SuggestExcludesResult,
-            mode: "json",
+            mode: this.objectMode,
             prompt: buildExcludePrompt(args),
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
@@ -516,7 +528,7 @@ export class VercelAgentDetector implements Detector {
           generateObject({
             model: this.model,
             schema: PreconditionCheck,
-            mode: "json",
+            mode: this.objectMode,
             prompt: buildPreconditionPrompt(args),
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
@@ -535,6 +547,8 @@ export class VercelAgentDetector implements Detector {
     fileContent: string;
     scope?: string;
     root?: string;
+    excludePatterns?: string[];
+    maxFileSizeKb?: number;
     signal?: AbortSignal;
   }) {
     try {
@@ -545,7 +559,7 @@ export class VercelAgentDetector implements Detector {
             generateObject({
               model: this.model,
               schema: LlmValidation,
-              mode: "json",
+              mode: this.objectMode,
               prompt: buildValidatePrompt(args),
               providerOptions: this.providerOptionsArg(),
               abortSignal: args.signal,
@@ -559,13 +573,20 @@ export class VercelAgentDetector implements Detector {
       // trace the exploit chain. Structured output is recovered from the
       // final message via parseValidation (with a structuredModel reformat
       // fallback), because this SDK can't combine tools with generateObject.
+      // Same exclude / size knobs as the hunt so validation and detection
+      // see the same file set.
       const prompt = `${buildValidatePrompt(args)}\n\n${validationJsonInstruction()}`;
       const gen = await this.metered(
         () =>
           generateText({
             model: this.model,
             prompt,
-            tools: buildTools(resolve(args.root as string), undefined, this.verbose, []),
+            tools: buildTools(
+              resolve(args.root as string),
+              args.maxFileSizeKb,
+              this.verbose,
+              args.excludePatterns ?? [],
+            ),
             maxSteps: this.validateMaxTurns + 1,
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
@@ -586,7 +607,7 @@ export class VercelAgentDetector implements Detector {
           generateObject({
             model: this.model,
             schema: LlmValidation,
-            mode: "json",
+            mode: this.objectMode,
             prompt: buildScopeValidatePrompt(args),
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
@@ -612,7 +633,7 @@ export class VercelAgentDetector implements Detector {
           generateObject({
             model: this.model,
             schema: LlmScore,
-            mode: "json",
+            mode: this.objectMode,
             prompt: buildScorePrompt(args),
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
@@ -638,7 +659,7 @@ export class VercelAgentDetector implements Detector {
           generateObject({
             model: this.model,
             schema: LlmDedup,
-            mode: "json",
+            mode: this.objectMode,
             prompt: buildDedupePrompt(args),
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
@@ -668,7 +689,7 @@ export class VercelAgentDetector implements Detector {
       const reformat = await generateObject({
         model: this.structuredModel,
         schema: DetectionResult,
-        mode: "json",
+        mode: this.objectMode,
         prompt: `The following is a completed security analysis. Extract all confirmed findings into structured JSON.\n\n${text}\n\n${jsonOutputInstruction(multiAgent)}`,
         abortSignal: signal,
       });
@@ -688,7 +709,7 @@ export class VercelAgentDetector implements Detector {
       const reformat = await generateObject({
         model: this.structuredModel,
         schema: LlmValidation,
-        mode: "json",
+        mode: this.objectMode,
         prompt: `The following is a completed validation of a security finding. Extract the verdict into structured JSON.\n\n${text}\n\n${validationJsonInstruction()}`,
         abortSignal: signal,
       });
@@ -707,7 +728,7 @@ export class VercelAgentDetector implements Detector {
       const reformat = await generateObject({
         model: this.structuredModel,
         schema: AgentSpec,
-        mode: "json",
+        mode: this.objectMode,
         prompt: `The following is a completed analysis distilling a past security incident into an agentgg agent spec. Extract it into the AgentSpec JSON shape.\n\n${text}\n\n${createAgentJsonInstruction()}`,
         abortSignal: signal,
       });
@@ -726,7 +747,7 @@ export class VercelAgentDetector implements Detector {
       const reformat = await generateObject({
         model: this.structuredModel,
         schema: ReconResult,
-        mode: "json",
+        mode: this.objectMode,
         prompt: `The following is a completed recon survey of a codebase. Extract it into structured JSON.\n\n${text}\n\n${reconJsonInstruction()}`,
         abortSignal: signal,
       });

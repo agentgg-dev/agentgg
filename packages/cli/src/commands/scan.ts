@@ -1206,6 +1206,10 @@ export async function runScan(
               fileContent: content,
               scope: scopeContent,
               root,
+              // Cross-file tracing honors the same walk excludes + size cap
+              // as detection, so the validator can't read past --exclude.
+              excludePatterns: walkExcludes,
+              maxFileSizeKb,
               signal: scanAbortController.signal,
             });
             finding.validation = {
@@ -1790,11 +1794,11 @@ export function registerScanCommand(program: Command): void {
     .option("--no-max-batches", "disable the whole-scan agent-batch cap (run every batch)")
     .option(
       "--effort <level>",
-      "SDK reasoning effort for tool-using calls (recon, agent runs, validate). One of: low, medium, high, max. Default: SDK default (no override).",
+      "Reasoning effort for tool-using calls (recon, agent runs, validate). One of: low, medium, high, max. Default: SDK default (no override). Anthropic maps it to the Claude SDK effort; OpenAI maps it to reasoning_effort, which ONLY reasoning models accept (a non-reasoning model rejects it with an HTTP 400). No effect on Bedrock, Vertex, or Ollama.",
     )
     .option(
       "--thinking <mode>",
-      "SDK thinking mode for tool-using calls. One of: off, adaptive, enabled. `adaptive` matches Claude Code interactive — the model decides per call.",
+      "Thinking mode for tool-using calls. One of: off, adaptive, enabled. `adaptive` matches Claude Code interactive — the model decides per call. Anthropic-only; other providers ignore it.",
     )
     .option(
       "--exclude-false-positives",

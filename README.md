@@ -574,6 +574,8 @@ Run `agentgg <command> --help` for the full flag list on any subcommand.
 --base-url <url>                one-shot Ollama base URL (not persisted)
 --region <name>                 one-shot region: AWS region (Bedrock) or Vertex publisher region pool (e.g. global, us-central1)
 --project <id>                  one-shot GCP project ID for Vertex AI (not persisted)
+--effort <level>                reasoning effort for tool-using calls: low | medium | high | max (default: no override). Anthropic maps it to the Claude SDK effort; OpenAI maps it to reasoning_effort, which only its reasoning models accept (a non-reasoning model rejects it with an HTTP 400). No effect on Bedrock, Vertex, or Ollama.
+--thinking <mode>               thinking mode: off | adaptive | enabled (default: no override). Anthropic-only; other providers ignore it.
 -v, --verbose                   verbose output
 ```
 

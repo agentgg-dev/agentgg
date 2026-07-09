@@ -10,7 +10,6 @@ import {
   buildReconPrompt,
   type CreateAgentArgs,
   DetectionResult,
-  type Detector,
   hydrateFinding,
   PreconditionCheck,
   type PreconditionCheckArgs,
@@ -22,12 +21,7 @@ import {
 } from "../detect.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import type { UsageMeter } from "../usage-meter.js";
-import {
-  asValidationField,
-  buildScopeValidatePrompt,
-  buildValidatePrompt,
-  LlmValidation,
-} from "../validator.js";
+import { asValidationField, buildScopeValidatePrompt, LlmValidation } from "../validator.js";
 import { extractCallUsage } from "./vercel-agent.js";
 
 /**
@@ -87,7 +81,13 @@ type ProviderOptionsArg = {
   };
 };
 
-export class MultiProviderDetector implements Detector {
+// Not `implements Detector`: this is a no-tools, structured-output backend
+// used only as ollama's `fileDetector` — the tool-enabled work (recon,
+// runAgent, validateFinding) is routed to the Vercel tool-loop detector. It
+// deliberately omits the tool-enabled `validateFinding`; the composed ollama
+// Detector object supplies that from the Vercel detector. The `: Detector`
+// return annotation in ollama.ts still type-checks every method used here.
+export class MultiProviderDetector {
   readonly name: string;
   private readonly model: LanguageModelV1;
   private readonly providerKey?: "anthropic" | "openai" | "ollama";
@@ -267,35 +267,6 @@ export class MultiProviderDetector implements Detector {
         console.error("---- MultiProviderDetector checkPrecondition error ----");
         console.error(util.inspect(err, { depth: 5, colors: false }));
         console.error("-------------------------------------------------------");
-      }
-      throw err;
-    }
-  }
-
-  async validateFinding(args: {
-    finding: Finding;
-    fileContent: string;
-    scope?: string;
-    signal?: AbortSignal;
-  }) {
-    try {
-      const { object } = await this.metered(() =>
-        generateObject({
-          model: this.model,
-          schema: LlmValidation,
-          mode: "json",
-          prompt: buildValidatePrompt(args),
-          providerOptions: this.providerOptionsArg(),
-          abortSignal: args.signal,
-        }),
-      );
-      return asValidationField(object);
-    } catch (err) {
-      if (process.env.AGENTGG_DEBUG) {
-        const util = await import("node:util");
-        console.error("---- MultiProviderDetector validate error ----");
-        console.error(util.inspect(err, { depth: 5, colors: false }));
-        console.error("----------------------------------------------");
       }
       throw err;
     }

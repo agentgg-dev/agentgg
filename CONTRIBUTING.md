@@ -78,6 +78,50 @@ pnpm build          # tsc --build across the workspace (type-check + emit per-fi
 so the core's dist must exist. CI runs the same `lint → build → test`
 sequence on PRs.
 
+### Real-LLM smoke tests (optional, manual)
+
+`pnpm test` is fully mocked and hermetic. A separate opt-in suite,
+[`packages/cli/__tests__/real-llm.smoke.ts`](./packages/cli/__tests__/real-llm.smoke.ts),
+makes **actual model calls** against every provider to catch flag → provider
+wiring regressions a mock can't — a flag that silently stops reaching one
+backend, or a provider that rejects a request shape the others accept.
+
+```bash
+pnpm build          # core dist must exist, same as pnpm test
+pnpm test:smoke     # runs vitest against vitest.smoke.config.ts
+```
+
+It never runs automatically:
+
+- `pnpm test` globs `*.test.ts`; the smoke file is `*.smoke.ts`, matched only by
+  [`vitest.smoke.config.ts`](./vitest.smoke.config.ts) — so CI and the normal
+  test run can't pick it up.
+- Each provider block is **credential-gated**: it runs only the providers you
+  have configured, resolved from your saved `agentgg init` config
+  (`~/.agentgg/config.json`) or env vars (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+  `AGENTGG_SMOKE_OLLAMA_URL`, `AGENTGG_SMOKE_BEDROCK=1` + `AWS_REGION`,
+  `AGENTGG_SMOKE_VERTEX=1` + `GOOGLE_CLOUD_PROJECT`). With nothing configured
+  it's a safe no-op: only an always-on meta test runs and prints which providers
+  are live.
+
+What it does: one small agent over a two-file fixture (a blatant SQL injection
+plus a benign file) on the cheapest model per provider, asserting each flag's
+observable effect (`--exclude`, `--max-files-per-agent`, `--max-batches`,
+`--diff`, `--validate`, `--score`, `--effort`/`--thinking`). The structural flag
+assertions are deterministic; detection/validate/score depend on the model
+actually finding the vuln, so use a capable model — small local Ollama models
+(e.g. 7B) can miss it. Override the per-provider model with
+`AGENTGG_SMOKE_<PROVIDER>_MODEL` (e.g.
+`AGENTGG_SMOKE_OLLAMA_MODEL=qwen2.5-coder:14b`).
+
+Filter to one provider or case with vitest's `-t` (a regex — the `describe > test`
+join is not a literal `" > "`, so bridge it with `.*`):
+
+```bash
+pnpm test:smoke -t "bedrock"           # every Bedrock case
+pnpm test:smoke -t "openai.*detects"   # one case
+```
+
 ### Make `agentgg` globally available against your local checkout (optional)
 
 If you'd rather type `agentgg ...` than `pnpm agentgg ...`, link the

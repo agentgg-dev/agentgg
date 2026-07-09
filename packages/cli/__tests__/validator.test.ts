@@ -1,7 +1,7 @@
 import type { Finding } from "@agentgg/core";
 import { MockLanguageModelV1 } from "ai/test";
 import { describe, expect, it } from "vitest";
-import { MultiProviderDetector } from "../src/detectors/multi-provider.js";
+import { VercelAgentDetector } from "../src/detectors/vercel-agent.js";
 import { asValidationField, buildValidatePrompt, LlmValidation } from "../src/validator.js";
 
 function makeFinding(overrides: Partial<Finding> = {}): Finding {
@@ -169,14 +169,17 @@ describe("asValidationField", () => {
   });
 });
 
-describe("MultiProviderDetector.validateFinding", () => {
+// The tool-less, single-shot validation path (no `root`): buildValidatePrompt
+// → generateObject → LlmValidation. Exercised here through VercelAgentDetector,
+// which owns that branch for every non-Claude provider.
+describe("VercelAgentDetector.validateFinding (single-shot, no root)", () => {
   it("returns the verdict + reasoning the model emitted", async () => {
     const model = mockModelReturning({
       verdict: "confirmed",
       reasoning: "Line 12 concatenates user input into the SQL string.",
       confidence: 0.95,
     });
-    const detector = new MultiProviderDetector("anthropic-api", model);
+    const detector = new VercelAgentDetector("anthropic-api", model);
     const result = await detector.validateFinding({
       finding: makeFinding(),
       fileContent: "db.query('SELECT * FROM users WHERE id=' + req.params.id)",
@@ -191,7 +194,7 @@ describe("MultiProviderDetector.validateFinding", () => {
       reasoning: "The query is parameterised; the detector misread it.",
       confidence: 0.85,
     });
-    const detector = new MultiProviderDetector("anthropic-api", model);
+    const detector = new VercelAgentDetector("anthropic-api", model);
     const result = await detector.validateFinding({
       finding: makeFinding(),
       fileContent: "db.query('SELECT * FROM users WHERE id=?', [req.params.id])",
@@ -205,7 +208,7 @@ describe("MultiProviderDetector.validateFinding", () => {
       reasoning: "examples/** is excluded by the supplied SECURITY.md.",
       confidence: 0.9,
     });
-    const detector = new MultiProviderDetector("anthropic-api", model);
+    const detector = new VercelAgentDetector("anthropic-api", model);
     const result = await detector.validateFinding({
       finding: makeFinding({ filePath: "examples/demo.ts" }),
       fileContent: "x",
@@ -221,7 +224,7 @@ describe("MultiProviderDetector.validateFinding", () => {
       reasoning: "x",
       confidence: 0.5,
     });
-    const detector = new MultiProviderDetector("anthropic-api", model);
+    const detector = new VercelAgentDetector("anthropic-api", model);
     await expect(
       detector.validateFinding({
         finding: makeFinding(),

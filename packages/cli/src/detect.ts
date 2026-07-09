@@ -233,6 +233,15 @@ export interface Detector {
        * falls back to a single-shot judgement over `fileContent` alone.
        */
       root?: string;
+      /**
+       * File-visibility knobs mirrored from the scan walk. Honored only on
+       * the tool-enabled path (root set): the validator's Read/Glob/Grep
+       * skip excluded paths and oversized files, so it traces the chain over
+       * the same file set the hunt saw. Ignored on the single-shot path and
+       * by backends whose SDK tools can't filter (Claude Agent SDK).
+       */
+      excludePatterns?: string[];
+      maxFileSizeKb?: number;
     } & AbortableArgs,
   ): Promise<{
     verdict: "confirmed" | "false-positive" | "out-of-scope" | "uncertain";

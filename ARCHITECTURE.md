@@ -112,7 +112,7 @@ Three Detector methods, so any provider participates without bespoke wiring:
 | `--re-recon` | recon + plan | Re-run recon **and** re-evaluate the precondition plan instead of reusing the cached brief/plan. |
 | `--no-recon` | recon + precondition | Skip the survey and the gating loop; run every `-t` agent unconditionally with no injected brief. |
 | `--no-summary` | report | Skip rendering `summary.md` + `findings/*.md`. Also accepted by `revalidate` / `score`. State still persists; render later with `agentgg summary`. |
-| `--effort` / `--thinking` | provider-dependent | Reasoning knobs mapped to provider-native options where supported. |
+| `--effort` / `--thinking` | provider-dependent | Reasoning knobs. `--effort` → Claude SDK effort (Anthropic) or `reasoning_effort` (OpenAI **reasoning models only** — a non-reasoning model returns HTTP 400); `--thinking` is Anthropic-only. No-op on providers that don't map them. |
 | `--diff <commit>` | agent runs | Each agent's candidate list is intersected with the touched files; the commit patch is injected as a focus hint. Accepts `<ref>`, `a..b`, `a...b`. |
 | `--exclude` / `--only` / `--max-file-size` / `--no-default-excludes` | file selection | Walk filters. `--exclude` = deleted; `--only` restricts; `--no-default-excludes` drops the built-in skip set. |
 | `--auto-exclude` / `--no-auto-exclude` | file selection (pre-recon) | LLM pass that picks non-runtime folders to skip, folded in like `--exclude`. **On by default**; `--no-auto-exclude` disables. Logged (reasons under `--verbose`). |

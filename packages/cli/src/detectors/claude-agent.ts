@@ -205,6 +205,11 @@ export class ClaudeAgentDetector implements Detector {
     fileContent: string;
     scope?: string;
     root?: string;
+    // Accepted for interface parity; the Claude Agent SDK's built-in
+    // Read/Glob/Grep don't take agentgg's exclude / size filters, so —
+    // exactly like this detector's hunt path — they aren't applied here.
+    excludePatterns?: string[];
+    maxFileSizeKb?: number;
     signal?: AbortSignal;
   }) {
     const prompt = buildValidatePrompt(args);
