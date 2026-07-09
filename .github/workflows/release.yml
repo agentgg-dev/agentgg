@@ -45,8 +45,11 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       # Node 22 ships with npm 10.x; trusted publishing (OIDC) needs >=11.5.1.
-      - name: Upgrade npm to a version that supports trusted publishing
-        run: npm install -g npm@latest
+      # Pin the version rather than @latest: a recent npm@latest ships a broken
+      # bundle that crashes `publish --provenance` with "Cannot find module
+      # 'sigstore'". 11.5.1 is the validated minimum for trusted publishing.
+      - name: Install an npm version that supports trusted publishing
+        run: npm install -g npm@11.5.1
 
       - run: pnpm install --frozen-lockfile
 
