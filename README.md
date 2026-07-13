@@ -21,6 +21,7 @@
 - [Install](#install)
 - [Quick start](#quick-start)
 - [How a scan runs](#how-a-scan-runs)
+- [Execution model: ordering, batching, and concurrency](#execution-model-ordering-batching-and-concurrency)
 - [Agent templates](#agent-templates)
 - [Authoring agents from past reports](#authoring-agents-from-past-reports)
 - [Providers](#providers)
@@ -100,6 +101,58 @@ And the two phases can be skipped inline on a `scan`:
 
 - `--no-recon` skips the survey **and** the precondition loop, running every `-t` agent unconditionally with no project brief.
 - `--no-summary` skips the report render (findings still persist to `state/files/*`); render later with `agentgg summary`. `revalidate` and `score` accept `--no-summary` too, so you can defer the report to a single explicit render at the end.
+
+## Execution model: ordering, batching, and concurrency
+
+The section above is the *what*. This one is the *how*: what runs in parallel, how work is batched, and where the barriers are. The short version:
+
+- **Phases are strictly sequential.** Each phase fully drains before the next begins. Parallelism lives *inside* a phase, never across phase boundaries.
+- **One concurrency primitive.** Every parallel phase uses the same bounded worker pool (`runConcurrent`): a shared cursor hands out work to at most `--concurrency` workers (**default 5**). It is fail-fast: the first fatal error (e.g. a bad credential) stops new dispatch, lets in-flight calls drain, then rethrows. Draining first is deliberate, so a `process.exit` never races a still-shutting-down agent subprocess.
+- **One knob for all parallelism.** `--concurrency` bounds *in-flight LLM sessions* in every parallel phase (precondition prompt gates, agent batches, validation, scoring, dedup). Because phases don't overlap, it is not additive: at most `--concurrency` sessions are ever in flight at once. It bounds parallelism, not total cost.
+
+### The pipeline, phase by phase
+
+```
+preamble ─▶ recon ─▶ preconditions ─▶ AGENTS ─▶ validate ─▶ score ─▶ dedup ─▶ report
+ (git,      (1 LLM   (regex census,   (batch    (pool over  (pool    (pool     (no LLM)
+  auto-      survey)  then gate pool)  pool)     findings)   over     over
+  exclude)                                                   findings) file-groups)
+        └──────────────── each ── is a barrier: the next phase waits ────────────────┘
+```
+
+**0. Preamble** (no LLM, except auto-exclude). Load the agent catalog, fingerprint the stack, and, under `--diff`, shell out to git once to compute the changed-file set and the patch text. If `--auto-exclude` is on (default), one LLM pass over the directory layout picks non-runtime folders to skip; it runs *before* recon so every later phase inherits the excludes.
+
+**1. Recon** (1 LLM session). A single tool-enabled survey of the repo (up to `--max-turns`, default 50) writes the project brief. It is advisory: if it fails or times out, the scan continues with a minimal brief. Cached by `reconHash`, so an unchanged project skips it. Barrier: the brief feeds phases 2–4.
+
+**2. Preconditions** (mixed). Decides which agents are queued.
+- *Regex census*: the tree is walked **once**, and each agent's `regex` precondition is tested against that shared file list. Pure filesystem, no LLM. Runs first and short-circuits: an agent that declares both `regex` and `prompt` and fails the regex is skipped without an LLM call.
+- *Prompt gates*: agents that declare an LLM `prompt` (and passed regex) are evaluated **concurrently** in a pool at `--concurrency`. Barrier: the entire queued set is decided, and `plan.json` written, before any agent runs. A cached plan covering your `-t` selection is reused instead of re-running the gates.
+
+**3. Agents.** The core, split into a cheap sequential setup and a parallel drain.
+- *3a. Enqueue* (sequential, no LLM). For each queued agent, in order: resolve `where` → walk + `preFilter` to candidate files, intersect with the `--diff` set, apply the `--max-files-per-agent` cap (default 300), drop already-analyzed files via per-file resume, then split the remainder into **batches of `maxFilesPerBatch` (default 5)**. Every `(agent, batch)` pair is pushed onto **one shared queue**. An agent whose prior run still matches scope is lifted from disk and skipped entirely here. `--max-batches` (default 250) then truncates the queue.
+- *3b. Drain* (concurrent). One bounded pool runs over **every `(agent, batch)` pair across all agents** at `--concurrency`. This is the key design point: batches from *different* agents interleave in the same pool, so agents are **not** run one-at-a-time. Each batch is one tool-enabled LLM session (up to the agent's `maxTurnsPerBatch`, default 30) that reviews its files and follows imports/callers outward. A fast agent's batches and a slow agent's batches overlap instead of blocking each other.
+
+  ```
+  batch pool (--concurrency = 5)
+    worker1: [sqli/batch1] [xss/batch2] [secrets/batch1] ...
+    worker2: [sqli/batch2] [ssrf/batch1] [sqli/batch3]   ...
+    worker3: [xss/batch1]  [secrets/batch2] ...
+    ...                    (batches from all agents, one queue)
+  ```
+
+**4. Validate** (concurrent, on by default). After **all** batches settle, a pool over the findings at `--concurrency`. Each finding is one LLM session that re-reads the source from the working tree and traces the exploit chain across files, classifying `confirmed` / `false-positive` / `out-of-scope` / `uncertain`. Findings already carrying a verdict are skipped (resume); `--revalidate-all` forces re-classification.
+
+**5. Score** (concurrent, on by default). After validation, a pool over the scorable findings at `--concurrency` picks CVSS 3.1 base metrics per finding. Skips findings the validator disqualified (`false-positive` / `out-of-scope`) and anything already scored.
+
+**6. Dedup** (concurrent, on by default). Runs **last**. Unlike the per-finding phases, it first needs every finding for a file co-located, so it groups shippable findings **by source file across all agents** (a barrier), then deduplicates each file-group **concurrently** at `--concurrency`. One LLM session per file that has 2+ findings; same-root-cause findings get folded under one primary.
+
+**7. Report** (no LLM). Render `summary.md` + `findings/*.md`. Skipped by `--no-summary`.
+
+### What this means in practice
+
+- The only phase where many agents work at once is 3b. Everything before it (walk, prefilter, resume, batching) is cheap sequential setup with no LLM calls, and everything after it (validate/score/dedup) is per-finding fan-out, not per-agent.
+- Raising `--concurrency` speeds up phases 2–6 by running more sessions at once. It does not change how many sessions run in total, only how many run in parallel, so it trades wall-clock for peak API load, not for cost.
+- Resume is orthogonal to all of this: completed agents and already-validated/scored findings are lifted from disk *before* each pool is built, so a re-run only pools the work that actually changed.
 
 ## Agent templates
 
