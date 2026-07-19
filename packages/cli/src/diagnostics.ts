@@ -419,7 +419,10 @@ export function handleDetectorError(
     return;
   }
 
-  console.error(`    ${label}: detection failed — ${msg}`);
+  // The label already names the phase and target (`dedup:src/db.ts`), so a
+  // hardcoded "detection failed" is both redundant and wrong for the validate /
+  // score / dedup phases that share this path. Matches the diagnostic branch above.
+  console.error(`    ${label}: ${msg}`);
   if (e.statusCode) console.error(`      HTTP ${e.statusCode} ${e.url ?? ""}`);
   if (e.responseBody) {
     console.error(`      Response: ${String(e.responseBody).slice(0, 300)}`);

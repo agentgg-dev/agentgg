@@ -313,7 +313,13 @@ describe("handleDetectorError abort-and-suppress behavior", () => {
       });
       handleDetectorError({ verbose: false }, "file:src/c.ts", real500, abortController);
       expect(stderrSpy).toHaveBeenCalled();
-      expect(stderrSpy.mock.calls.some((c) => /detection failed/.test(String(c[0])))).toBe(true);
+      // Full-log branch: the label identifies the phase/target and the
+      // underlying message is carried through verbatim.
+      expect(
+        stderrSpy.mock.calls.some((c) =>
+          /file:src\/c\.ts: Internal server error/.test(String(c[0])),
+        ),
+      ).toBe(true);
     } finally {
       stderrSpy.mockRestore();
     }
