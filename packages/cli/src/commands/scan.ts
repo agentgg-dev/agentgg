@@ -1215,8 +1215,11 @@ export async function runScan(
             finding.validation = {
               verdict: result.verdict,
               reasoning: result.reasoning,
+              ...(result.refused ? { refused: true } : {}),
             };
-            if (opts.verbose) {
+            if (result.refused) {
+              console.log(`    ${finding.filePath}: validation refused, recorded as uncertain`);
+            } else if (opts.verbose) {
               console.log(`    ${finding.filePath}: ${result.verdict}`);
             }
           } catch (err) {

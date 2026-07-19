@@ -319,6 +319,13 @@ export const Finding = z.object({
       reasoning: z.string(),
       scopeRef: z.string().optional(),
       adjustedSeverity: Severity.optional(),
+      /**
+       * True when the model declined to validate (a content refusal) rather
+       * than reaching a verdict. `verdict` is set to `uncertain` in this case:
+       * the finding stays unvalidated, but the refusal is recorded here instead
+       * of being coerced into a bogus verdict or silently dropped.
+       */
+      refused: z.boolean().optional(),
     })
     .optional(),
   /**

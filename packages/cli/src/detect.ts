@@ -246,6 +246,10 @@ export interface Detector {
   ): Promise<{
     verdict: "confirmed" | "false-positive" | "out-of-scope" | "uncertain";
     reasoning: string;
+    /** True when the model declined to validate (refusal); `verdict` is
+     *  `uncertain`. The finding stays unvalidated, but the caller records the
+     *  refusal instead of treating it as a genuine uncertain verdict. */
+    refused?: boolean;
   }>;
 
   /**

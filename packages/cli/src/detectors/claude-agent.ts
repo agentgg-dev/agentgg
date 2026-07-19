@@ -30,6 +30,7 @@ import {
   buildValidatePrompt,
   LlmValidation,
 } from "../validator.js";
+import { looksLikeRefusal, RefusalError } from "./refusal.js";
 
 const ENV_ALLOWLIST = new Set<string>([
   "PATH",
@@ -188,14 +189,28 @@ export class ClaudeAgentDetector implements Detector {
     // Always tool-enabled. The model investigates the seeded candidate
     // files (or roams the repo when there are none), with SDK-enforced
     // structured output.
-    const result = await this.runStructured({
-      prompt,
-      tools: ["Read", "Glob", "Grep"],
-      maxTurns: args.maxTurns,
-      cwd: args.rootDir,
-      schema: DetectionResult,
-      signal: args.signal,
-    });
+    let result: z.infer<typeof DetectionResult>;
+    try {
+      result = await this.runStructured({
+        prompt,
+        tools: ["Read", "Glob", "Grep"],
+        maxTurns: args.maxTurns,
+        cwd: args.rootDir,
+        schema: DetectionResult,
+        signal: args.signal,
+      });
+    } catch (err) {
+      // Treat a refusal as an empty batch, not an agent failure: the agent
+      // still completes and the refusal doesn't count against the scan's
+      // failure ratio. Any other error still propagates.
+      if (err instanceof RefusalError) {
+        console.warn(
+          `[runAgent:${args.agent.slug}] model refused to analyze this batch; recording 0 findings`,
+        );
+        return [];
+      }
+      throw err;
+    }
     const fallback = args.candidates[0]?.filePath ?? "(unknown)";
     return result.findings.map((f) => hydrateFinding(f, args.agent, f.filePath ?? fallback));
   }
@@ -219,15 +234,32 @@ export class ClaudeAgentDetector implements Detector {
     // file doesn't reveal, spending up to validateMaxTurns exploring.
     // Without a root it degrades to a single-shot judgement over the
     // embedded file content.
-    const validated = await this.runStructured({
-      prompt,
-      tools: args.root ? ["Read", "Glob", "Grep"] : [],
-      maxTurns: this.validateMaxTurns,
-      cwd: args.root,
-      schema: LlmValidation,
-      signal: args.signal,
-    });
-    return asValidationField(validated);
+    try {
+      const validated = await this.runStructured({
+        prompt,
+        tools: args.root ? ["Read", "Glob", "Grep"] : [],
+        maxTurns: this.validateMaxTurns,
+        cwd: args.root,
+        schema: LlmValidation,
+        signal: args.signal,
+      });
+      return asValidationField(validated);
+    } catch (err) {
+      // Record the refusal as uncertain rather than failing the finding: it
+      // stays unvalidated and survives into the report. Mirrors the Vercel
+      // detector's parseValidation.
+      if (err instanceof RefusalError) {
+        console.warn(
+          `[validate:${args.finding.id}] model refused to validate; recording uncertain+refused`,
+        );
+        return {
+          verdict: "uncertain" as const,
+          reasoning: "Model declined to validate this finding (refusal).",
+          refused: true,
+        };
+      }
+      throw err;
+    }
   }
 
   async validateFindingByScope(args: { finding: Finding; scope: string; signal?: AbortSignal }) {
@@ -392,6 +424,13 @@ export class ClaudeAgentDetector implements Detector {
       this.meter?.record(extractClaudeUsage(capturedUsage), this.model);
     }
     if (structured === undefined) {
+      // A content refusal reaches here as prose with no structured_output.
+      // Distinguish it from a genuinely empty/failed generation so the
+      // phase-specific callers can substitute an empty result instead of
+      // failing the agent; everything else still throws as before.
+      if (looksLikeRefusal(resultText)) {
+        throw new RefusalError(resultText);
+      }
       throw new Error(
         `Claude Agent SDK produced no structured_output. Raw result text: ${resultText.slice(0, 200)}…`,
       );

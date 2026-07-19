@@ -33,6 +33,7 @@ import {
   buildValidatePrompt,
   LlmValidation,
 } from "../validator.js";
+import { looksLikeRefusal } from "./refusal.js";
 
 export type Effort = "low" | "medium" | "high" | "max";
 export type Thinking = "off" | "adaptive" | "enabled";
@@ -509,6 +510,17 @@ export class VercelAgentDetector implements Detector {
         // completion, a length cutoff, or reasoning that never produced
         // visible content. See logUnparseableGeneration.
         logUnparseableGeneration(`runAgent:${args.agent.slug}`, gen);
+        // A content refusal lands here as prose instead of findings JSON. Treat
+        // it as an empty result, not an agent failure: the batch yields 0
+        // findings, the agent still completes, and the refusal doesn't crash
+        // the agent or count against the scan's failure ratio. A non-refusal
+        // parse failure (empty completion, length cutoff, garbage) still throws.
+        if (looksLikeRefusal(gen.text)) {
+          console.warn(
+            `[runAgent:${args.agent.slug}] model refused to analyze this batch; recording 0 findings`,
+          );
+          return [];
+        }
         throw parseErr;
       }
       const fallback = args.candidates[0]?.filePath ?? "(unknown)";
@@ -593,7 +605,7 @@ export class VercelAgentDetector implements Detector {
           }),
         args.signal,
       );
-      return asValidationField(await this.parseValidation(gen.text, args.signal));
+      return await this.parseValidation(gen.text, args.finding.id, args.signal);
     } catch (err) {
       debugLog("VercelAgentDetector.validateFinding", err);
       throw err;
@@ -698,13 +710,34 @@ export class VercelAgentDetector implements Detector {
     }
   }
 
-  /** Parse an LlmValidation verdict from the tool-loop's final text, with a
-   *  structuredModel reformat fallback. Mirrors parseOrReformat but for the
-   *  tool-enabled validateFinding path. */
-  private async parseValidation(text: string, signal?: AbortSignal): Promise<LlmValidation> {
+  /** Parse a validation verdict from the tool-loop's final text. A content
+   *  refusal (the model declining to validate) is recorded as an
+   *  `uncertain`+`refused` outcome instead of being coerced through the
+   *  structured reformat into a bogus verdict — so the refusal is tracked, not
+   *  silently mislabeled. It does NOT fail the finding: it stays unvalidated.
+   *  Non-refusal parse failures still reformat via structuredModel. */
+  private async parseValidation(
+    text: string,
+    findingId: string,
+    signal?: AbortSignal,
+  ): Promise<{
+    verdict: "confirmed" | "false-positive" | "out-of-scope" | "uncertain";
+    reasoning: string;
+    refused?: boolean;
+  }> {
     try {
-      return LlmValidation.parse(extractJSON(text));
+      return asValidationField(LlmValidation.parse(extractJSON(text)));
     } catch (extractErr) {
+      if (looksLikeRefusal(text)) {
+        console.warn(
+          `[validate:${findingId}] model refused to validate; recording uncertain+refused`,
+        );
+        return {
+          verdict: "uncertain",
+          reasoning: "Model declined to validate this finding (refusal).",
+          refused: true,
+        };
+      }
       if (!this.structuredModel) throw extractErr;
       const reformat = await generateObject({
         model: this.structuredModel,
@@ -714,7 +747,7 @@ export class VercelAgentDetector implements Detector {
         abortSignal: signal,
       });
       this.meter?.record(extractCallUsage(reformat), this.structuredModel.modelId);
-      return reformat.object;
+      return asValidationField(reformat.object);
     }
   }
 

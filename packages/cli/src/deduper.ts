@@ -142,8 +142,7 @@ export interface DedupAssignment {
 
 /**
  * Turn the model's clusters into a flat, validated set of duplicate
- * assignments for one file. Enforces the single-primary invariant the
- * same way deepsec does:
+ * assignments for one file. Enforces the single-primary invariant:
  *
  *   - every id referenced must exist in this file's finding set
  *   - a primary may not also be someone else's duplicate
