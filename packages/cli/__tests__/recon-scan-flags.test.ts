@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Finding, UserConfig } from "@agentgg/core";
@@ -86,7 +86,7 @@ vi.mock("../src/llm.js", async () => {
 });
 
 import { runReconCommand } from "../src/commands/recon.js";
-import { runScan } from "../src/commands/scan.js";
+import { cappedSlugsFromQueue, runScan } from "../src/commands/scan.js";
 
 let agentggHome: string;
 let projectRoot: string;
@@ -445,5 +445,55 @@ describe("scan --auto-exclude reuse", () => {
     );
     expect(detectorMock.suggestExcludes).toHaveBeenCalledTimes(1);
     expect(readScanPlan(outputDir)?.autoExcludes).toEqual(["tests/**"]);
+  });
+});
+
+describe("cappedSlugsFromQueue", () => {
+  const q = (slugs: string[]) => slugs.map((slug) => ({ agent: { slug } }));
+
+  it("returns [] when the queue fits under the cap", () => {
+    expect(cappedSlugsFromQueue(q(["a", "a", "b"]), 5)).toEqual([]);
+  });
+
+  it("returns unique slugs beyond the cap in first-seen order", () => {
+    // cap=2 keeps [a,a]; drops [b,c,c] → capped = [b, c]
+    expect(cappedSlugsFromQueue(q(["a", "a", "b", "c", "c"]), 2)).toEqual(["b", "c"]);
+  });
+
+  it("counts a straddling agent (some batches kept, some dropped) as capped", () => {
+    // cap=1 keeps [a]; drops [a,b] → both a and b are capped
+    expect(cappedSlugsFromQueue(q(["a", "a", "b"]), 1)).toEqual(["a", "b"]);
+  });
+
+  it("returns [] for a non-finite cap (--no-max-batches)", () => {
+    expect(cappedSlugsFromQueue(q(["a", "b"]), Number.POSITIVE_INFINITY)).toEqual([]);
+  });
+});
+
+describe("scan --max-batches", () => {
+  it("writes state/capped.json listing agents dropped by the cap", async () => {
+    suppressLogs();
+    // Two agents, each yields one batch over the shared server.js candidate →
+    // 2 batches total. maxBatches:1 keeps the first, drops the second.
+    await runScan(
+      projectRoot,
+      { template: [agentPlain, agentGated], output: outputDir, maxBatches: 1 },
+      env,
+    );
+    const cappedPath = join(outputDir, "state", "capped.json");
+    expect(existsSync(cappedPath)).toBe(true);
+    const capped = JSON.parse(readFileSync(cappedPath, "utf8")) as { slugs: string[] };
+    expect(capped.slugs).toHaveLength(1);
+    expect(["plain-agent", "gated-agent"]).toContain(capped.slugs[0]);
+  });
+
+  it("does not write capped.json when nothing is dropped", async () => {
+    suppressLogs();
+    await runScan(
+      projectRoot,
+      { template: [agentPlain], output: outputDir, maxBatches: 250 },
+      env,
+    );
+    expect(existsSync(join(outputDir, "state", "capped.json"))).toBe(false);
   });
 });

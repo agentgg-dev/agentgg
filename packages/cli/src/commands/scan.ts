@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import type {
   Agent,
@@ -220,6 +220,29 @@ interface ScanOpts {
  * intersected with the files touched in that commit (its own patch,
  * parent → commit, independent of the working tree).
  */
+/**
+ * Slugs whose batches were dropped by the `--max-batches` cap. An agent is
+ * "capped" if ANY of its batches fall beyond `maxBatches` in enqueue order — a
+ * partially-dropped agent never completes (remaining > 0), so it counts.
+ * Returns [] when the queue fits or the cap is disabled (non-finite).
+ */
+export function cappedSlugsFromQueue(
+  queue: ReadonlyArray<{ agent: { slug: string } }>,
+  maxBatches: number,
+): string[] {
+  if (!Number.isFinite(maxBatches) || queue.length <= maxBatches) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (let i = maxBatches; i < queue.length; i++) {
+    const slug = queue[i].agent.slug;
+    if (!seen.has(slug)) {
+      seen.add(slug);
+      out.push(slug);
+    }
+  }
+  return out;
+}
+
 export async function runScan(
   rootArg: string,
   opts: ScanOpts,
@@ -1005,11 +1028,23 @@ export async function runScan(
     // the kept count — that would wrongly mark a truncated agent complete.
     // Default 250; --no-max-batches (→ Infinity) disables it.
     if (maxBatches > 0 && batchQueue.length > maxBatches) {
+      const cappedSlugs = cappedSlugsFromQueue(batchQueue, maxBatches);
       const dropped = batchQueue.length - maxBatches;
       batchQueue.length = maxBatches;
       console.log(
-        `  Capping to ${maxBatches} batch(es) across all agents (--max-batches; ${dropped} dropped, those agents re-run next scan)`,
+        `  Capping to ${maxBatches} batch(es) across all agents (--max-batches; ${dropped} dropped → ${cappedSlugs.length} agent(s) capped)`,
       );
+      // Durable, machine-readable record of capped agents. A platform runner
+      // reads state/capped.json to mark them `capped` (not failed) rather than
+      // solo-retrying them, which would defeat the whole-scan cap.
+      try {
+        writeFileSync(
+          join(outDir, "state", "capped.json"),
+          JSON.stringify({ slugs: cappedSlugs }, null, 2),
+        );
+      } catch (err) {
+        console.error(`  failed to write capped.json: ${(err as Error).message}`);
+      }
     }
 
     // -------- Phase 2: drain the batch pool --------
