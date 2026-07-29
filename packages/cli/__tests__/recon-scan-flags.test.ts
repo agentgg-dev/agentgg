@@ -489,11 +489,7 @@ describe("scan --max-batches", () => {
 
   it("does not write capped.json when nothing is dropped", async () => {
     suppressLogs();
-    await runScan(
-      projectRoot,
-      { template: [agentPlain], output: outputDir, maxBatches: 250 },
-      env,
-    );
+    await runScan(projectRoot, { template: [agentPlain], output: outputDir, maxBatches: 250 }, env);
     expect(existsSync(join(outputDir, "state", "capped.json"))).toBe(false);
   });
 });
