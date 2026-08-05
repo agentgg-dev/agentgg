@@ -90,7 +90,9 @@ A scan is three phases, and each writes a durable artifact under `state/` so the
 
 Interrupted scans resume: a completed agent is skipped on re-run (its findings lifted from disk); only new or changed work hits the LLM. Changing scope (`--diff`, `--exclude`, …) or the recon brief invalidates and re-runs the affected agents.
 
-**Recon and the plan are reused, not just resumed.** When a `state/recon.json` already covers the project (same root + stack fingerprint), the survey is skipped; and when a matching `state/plan.json` already covers your `-t` selection, the precondition loop is skipped too — the scan just runs the agents the plan already queued. `--re-recon` forces both to be recomputed.
+**Recon and the plan are reused, not just resumed.** When a `state/recon.json` already covers the project (same source identity + stack fingerprint), the survey is skipped; and when a matching `state/plan.json` already covers your `-t` selection, the precondition loop is skipped too — the scan just runs the agents the plan already queued. `--re-recon` forces both to be recomputed.
+
+**Source identity defaults to the absolute scan root.** That is what keeps two projects sharing one `-o` directory from serving each other's cached findings. It also means resume silently stops applying whenever the path moves — a CI checkout under a fresh workspace dir, a container mount, a renamed folder — and the scan re-pays for detection over unchanged code. Pass the same `--source-id <id>` on every run to pin the identity to a label of your choosing instead. Reusing one id across genuinely different codebases will serve the wrong cached findings, so keep it one id per codebase.
 
 **The phases can also run on their own**, each operating on the same `--output` dir:
 
@@ -596,6 +598,7 @@ Run `agentgg <command> --help` for the full flag list on any subcommand.
 -t, --template <value>          slug, .md path, directory, or .txt list file;
                                 comma- or whitespace-separated; repeatable
 -o, --output <path>             output directory (default ./scan-results/)
+--source-id <id>                stable identity for the scanned source; resume state in -o is reused only when it matches (default: the absolute scan root — set it when the path changes between runs, e.g. CI checkouts or container mounts)
 --validate / --no-validate      second-pass validation phase per finding (on by default; --no-validate for a detection-only run)
 --score / --no-score            CVSS 3.1 scoring phase (on by default; --no-score to skip)
 --scope <path>                  scope doc the validator consults for trust-boundary rules; overrides the built-in default (enables `out-of-scope`)

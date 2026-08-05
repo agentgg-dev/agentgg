@@ -6,7 +6,7 @@ One-page reference for what's wired and how. User-facing docs are in [README.md]
 
 `agentgg scan` runs as a pipeline, orchestrated by [`scan.ts`](packages/cli/src/commands/scan.ts). The first two phases each write a durable artifact under `state/`, so the steps are inspectable (and, later, distributable):
 
-1. **Recon** — one tool-enabled survey of the repo via the built-in recon agent ([`src/agents/recon.md`](packages/cli/src/agents/recon.md), loaded by [`recon-agent.ts`](packages/cli/src/recon-agent.ts)). Produces a concise `ReconReport` → `state/recon.json`. Cached by `reconHash` (root + `fingerprint` tags); `--re-recon` forces a refresh, `--no-recon` skips it entirely. The brief is injected into precondition prompt checks and into every agent's detection prompt.
+1. **Recon** — one tool-enabled survey of the repo via the built-in recon agent ([`src/agents/recon.md`](packages/cli/src/agents/recon.md), loaded by [`recon-agent.ts`](packages/cli/src/recon-agent.ts)). Produces a concise `ReconReport` → `state/recon.json`. Cached by `reconHash` (source identity + `fingerprint` tags); `--re-recon` forces a refresh, `--no-recon` skips it entirely. The brief is injected into precondition prompt checks and into every agent's detection prompt.
 2. **Precondition** — for each selected agent, decide queued vs skipped ([`precondition.ts`](packages/cli/src/precondition.ts)). The decisions (with reasons) are written to `state/plan.json` **before any agent runs**. Reused like recon: when a `plan.json` already matches the recon brief and covers the `-t` selection, the for-loop is skipped and its decisions are lifted from disk (`--re-recon` re-evaluates; `--no-recon` bypasses gating and queues every `-t` agent).
 3. **Run** — each queued agent runs over its `where` file set, in batches.
 4. **Validate** (`--scope` for rules), **Score**, and **Dedup** — second-pass passes over the findings. All three run by default; disable individually with `--no-validate` / `--no-score` / `--no-dedup`.
@@ -90,10 +90,10 @@ out/
 
 Resume:
 - **Recon + plan** — a `recon.json` whose `reconHash` matches is reused without re-surveying; a `plan.json` with the same `reconHash` that covers the current `-t` selection is reused without re-running the precondition for-loop (`scan.ts` reads `readScanPlan` and filters the selection to the plan's queued slugs). `--re-recon` forces both to recompute.
-- **Per-agent** — an agent is skipped on re-run when its `AgentRun` sidecar matches the current scope (root + diff + excludePatterns + includePatterns + maxFileSizeKb + **reconHash**); prior findings are lifted from disk. An agent only writes its sidecar on full completion, so an interrupted agent re-runs in full.
+- **Per-agent** — an agent is skipped on re-run when its `AgentRun` sidecar matches the current scope (source identity + diff + excludePatterns + includePatterns + maxFileSizeKb + **reconHash**); prior findings are lifted from disk. An agent only writes its sidecar on full completion, so an interrupted agent re-runs in full.
 - **Per-file** — within an agent, a `(file, agent)` pair is skipped when the `FileRecord` shows a prior `detect` with the same `contentHash` and agent slug.
 
-`--rescan` bypasses resume. Changing scope (`--diff`, `--exclude`, `--only`, `--max-file-size`, root) or the recon brief (`--re-recon` / a stack change) invalidates the affected agents. `--no-recon` uses a synthetic `reconHash` (`"no-recon"`) and queues every `-t` agent, so its runs resume independently of recon-bearing runs.
+`--rescan` bypasses resume. Changing scope (`--diff`, `--exclude`, `--only`, `--max-file-size`, source identity) or the recon brief (`--re-recon` / a stack change) invalidates the affected agents. Source identity is the absolute scan root unless `--source-id <id>` overrides it; the override is what lets a distributed runner (or a CI job with a moving checkout path) extract the same source to a different path each run and still resume. It is recorded verbatim as `scope.rootPath` on the sidecar and `rootPath` on `plan.json`, and is never resolved as a path. `--no-recon` uses a synthetic `reconHash` (`"no-recon"`) and queues every `-t` agent, so its runs resume independently of recon-bearing runs.
 
 ## Validator & scoring
 

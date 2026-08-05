@@ -25,6 +25,9 @@ import { buildInvocation } from "./invocation.js";
 
 interface ReconOpts {
   output?: string;
+  /** `--source-id`: see the twin option on `scan`. Recorded on the brief hash
+   *  and the plan so a later `scan` run at a different path still matches. */
+  sourceId?: string;
   provider?: string;
   apiKey?: string;
   oauthToken?: string;
@@ -75,6 +78,8 @@ export async function runReconCommand(
 ): Promise<void> {
   const root = resolve(rootArg);
   const outDir = resolve(opts.output ?? "./scan-results/");
+  // Resume identity; see the same binding in `scan`. Defaults to the root.
+  const sourceId = opts.sourceId ?? root;
 
   // Record the scanned root so a later `scan` / `revalidate` / `summary`
   // against this output dir can resolve relative paths without retyping it.
@@ -230,6 +235,7 @@ export async function runReconCommand(
     const recon = await runRecon({
       rootDir: root,
       outDir,
+      sourceId,
       detector,
       fingerprintTags: project.tags,
       excludePatterns: walkExcludes,
@@ -268,7 +274,7 @@ export async function runReconCommand(
         runId: runMeta.runId,
         generatedAt: new Date().toISOString(),
         reconHash: recon.reconHash,
-        rootPath: root,
+        rootPath: sourceId,
         decisions: selection.decisions,
         // Present (even if []) only when the pass ran, so a reader can tell
         // "auto-exclude didn't run" from "ran, chose nothing".
@@ -326,6 +332,10 @@ export function registerReconCommand(program: Command): void {
     )
     .argument("<path>", "path to the codebase to survey")
     .option("-o, --output <path>", "output directory for recon + plan state", "./scan-results/")
+    .option(
+      "--source-id <id>",
+      "stable identifier for the scanned source, used as the resume identity instead of the scan root. Pass the same value to `agentgg scan` so it reuses this brief and plan. Defaults to the absolute path of the scan root.",
+    )
     .option(
       "--provider <name>",
       "LLM provider for this run: anthropic | openai | ollama | bedrock | vertex (overrides saved default)",

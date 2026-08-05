@@ -69,6 +69,10 @@ interface ScanOpts {
    */
   scope?: string | boolean;
   output?: string;
+  /** `--source-id`: resume identity, replacing the absolute root. Defaults to
+   *  the root, which is what stops two projects sharing one `-o` dir from
+   *  serving each other's findings. */
+  sourceId?: string;
   validate?: boolean;
   provider?: string;
   apiKey?: string;
@@ -250,6 +254,9 @@ export async function runScan(
 ): Promise<void> {
   const root = resolve(rootArg);
   const outDir = resolve(opts.output ?? "./scan-results/");
+  // Resume identity: compared by the sidecar scope, reconHash, and the plan's
+  // auto-exclude replay. `root` stays the real path for reading files.
+  const sourceId = opts.sourceId ?? root;
 
   // -------- per-scan persistence setup --------
   // Nuclei-style: state lives inside the --output dir. The scan-meta
@@ -436,7 +443,7 @@ export async function runScan(
       // ran / plan absent) correctly falls through to deriving it now.
       const priorPlan = readScanPlan(outDir);
       const cachedExcludes =
-        !opts.reRecon && priorPlan?.rootPath === root ? priorPlan.autoExcludes : undefined;
+        !opts.reRecon && priorPlan?.rootPath === sourceId ? priorPlan.autoExcludes : undefined;
       if (cachedExcludes !== undefined) {
         for (const g of cachedExcludes) smartExcludes.push(g);
         if (cachedExcludes.length > 0) {
@@ -639,6 +646,7 @@ export async function runScan(
       recon = await runRecon({
         rootDir: root,
         outDir,
+        sourceId,
         detector,
         fingerprintTags: project.tags,
         excludePatterns: walkExcludes,
@@ -667,7 +675,7 @@ export async function runScan(
       // JSON-safe: Infinity would serialize to null and break resume compares,
       // so store -1 as the "no cap" sentinel. Consistent on both write and read.
       maxFileSizeKb: Number.isFinite(maxFileSizeKb) ? maxFileSizeKb : -1,
-      rootPath: root,
+      rootPath: sourceId,
       reconHash: recon.reconHash,
     };
 
@@ -748,7 +756,7 @@ export async function runScan(
         runId: runMeta.runId,
         generatedAt: new Date().toISOString(),
         reconHash: recon.reconHash,
-        rootPath: root,
+        rootPath: sourceId,
         decisions,
         // Persist the auto-excludes in effect this run so a later scan against
         // the same output dir reuses them instead of re-deriving (mirrors how
@@ -1748,6 +1756,10 @@ export function registerScanCommand(program: Command): void {
       "disable the bundled default scope (skip trust-boundary filtering during validation)",
     )
     .option("-o, --output <path>", "output directory for findings", "./scan-results/")
+    .option(
+      "--source-id <id>",
+      "stable identifier for the scanned source. Resume state in --output is reused only when it matches the prior run. Defaults to the absolute path of the scan root; set it when the same codebase is scanned from a different path each run (CI checkouts, container mounts). Reusing one id across genuinely different codebases will serve the wrong cached findings.",
+    )
     .option(
       "--validate",
       "run a full second-pass LLM validation phase per finding (slower; reduces false positives). Combine with --scope to thread scope rules into the classifier. On by default; disable with --no-validate.",

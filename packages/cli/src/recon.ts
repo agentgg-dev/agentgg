@@ -11,8 +11,8 @@ import { loadReconInstructions } from "./recon-agent.js";
  * every queued agent's first detection prompt so the model starts
  * oriented.
  *
- * Cached/resumed by `reconHash`: a re-scan with the same root + stack
- * fingerprint reuses the prior brief instead of paying for another
+ * Cached/resumed by `reconHash`: a re-scan with the same source identity +
+ * stack fingerprint reuses the prior brief instead of paying for another
  * survey. `--re-recon` (force) bypasses the cache. The hash also feeds
  * each agent's `AgentRun` resume scope, so a changed brief invalidates
  * prompt-gated agents.
@@ -21,6 +21,9 @@ import { loadReconInstructions } from "./recon-agent.js";
 export interface RunReconOptions {
   rootDir: string;
   outDir: string;
+  /** `--source-id`: identity the cached brief is keyed on. Defaults to the
+   *  absolute `rootDir`. */
+  sourceId?: string;
   detector: Detector;
   /** Static fingerprint tags, handed to the recon agent as a head start. */
   fingerprintTags: string[];
@@ -36,19 +39,23 @@ export interface RunReconOptions {
 
 /**
  * A cheap, stable hash of the inputs the brief is derived from. We hash
- * the absolute root + the sorted fingerprint tags rather than the whole
+ * the source identity + the sorted fingerprint tags rather than the whole
  * tree — recon is a high-level pass, and the stack fingerprint is the
  * signal that matters for "is the prior brief still valid." A code-only
  * change won't invalidate it; a stack change (new manifest dep) will.
+ *
+ * `sourceId` is hashed verbatim: resolving it would re-anchor a label like
+ * `myrepo` to the cwd and put the path dependency straight back.
  */
-export function computeReconHash(rootDir: string, fingerprintTags: string[]): string {
-  return hashContent(
-    JSON.stringify({ root: resolve(rootDir), tags: [...fingerprintTags].sort() }),
-  ).slice(0, 16);
+export function computeReconHash(sourceId: string, fingerprintTags: string[]): string {
+  return hashContent(JSON.stringify({ root: sourceId, tags: [...fingerprintTags].sort() })).slice(
+    0,
+    16,
+  );
 }
 
 export async function runRecon(opts: RunReconOptions): Promise<ReconReport> {
-  const reconHash = computeReconHash(opts.rootDir, opts.fingerprintTags);
+  const reconHash = computeReconHash(opts.sourceId ?? resolve(opts.rootDir), opts.fingerprintTags);
 
   if (!opts.force) {
     const cached = readReconReport(opts.outDir);

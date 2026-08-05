@@ -2,7 +2,13 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Finding, UserConfig } from "@agentgg/core";
-import { loadAllFileRecords, readFileRecord, saveUserConfig } from "@agentgg/core";
+import {
+  loadAllFileRecords,
+  readAgentRun,
+  readFileRecord,
+  readScanPlan,
+  saveUserConfig,
+} from "@agentgg/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Synthesize a minimal unified agent .md so these tests don't depend on
@@ -502,5 +508,95 @@ describe("scan — --diff composition (provider-agnostic orchestration)", () => 
 
     // 3 changed files @ 1 file/batch = 3 batches, capped to 2 → runAgent 2x.
     expect(detectorMock.runAgent).toHaveBeenCalledTimes(2);
+  });
+});
+
+// --source-id decouples resume identity from the absolute scan root, so the
+// same codebase scanned from a different path still reuses its cache.
+describe("scan resume — --source-id", () => {
+  // Second copy of the fixture at a different absolute path, same content.
+  function cloneProject(): string {
+    const dir = mkdtempSync(join(tmpdir(), "agentgg-target2-"));
+    writeFileSync(
+      join(dir, "server.js"),
+      "const x = 'sk-test'; require('cp').exec(process.argv[2]);",
+      "utf8",
+    );
+    writeFileSync(join(dir, "util.js"), "module.exports = (a) => a + 1;", "utf8");
+    return dir;
+  }
+
+  it("without --source-id, a different root re-runs the agent (guard intact)", async () => {
+    suppressLogs();
+    const other = cloneProject();
+    try {
+      await runScan(projectRoot, { template: [agentA], output: outputDir }, env);
+      detectorMock.runAgent.mockClear();
+
+      await runScan(other, { template: [agentA], output: outputDir }, env);
+      expect(detectorMock.runAgent).toHaveBeenCalled();
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+  });
+
+  it("with a matching --source-id, a different root reuses the cache", async () => {
+    suppressLogs();
+    const other = cloneProject();
+    try {
+      await runScan(
+        projectRoot,
+        { template: [agentA], output: outputDir, sourceId: "fixture-1" },
+        env,
+      );
+      detectorMock.runAgent.mockClear();
+
+      await runScan(other, { template: [agentA], output: outputDir, sourceId: "fixture-1" }, env);
+      expect(detectorMock.runAgent).not.toHaveBeenCalled();
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+  });
+
+  it("reuses the recon brief too, not just the agent sidecar", async () => {
+    suppressLogs();
+    const other = cloneProject();
+    try {
+      await runScan(
+        projectRoot,
+        { template: [agentA], output: outputDir, sourceId: "fixture-1" },
+        env,
+      );
+      expect(detectorMock.recon).toHaveBeenCalledTimes(1);
+
+      await runScan(other, { template: [agentA], output: outputDir, sourceId: "fixture-1" }, env);
+      // Still 1: reconHash is derived from the source id, so the cached brief
+      // survives the path change. Keyed on the root it would survey again.
+      expect(detectorMock.recon).toHaveBeenCalledTimes(1);
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+    }
+  });
+
+  it("a different --source-id at the same root invalidates the cache", async () => {
+    suppressLogs();
+    await runScan(projectRoot, { template: [agentA], output: outputDir, sourceId: "one" }, env);
+    detectorMock.runAgent.mockClear();
+
+    await runScan(projectRoot, { template: [agentA], output: outputDir, sourceId: "two" }, env);
+    expect(detectorMock.runAgent).toHaveBeenCalled();
+  });
+
+  it("is recorded verbatim on the sidecar and the plan, not resolved to a path", async () => {
+    suppressLogs();
+    await runScan(
+      projectRoot,
+      { template: [agentA], output: outputDir, sourceId: "fixture-1" },
+      env,
+    );
+
+    const sidecar = readAgentRun(outputDir, "test-detector-a");
+    expect(sidecar?.scope.rootPath).toBe("fixture-1");
+    expect(readScanPlan(outputDir)?.rootPath).toBe("fixture-1");
   });
 });
