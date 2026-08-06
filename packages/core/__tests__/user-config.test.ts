@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { getConfigPath } from "../src/paths.js";
-import type { UserConfig } from "../src/types.js";
+import { UserConfig } from "../src/types.js";
 import { loadUserConfig, saveUserConfig } from "../src/user-config.js";
 
 let tempDir: string;
@@ -104,5 +104,21 @@ describe("saveUserConfig", () => {
     saveUserConfig(cfg, env);
     const mode = statSync(getConfigPath(env)).mode & 0o777;
     expect(mode).toBe(0o600);
+  });
+});
+
+describe("openrouter provider config", () => {
+  it("accepts an openrouter block with an api key", () => {
+    const cfg = UserConfig.parse({
+      provider: "openrouter",
+      openrouter: { apiKey: "sk-or-v1-test", model: "z-ai/glm-5.2" },
+    });
+    expect(cfg.provider).toBe("openrouter");
+    expect(cfg.openrouter?.model).toBe("z-ai/glm-5.2");
+  });
+
+  it("rejects openrouter provider when the block is missing", () => {
+    const res = UserConfig.safeParse({ provider: "openrouter" });
+    expect(res.success).toBe(false);
   });
 });

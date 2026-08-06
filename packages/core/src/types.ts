@@ -576,7 +576,7 @@ export type ScanPlan = z.infer<typeof ScanPlan>;
 // so we don't need a separate family axis. To add a new cloud-hosted
 // provider: append it here, add a typed block + superRefine branch below,
 // register a ProviderModule in packages/cli/src/providers/.
-export const Provider = z.enum(["anthropic", "openai", "ollama", "bedrock", "vertex"]);
+export const Provider = z.enum(["anthropic", "openai", "ollama", "bedrock", "vertex", "openrouter"]);
 export type Provider = z.infer<typeof Provider>;
 
 export const UserConfig = z
@@ -604,6 +604,20 @@ export const UserConfig = z
       .object({
         apiKey: z.string().min(1),
         model: z.string().optional(),
+      })
+      .optional(),
+    openrouter: z
+      .object({
+        /** OpenRouter API key (`sk-or-v1-...`). In cloud runs this comes
+         *  from $OPENROUTER_API_KEY (never persisted); the init wizard
+         *  persists it here for local use. */
+        apiKey: z.string().min(1),
+        /** OpenRouter model slug. Defaults to `z-ai/glm-5.2` in the
+         *  provider module. Route suffixes (`:nitro`, `:exacto`) are part
+         *  of the slug, so they need no schema change. */
+        model: z.string().optional(),
+        /** Override the API base. Defaults to https://openrouter.ai/api/v1. */
+        baseUrl: z.string().url().optional(),
       })
       .optional(),
     ollama: z
@@ -708,6 +722,13 @@ export const UserConfig = z
         code: z.ZodIssueCode.custom,
         message: "openai provider referenced but the openai block is missing",
         path: ["openai"],
+      });
+    }
+    if (cfg.provider === "openrouter" && !cfg.openrouter) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "openrouter provider referenced but the openrouter block is missing",
+        path: ["openrouter"],
       });
     }
     if (cfg.provider === "ollama" && !cfg.ollama) {
