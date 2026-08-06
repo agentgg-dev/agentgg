@@ -112,6 +112,19 @@ describe("buildUserConfig", () => {
     });
   });
 
+  describe("openrouter", () => {
+    it("builds a valid config from an API key", () => {
+      const cfg = buildUserConfig({ provider: "openrouter", openrouterKey: "sk-or-v1-x" });
+      expect(cfg.provider).toBe("openrouter");
+      expect(cfg.openrouter?.apiKey).toBe("sk-or-v1-x");
+      expect(cfg.openrouter?.model).toBe(DEFAULT_MODELS.openrouter);
+    });
+
+    it("throws when no key is supplied", () => {
+      expect(() => buildUserConfig({ provider: "openrouter" })).toThrow(/no API key/);
+    });
+  });
+
   describe("ollama", () => {
     it("uses the default base URL when none is supplied", () => {
       const cfg = buildUserConfig({ provider: "ollama" });
