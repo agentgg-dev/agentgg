@@ -10,7 +10,10 @@ const DEFAULT_MODEL = "z-ai/glm-5.2";
 const DEFAULT_BASE_URL = "https://openrouter.ai/api/v1";
 
 function csv(raw: string | undefined): string[] {
-  return (raw ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  return (raw ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
 }
 
 /**
@@ -108,7 +111,9 @@ async function collectCredentials(args: CollectCredentialsArgs): Promise<UserCon
   const { inputs, env, interactive } = args;
   let apiKey = inputs.apiKey?.trim() || env.OPENROUTER_API_KEY?.trim();
   if (!apiKey && interactive) {
-    apiKey = (await password({ message: "Paste your OpenRouter API key (sk-or-v1-…):", mask: "*" })).trim();
+    apiKey = (
+      await password({ message: "Paste your OpenRouter API key (sk-or-v1-…):", mask: "*" })
+    ).trim();
   }
   if (!apiKey) {
     throw new Error("No OpenRouter API key supplied (--api-key or $OPENROUTER_API_KEY required).");

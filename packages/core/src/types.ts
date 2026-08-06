@@ -576,7 +576,14 @@ export type ScanPlan = z.infer<typeof ScanPlan>;
 // so we don't need a separate family axis. To add a new cloud-hosted
 // provider: append it here, add a typed block + superRefine branch below,
 // register a ProviderModule in packages/cli/src/providers/.
-export const Provider = z.enum(["anthropic", "openai", "ollama", "bedrock", "vertex", "openrouter"]);
+export const Provider = z.enum([
+  "anthropic",
+  "openai",
+  "ollama",
+  "bedrock",
+  "vertex",
+  "openrouter",
+]);
 export type Provider = z.infer<typeof Provider>;
 
 export const UserConfig = z

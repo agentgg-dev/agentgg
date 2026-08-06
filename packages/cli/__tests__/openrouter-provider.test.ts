@@ -2,11 +2,17 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildProviderRouting, createRoutingFetch } from "../src/providers/openrouter.js";
 
 const ENV_KEYS = [
-  "OPENROUTER_QUANTIZATIONS", "OPENROUTER_SORT", "OPENROUTER_PROVIDER_ORDER",
-  "OPENROUTER_ALLOW_FALLBACKS", "OPENROUTER_MAX_PRICE_PROMPT",
-  "OPENROUTER_MAX_PRICE_COMPLETION", "OPENROUTER_ZDR",
+  "OPENROUTER_QUANTIZATIONS",
+  "OPENROUTER_SORT",
+  "OPENROUTER_PROVIDER_ORDER",
+  "OPENROUTER_ALLOW_FALLBACKS",
+  "OPENROUTER_MAX_PRICE_PROMPT",
+  "OPENROUTER_MAX_PRICE_COMPLETION",
+  "OPENROUTER_ZDR",
 ];
-afterEach(() => { for (const k of ENV_KEYS) delete process.env[k]; });
+afterEach(() => {
+  for (const k of ENV_KEYS) delete process.env[k];
+});
 
 describe("buildProviderRouting", () => {
   it("defaults to fp8 + require_parameters + throughput sort", () => {
