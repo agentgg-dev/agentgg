@@ -28,6 +28,7 @@ export interface InitInput {
   anthropicKey?: string;
   anthropicOauthToken?: string;
   openaiKey?: string;
+  openrouterKey?: string;
   ollamaUrl?: string;
   vertexProject?: string;
   model?: string;
@@ -94,6 +95,16 @@ export function buildUserConfig(input: InitInput): UserConfig {
       return {
         provider: "vertex",
         vertex: { project, model },
+        schemaVersion: 1,
+      };
+    }
+    case "openrouter": {
+      if (!input.openrouterKey?.trim()) {
+        throw new Error("openrouter provider selected but no API key provided");
+      }
+      return {
+        provider: "openrouter",
+        openrouter: { apiKey: input.openrouterKey.trim(), model },
         schemaVersion: 1,
       };
     }
@@ -363,6 +374,8 @@ function hasCredentialContext(
       // ADC presence we don't check here — if it's missing,
       // buildDetector surfaces a clear error at scan time.
       return Boolean(opts.project?.trim() || env.GOOGLE_CLOUD_PROJECT || env.GCLOUD_PROJECT);
+    case "openrouter":
+      return Boolean(opts.apiKey?.trim() || env.OPENROUTER_API_KEY);
   }
 }
 
@@ -374,7 +387,7 @@ export function registerInitCommand(program: Command): void {
     )
     .option(
       "--provider <name>",
-      "Provider to configure: anthropic | openai | ollama | bedrock | vertex",
+      "Provider to configure: anthropic | openai | ollama | bedrock | vertex | openrouter",
     )
     .option(
       "--api-key <key>",
