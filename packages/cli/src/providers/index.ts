@@ -3,6 +3,7 @@ import { anthropicModule } from "./anthropic.js";
 import { bedrockModule } from "./bedrock.js";
 import { ollamaModule } from "./ollama.js";
 import { openaiModule } from "./openai.js";
+import { openrouterModule } from "./openrouter.js";
 import type { ProviderFlag, ProviderModule } from "./types.js";
 import { vertexModule } from "./vertex.js";
 
@@ -32,6 +33,7 @@ const MODULES: Record<Provider, ProviderModule> = {
   ollama: ollamaModule,
   bedrock: bedrockModule,
   vertex: vertexModule,
+  openrouter: openrouterModule,
 };
 
 export function getProviderModule(name: Provider): ProviderModule {

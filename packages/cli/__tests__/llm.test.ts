@@ -1,6 +1,7 @@
 import type { UserConfig } from "@agentgg/core";
 import { describe, expect, it } from "vitest";
 import { resolveDetector } from "../src/llm.js";
+import { getProviderModule } from "../src/providers/index.js";
 
 /**
  * These tests verify the routing logic in `resolveDetector` — which
@@ -124,4 +125,10 @@ describe("resolveDetector (one-shot credential overrides)", () => {
       /no credentials available/,
     );
   });
+});
+
+it("registers the openrouter provider module", () => {
+  const mod = getProviderModule("openrouter");
+  expect(mod.name).toBe("openrouter");
+  expect(mod.defaultModel).toBe("z-ai/glm-5.2");
 });
