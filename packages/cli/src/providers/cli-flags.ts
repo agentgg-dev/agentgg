@@ -20,13 +20,15 @@ export interface ScanFlagOpts {
 
 /**
  * Map flat CLI flag values onto the per-provider credential namespace
- * in CredentialOverrides. `--api-key` populates both Anthropic and
- * OpenAI slots — the active provider's `buildDetector` picks the
- * right one.
+ * in CredentialOverrides. `--api-key` populates the Anthropic, OpenAI,
+ * and OpenRouter slots — the active provider's `buildDetector` picks
+ * the right one.
  */
 export function buildCredentialsFromOpts(opts: ScanFlagOpts): CredentialOverrides {
   return {
-    ...(opts.apiKey ? { anthropicApiKey: opts.apiKey, openaiApiKey: opts.apiKey } : {}),
+    ...(opts.apiKey
+      ? { anthropicApiKey: opts.apiKey, openaiApiKey: opts.apiKey, openrouterApiKey: opts.apiKey }
+      : {}),
     ...(opts.oauthToken ? { anthropicOauthToken: opts.oauthToken } : {}),
     ...(opts.baseUrl ? { ollamaBaseUrl: opts.baseUrl } : {}),
     ...(opts.region ? { bedrockRegion: opts.region, vertexRegion: opts.region } : {}),

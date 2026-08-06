@@ -23,6 +23,7 @@ export interface CredentialOverrides {
   anthropicApiKey?: string;
   anthropicOauthToken?: string;
   openaiApiKey?: string;
+  openrouterApiKey?: string;
   ollamaBaseUrl?: string;
   bedrockRegion?: string;
   bedrockAccessKeyId?: string;

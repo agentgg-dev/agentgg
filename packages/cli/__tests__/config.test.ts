@@ -1,6 +1,7 @@
 import type { UserConfig } from "@agentgg/core";
 import { describe, expect, it } from "vitest";
 import { formatConfig } from "../src/commands/config.js";
+import { buildCredentialsFromOpts } from "../src/providers/cli-flags.js";
 
 describe("formatConfig", () => {
   it("emits the config path even when there's no saved config", () => {
@@ -56,4 +57,9 @@ describe("formatConfig", () => {
     expect(parsed.configPath).toBe("/x/cfg.json");
     expect(parsed.config.provider).toBe("ollama");
   });
+});
+
+it("maps --api-key onto the openrouter credential slot", () => {
+  const creds = buildCredentialsFromOpts({ apiKey: "sk-or-v1-x" });
+  expect(creds.openrouterApiKey).toBe("sk-or-v1-x");
 });
