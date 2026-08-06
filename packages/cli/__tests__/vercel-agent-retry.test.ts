@@ -96,6 +96,17 @@ describe("isTransientUpstreamError", () => {
   });
 });
 
+it("treats OpenRouter upstream-provider errors as transient", () => {
+  expect(isTransientUpstreamError("Provider returned error")).toBe(true);
+  expect(isTransientUpstreamError("No instances available")).toBe(true);
+  expect(isTransientUpstreamError("status 502 | Bad Gateway")).toBe(true);
+  expect(isTransientUpstreamError("status 503 | upstream temporarily unavailable")).toBe(true);
+});
+
+it("does not treat a context overflow as transient", () => {
+  expect(isTransientUpstreamError("context_length_exceeded")).toBe(false);
+});
+
 describe("isContextLengthError", () => {
   describe("matches context-overflow rejections across providers", () => {
     it.each([

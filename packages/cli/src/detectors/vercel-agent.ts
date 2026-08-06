@@ -108,6 +108,11 @@ export function isTransientUpstreamError(message: string): boolean {
   if (/bad gateway/i.test(message)) return true;
   if (/gateway timeout/i.test(message)) return true;
   if (/\b50[234]\b/.test(message)) return true;
+  // OpenRouter routes to third-party hosts; a routed provider being down
+  // or flapping surfaces as one of these. All are re-routable on retry.
+  if (/provider returned error/i.test(message)) return true;
+  if (/no instances available/i.test(message)) return true;
+  if (/\b50[23]\b/.test(message)) return true; // 502 Bad Gateway / 503 Unavailable
   return false;
 }
 
