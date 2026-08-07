@@ -333,9 +333,69 @@ class ClaudeUsageLimit extends ScanDiagnostic {
   }
 }
 
+/**
+ * Deterministic provider-config rejection: the request is malformed for the
+ * selected model / provider preferences, so it fails identically on every
+ * retry and every sibling file. Fatal, so the scan surfaces it once and aborts
+ * instead of grinding the same 400 through every file or agent.
+ *
+ * Covers OpenRouter's provider-routing validation (a bad --openrouter-routing
+ * block -> "provider: Unrecognized key: ..."), an over-narrow provider filter
+ * ("No allowed providers are available ..."), and an unknown model
+ * ("... is not a valid model ID" / "No endpoints found ...").
+ */
+class ProviderConfigRejected extends ScanDiagnostic {
+  override readonly fatal = true;
+
+  private constructor(private readonly detail: string) {
+    super();
+  }
+
+  static from(err: unknown): ProviderConfigRejected | null {
+    if (!(err instanceof Error)) return null;
+    const e = err as Error & {
+      responseBody?: string;
+      statusCode?: number;
+      $metadata?: { httpStatusCode?: number };
+      cause?: unknown;
+    };
+    const cause =
+      typeof e.cause === "object" && e.cause !== null
+        ? (e.cause as { message?: string; responseBody?: string; statusCode?: number })
+        : undefined;
+    const status = e.statusCode ?? cause?.statusCode ?? e.$metadata?.httpStatusCode;
+    const haystack = [e.message, e.responseBody, cause?.message, cause?.responseBody]
+      .filter((v): v is string => typeof v === "string" && v.length > 0)
+      .join("\n");
+
+    // OpenRouter prefixes provider-preference validation errors with
+    // "provider: ..." and returns 400 (e.g. a typo'd --openrouter-routing key).
+    if (status === 400 && /\bprovider:\s/i.test(haystack)) {
+      const line = haystack.match(/provider:[^\n]*/i)?.[0] ?? "invalid provider routing";
+      return new ProviderConfigRejected(line.trim());
+    }
+    // Provider filter matched nothing, or the model/provider isn't served.
+    if (/no allowed providers are available/i.test(haystack)) {
+      return new ProviderConfigRejected("no providers match your routing filters for this model");
+    }
+    if (/no endpoints found/i.test(haystack) || /is not a valid model/i.test(haystack)) {
+      return new ProviderConfigRejected("the requested model or provider is not available");
+    }
+    return null;
+  }
+
+  format(): string {
+    return (
+      `provider request rejected as misconfigured: ${this.detail}. ` +
+      "Fix --openrouter-routing / --model and re-run; resume continues from where it stopped."
+    );
+  }
+}
+
 const DIAGNOSTICS: DiagnosticConstructor[] = [
   AuthFailure,
   QuotaExhausted,
+  ProviderConfigRejected,
   ClaudeUsageLimit,
   OllamaContextOverflow,
 ];

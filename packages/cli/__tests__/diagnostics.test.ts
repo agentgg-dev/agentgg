@@ -39,6 +39,45 @@ function buildHttpError(opts: {
   });
 }
 
+describe("ProviderConfigRejected (fatal, deterministic)", () => {
+  it("classifies an OpenRouter provider-routing 400 as fatal (kills the scan)", () => {
+    const err = buildHttpError({
+      statusCode: 400,
+      responseBody: JSON.stringify({
+        error: { message: 'provider: Unrecognized key: "oder"', code: 400 },
+      }),
+    });
+    const d = diagnoseScanError(err);
+    expect(d?.fatal).toBe(true);
+    expect(d?.format()).toMatch(/rejected as misconfigured/);
+    expect(d?.format()).toMatch(/Unrecognized key/);
+  });
+
+  it("classifies 'no allowed providers' (over-narrow routing filter) as fatal", () => {
+    const err = buildHttpError({
+      statusCode: 404,
+      responseBody: JSON.stringify({
+        error: { message: "No allowed providers are available for the selected model." },
+      }),
+    });
+    expect(diagnoseScanError(err)?.fatal).toBe(true);
+  });
+
+  it("classifies an unknown model as fatal", () => {
+    const err = buildHttpError({
+      statusCode: 400,
+      message: "z-ai/glm-5.3 is not a valid model ID",
+    });
+    expect(diagnoseScanError(err)?.fatal).toBe(true);
+  });
+
+  it("does not fire on an ordinary 400 with no provider-routing text", () => {
+    expect(
+      diagnoseScanError(buildHttpError({ statusCode: 400, message: "Bad Request" })),
+    ).toBeNull();
+  });
+});
+
 describe("QuotaExhausted classifier", () => {
   describe("OpenRouter", () => {
     it("recognizes the 402 insufficient-credits shape and does NOT mislabel it Anthropic", () => {
