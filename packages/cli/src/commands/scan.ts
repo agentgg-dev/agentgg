@@ -81,6 +81,7 @@ interface ScanOpts {
   region?: string;
   project?: string;
   model?: string;
+  openrouterRouting?: string;
   concurrency?: number;
   diff?: string;
   template?: string[];
@@ -340,6 +341,7 @@ export async function runScan(
       validateMaxTurns: opts.maxTurns ?? 50,
       effort: opts.effort,
       thinking: opts.thinking,
+      openrouterRouting: opts.openrouterRouting,
     });
 
     // LLM token-usage metering (observability, not billing — you run your own
@@ -1799,6 +1801,10 @@ export function registerScanCommand(program: Command): void {
       "GCP project ID for Vertex AI. Falls back to $GOOGLE_CLOUD_PROJECT / $GCLOUD_PROJECT. Vertex only.",
     )
     .option("--model <name>", "One-shot model override for the selected provider (not persisted)")
+    .option(
+      "--openrouter-routing <json|file>",
+      "OpenRouter provider-routing block, overriding OPENROUTER_* env for this run: inline JSON (must start with {) or a path to a .json file (avoids shell-quoting JSON on Windows). Invalid JSON aborts the scan before any LLM call. OpenRouter only.",
+    )
     .option(
       "-t, --template <value>",
       "Restrict the scan to specific agents. A value can be: a slug (`sql-injection`), a path to a `.md` agent file, a directory of `.md` files, or a `.txt` file listing slugs/paths one per line (# for comments). Multiple values can be comma- or whitespace-separated within one `-t`, or `-t` may be repeated.",

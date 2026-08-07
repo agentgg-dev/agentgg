@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildProviderRouting, createRoutingFetch } from "../src/providers/openrouter.js";
 
@@ -35,6 +38,63 @@ describe("buildProviderRouting", () => {
     process.env.OPENROUTER_MAX_PRICE_PROMPT = "1.5";
     process.env.OPENROUTER_MAX_PRICE_COMPLETION = "4.5";
     expect(buildProviderRouting().max_price).toEqual({ prompt: 1.5, completion: 4.5 });
+  });
+});
+
+describe("buildProviderRouting with --openrouter-routing override", () => {
+  it("merges the JSON override over env defaults, keeping fp8 + require_parameters", () => {
+    const r = buildProviderRouting('{"order":["baseten"],"allow_fallbacks":false}');
+    expect(r.order).toEqual(["baseten"]);
+    expect(r.allow_fallbacks).toBe(false);
+    expect(r.quantizations).toEqual(["fp8"]); // default preserved
+    expect(r.require_parameters).toBe(true); // default preserved
+    expect(r.sort).toBeUndefined(); // pinned providers -> env-default sort dropped
+  });
+
+  it("lets the override replace a default value (quantizations)", () => {
+    expect(buildProviderRouting('{"quantizations":["bf16"]}').quantizations).toEqual(["bf16"]);
+  });
+
+  it("ignores an empty / whitespace override (env defaults stand)", () => {
+    const r = buildProviderRouting("   ");
+    expect(r.sort).toBe("throughput");
+    expect(r.order).toBeUndefined();
+  });
+
+  it("throws a clear error on malformed JSON, before any LLM call", () => {
+    expect(() => buildProviderRouting("{not json")).toThrow(/not valid JSON/);
+  });
+
+  it("treats a non-{ value as a file path (a bare JSON array reads as a filename)", () => {
+    expect(() => buildProviderRouting('["baseten"]')).toThrow(/nor a readable file/);
+  });
+
+  it("rejects a file whose JSON is valid but not an object", () => {
+    const dir = mkdtempSync(join(tmpdir(), "or-routing-"));
+    try {
+      const file = join(dir, "arr.json");
+      writeFileSync(file, '["baseten"]');
+      expect(() => buildProviderRouting(file)).toThrow(/must be a JSON object/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reads routing JSON from a file path (UTF-8 BOM tolerated)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "or-routing-"));
+    try {
+      const file = join(dir, "routing.json");
+      writeFileSync(file, '﻿{"order":["baseten"],"allow_fallbacks":false}');
+      const r = buildProviderRouting(file);
+      expect(r.order).toEqual(["baseten"]);
+      expect(r.allow_fallbacks).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("throws a clear error when the file path cannot be read", () => {
+    expect(() => buildProviderRouting("/no/such/routing.json")).toThrow(/nor a readable file/);
   });
 });
 

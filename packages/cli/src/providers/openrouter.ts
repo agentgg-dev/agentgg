@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import type { UserConfig } from "@agentgg/core";
 import { createOpenAI } from "@ai-sdk/openai";
 import { password } from "@inquirer/prompts";
@@ -24,7 +25,7 @@ function csv(raw: string | undefined): string[] {
  * throughput. An explicit OPENROUTER_PROVIDER_ORDER pins an allow-list
  * and switches off open fallback.
  */
-export function buildProviderRouting(): Record<string, unknown> {
+export function buildProviderRouting(overrideJson?: string): Record<string, unknown> {
   const quant = csv(process.env.OPENROUTER_QUANTIZATIONS);
   const routing: Record<string, unknown> = {
     quantizations: quant.length > 0 ? quant : ["fp8"],
@@ -46,7 +47,63 @@ export function buildProviderRouting(): Record<string, unknown> {
     routing.max_price = maxPrice;
   }
   if (process.env.OPENROUTER_ZDR === "1") routing.zdr = true;
+
+  // --openrouter-routing JSON is authoritative: its keys override the
+  // env-derived defaults (fp8 + require_parameters survive unless the JSON
+  // sets them). A parse failure throws here, before any LLM call or spend.
+  if (overrideJson != null && overrideJson.trim() !== "") {
+    const override = parseRoutingOverride(readRoutingOverrideText(overrideJson));
+    Object.assign(routing, override);
+    // `order`/`only` (pin providers) and `sort` are opposing intents; when
+    // the JSON pins providers, drop the env-default sort so they don't fight.
+    if (routing.order != null || routing.only != null) delete routing.sort;
+  }
   return routing;
+}
+
+/**
+ * Resolve the raw `--openrouter-routing` value to JSON text. A value that
+ * starts with `{` is inline JSON; anything else is treated as a path to a
+ * JSON file — so you can pass `routing.json` directly and skip shell-quoting
+ * the JSON on Windows/PowerShell. A leading UTF-8 BOM (what PowerShell's
+ * Set-Content writes) is stripped.
+ */
+export function readRoutingOverrideText(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.startsWith("{")) return value;
+  let text: string;
+  try {
+    text = readFileSync(trimmed, "utf8");
+  } catch (err) {
+    throw new Error(
+      `--openrouter-routing "${trimmed}" is neither inline JSON (must start with '{') nor a readable file: ${(err as Error).message}.`,
+    );
+  }
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
+/**
+ * Parse the raw `--openrouter-routing` value into a provider-block object.
+ * Fails loud (never silently ignores) so a typo can't quietly ship the
+ * default routing. Throws before any LLM call.
+ */
+export function parseRoutingOverride(json: string): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch (err) {
+    throw new Error(
+      `--openrouter-routing is not valid JSON: ${(err as Error).message}. ` +
+        `Expected an object, e.g. {"order":["baseten"],"quantizations":["fp8"]}.`,
+    );
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    const got = parsed === null ? "null" : Array.isArray(parsed) ? "an array" : typeof parsed;
+    throw new Error(
+      `--openrouter-routing must be a JSON object (e.g. {"order":["baseten"]}), got ${got}.`,
+    );
+  }
+  return parsed as Record<string, unknown>;
 }
 
 /**
@@ -95,7 +152,10 @@ function buildDetector(config: UserConfig, options: ResolveOptions): Detector {
   // account cap we need to pace against.
   const tpmLimit = Number.parseInt(process.env.AGENTGG_OPENROUTER_TPM ?? "0", 10);
   const innerFetch = tpmLimit > 0 ? createThrottledFetch(new TpmBucket(tpmLimit)) : fetch;
-  const routingFetch = createRoutingFetch(buildProviderRouting(), innerFetch);
+  const routingFetch = createRoutingFetch(
+    buildProviderRouting(options.openrouterRouting),
+    innerFetch,
+  );
 
   const openrouter = createOpenAI({ apiKey, baseURL, fetch: routingFetch });
 

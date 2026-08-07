@@ -46,6 +46,10 @@ export interface ResolveOptions {
   validateMaxTurns?: number;
   effort?: "low" | "medium" | "high" | "max";
   thinking?: "off" | "adaptive" | "enabled";
+  /** Raw `--openrouter-routing` JSON (an OpenRouter provider block). Parsed +
+   *  validated by the openrouter module; malformed JSON throws at detector
+   *  build, before any LLM call. Ignored by every other provider. */
+  openrouterRouting?: string;
 }
 
 /**
