@@ -1781,11 +1781,11 @@ export function registerScanCommand(program: Command): void {
     )
     .option(
       "--provider <name>",
-      "LLM provider for this run: anthropic | openai | ollama | bedrock | vertex (overrides saved default)",
+      "LLM provider for this run: anthropic | openai | ollama | bedrock | vertex | openrouter (overrides saved default)",
     )
     .option(
       "--api-key <key>",
-      "One-shot API key (not persisted). Valid for: anthropic, openai. For Anthropic, also accepts an sk-ant-oat… OAuth token.",
+      "One-shot API key (not persisted). Valid for: anthropic, openai, openrouter. For Anthropic, also accepts an sk-ant-oat… OAuth token.",
     )
     .option(
       "--oauth-token <token>",

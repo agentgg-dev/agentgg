@@ -223,6 +223,7 @@ The generated agents drop into `--output` only — they are not auto-installed. 
 | **Ollama** | local URL |
 | **AWS Bedrock** | AWS credentials (env / `~/.aws/credentials` / IAM role) |
 | **Google Vertex AI (Model Garden)** | Google ADC (`gcloud auth application-default login` / `GOOGLE_APPLICATION_CREDENTIALS` / GCE/Cloud Run service account) + GCP project ID |
+| **OpenRouter** | API key (`sk-or-v1...`) |
 
 Every agent is multi-step and tool-using (Read/Glob/Grep), so finding quality scales with model quality.
 
@@ -245,6 +246,12 @@ Things to know:
 
 - **Enable the specific Model Garden publisher model** in your GCP project before first scan (each one is gated separately) and grant the calling identity `roles/aiplatform.user`. `aiplatform.googleapis.com` itself must be enabled too: `gcloud services enable aiplatform.googleapis.com`.
 - **Pass `--region <name>` matching the model.** Each Vertex MaaS model is published to a specific region pool (check the model's Model Garden page in the GCP console). Defaults to `global`. The `init` wizard suggests the right region per curated model.
+
+### OpenRouter
+
+`agentgg init --provider openrouter` prompts for your API key (`sk-or-v1...`, from [openrouter.ai/settings/keys](https://openrouter.ai/settings/keys) — OpenRouter is prepaid, so add credits first). Default model is `z-ai/glm-5.2`; pass `--model <slug>` for any other OpenRouter model (route suffixes like `:nitro` work).
+
+OpenRouter routes each request to one of several hosts serving the model. Tune that routing with env vars (`OPENROUTER_QUANTIZATIONS`, `OPENROUTER_PROVIDER_ORDER`, `OPENROUTER_SORT`, `OPENROUTER_MAX_PRICE_*`, `OPENROUTER_ZDR`) or, per scan, with `--openrouter-routing` — inline JSON or a path to a `.json` file holding an [OpenRouter provider block](https://openrouter.ai/docs/features/provider-routing). Defaults pin fp8 and require tool-calling support; an invalid routing block or unknown model aborts the scan before it spends anything.
 
 ---
 

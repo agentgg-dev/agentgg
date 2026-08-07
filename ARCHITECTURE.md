@@ -55,10 +55,10 @@ Three implementations in [`detectors/`](packages/cli/src/detectors/):
 
 Provider → detector:
 - **Anthropic** (API key + OAuth) → `ClaudeAgentDetector` for every method.
-- **OpenAI / Bedrock / Vertex** → `VercelAgentDetector` for every method.
+- **OpenAI / Bedrock / Vertex / OpenRouter** → `VercelAgentDetector` for every method.
 - **Ollama** → a composite: tool-using calls (`recon`, `runAgent`) → `VercelAgentDetector` (best-effort JSON); no-tool calls (`checkPrecondition`, `validate`, `score`) → `MultiProviderDetector`.
 
-Notes: Anthropic via the Vercel SDK was dropped (OAuth tokens get rate-limited; `mode: "json"` is rejected). Ollama splits because `structuredOutputs: true` (required for `generateObject`) conflicts with tool-calling. Vertex routes through `@ai-sdk/openai` against the Model Garden OpenAI-compatible endpoint with a `fetch` middleware stamping Google ADC tokens; GLM-5's non-standard `message.reasoning_content` is ignored by the JSON extractor.
+Notes: Anthropic via the Vercel SDK was dropped (OAuth tokens get rate-limited; `mode: "json"` is rejected). Ollama splits because `structuredOutputs: true` (required for `generateObject`) conflicts with tool-calling. Vertex routes through `@ai-sdk/openai` against the Model Garden OpenAI-compatible endpoint with a `fetch` middleware stamping Google ADC tokens; GLM-5's non-standard `message.reasoning_content` is ignored by the JSON extractor. OpenRouter uses the same `@ai-sdk/openai` path against `openrouter.ai/api/v1`, with a `fetch` middleware that injects an OpenRouter provider-routing block (fp8 + tool-calling by default; tunable via `--openrouter-routing` / `OPENROUTER_*`).
 
 ## Provider registry
 
@@ -86,7 +86,7 @@ out/
     └── files/<path>.json  ← FileRecord per scanned source file
 ```
 
-`usage.json` (`ScanUsage`) records how many tokens a run actually spent — input, output, and prompt-cached, plus a call count. The detector checkpoints it as the run proceeds (written incrementally, force-flushed on SIGTERM), so even an interrupted run leaves an accurate tally. It's purely an observability surface: the CLI records raw counts and doesn't price or bill anything (you run your own model) — whatever reads `usage.json` (a dashboard, a CI summary, your own accounting) decides what to do with the numbers. One file per invocation, written for every provider: the Vercel AI SDK path (`vertex` / `openai` / `bedrock`), the Claude Agent SDK (Anthropic, from its `result` message's `usage`), and the structured-output path (Ollama).
+`usage.json` (`ScanUsage`) records how many tokens a run actually spent — input, output, and prompt-cached, plus a call count. The detector checkpoints it as the run proceeds (written incrementally, force-flushed on SIGTERM), so even an interrupted run leaves an accurate tally. It's purely an observability surface: the CLI records raw counts and doesn't price or bill anything (you run your own model) — whatever reads `usage.json` (a dashboard, a CI summary, your own accounting) decides what to do with the numbers. One file per invocation, written for every provider: the Vercel AI SDK path (`vertex` / `openai` / `bedrock` / `openrouter`), the Claude Agent SDK (Anthropic, from its `result` message's `usage`), and the structured-output path (Ollama).
 
 Resume:
 - **Recon + plan** — a `recon.json` whose `reconHash` matches is reused without re-surveying; a `plan.json` with the same `reconHash` that covers the current `-t` selection is reused without re-running the precondition for-loop (`scan.ts` reads `readScanPlan` and filters the selection to the plan's queued slugs). `--re-recon` forces both to recompute.
