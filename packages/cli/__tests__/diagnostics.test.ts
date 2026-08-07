@@ -40,6 +40,26 @@ function buildHttpError(opts: {
 }
 
 describe("QuotaExhausted classifier", () => {
+  describe("OpenRouter", () => {
+    it("recognizes the 402 insufficient-credits shape and does NOT mislabel it Anthropic", () => {
+      const err = buildHttpError({
+        statusCode: 402,
+        responseBody: JSON.stringify({
+          error: {
+            code: 402,
+            message:
+              "This request requires more credits, or fewer max_tokens. You requested up to 65536 tokens, but can only afford 12698. To increase, visit https://openrouter.ai/settings/credits and upgrade to a paid account.",
+          },
+        }),
+      });
+      const d = diagnoseScanError(err);
+      expect(d?.fatal).toBe(true);
+      expect(d?.format()).toMatch(/OpenRouter/);
+      expect(d?.format()).toMatch(/openrouter\.ai\/settings\/credits/);
+      expect(d?.format()).not.toMatch(/anthropic/i);
+    });
+  });
+
   describe("Anthropic", () => {
     it("recognizes the modern 402 billing_error shape (per platform.claude.com errors doc)", () => {
       const err = buildHttpError({

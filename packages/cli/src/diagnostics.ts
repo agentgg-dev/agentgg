@@ -207,6 +207,19 @@ class QuotaExhausted extends ScanDiagnostic {
       .filter((v): v is string => typeof v === "string" && v.length > 0)
       .join("\n");
 
+    // OpenRouter: insufficient-credits path. A 402 whose body carries an
+    // openrouter.ai credits URL / "requires more credits" text. Must run
+    // before the generic 402 -> Anthropic branch below, else it mislabels it.
+    if (
+      /openrouter\.ai/i.test(haystack) ||
+      /requires more credits, or fewer max_tokens/i.test(haystack)
+    ) {
+      return new QuotaExhausted(
+        "OpenRouter",
+        "Add credits at https://openrouter.ai/settings/credits, then re-run the scan. Resume picks up pending files automatically.",
+      );
+    }
+
     // Anthropic — modern billing_error path: HTTP 402 OR error.type
     // explicitly named. Body shape per platform.claude.com errors doc.
     if (status === 402 || /"type"\s*:\s*"billing_error"/i.test(haystack)) {
