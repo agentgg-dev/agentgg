@@ -249,11 +249,11 @@ Things to know:
 
 ### OpenRouter
 
-`agentgg init --provider openrouter` prompts for your API key (`sk-or-v1...`, from [openrouter.ai/settings/keys](https://openrouter.ai/settings/keys) — OpenRouter is prepaid, so add credits first). Default model is `z-ai/glm-5.2`; pass `--model <slug>` for any other OpenRouter model (route suffixes like `:nitro` work).
+`agentgg init --provider openrouter` prompts for your API key (`sk-or-v1...`, from [openrouter.ai/settings/keys](https://openrouter.ai/settings/keys)). Default model is `z-ai/glm-5.2`; pass `--model <slug>` for any other OpenRouter model (route suffixes like `:nitro` work).
 
-OpenRouter routes each request to one of several hosts serving the model. Tune that routing with env vars (`OPENROUTER_QUANTIZATIONS`, `OPENROUTER_PROVIDER_ORDER`, `OPENROUTER_SORT`, `OPENROUTER_IGNORE`, `OPENROUTER_MAX_PRICE_*`, `OPENROUTER_ZDR`) or, per scan, with `--openrouter-routing` — inline JSON or a path to a `.json` file holding an [OpenRouter provider block](https://openrouter.ai/docs/features/provider-routing). Defaults pin fp8 and require tool-calling support; an invalid routing block or unknown model aborts the scan before it spends anything.
+OpenRouter routes each request to one of several hosts serving the model. Tune that routing with env vars (`OPENROUTER_QUANTIZATIONS`, `OPENROUTER_PROVIDER_ORDER`, `OPENROUTER_SORT`, `OPENROUTER_IGNORE`, `OPENROUTER_MAX_PRICE_*`, `OPENROUTER_ZDR`) or, per run, with `--openrouter-routing` — inline JSON or a path to a `.json` file holding an [OpenRouter provider block](https://openrouter.ai/docs/features/provider-routing). `scan`, `recon`, and `dedup` all accept it. Defaults pin fp8 and require tool-calling support; an invalid routing block or unknown model aborts the run.
 
-Hosts serving the same model are not interchangeable. Structured-output support, tool-calling, and how a host splits a reasoning model's thinking from its answer are all properties of that host's serving stack, not of the model. A host that files the model's answer under `reasoning` and returns empty content will fail every structured call while reporting success. `OPENROUTER_IGNORE` takes a CSV of provider slugs to exclude, and unlike `--openrouter-routing` it applies to `recon` and `dedup` as well as `scan`. A base slug (`baseten`) drops all of that provider's endpoints; a full slug (`baseten/fast`) drops one variant.
+Hosts serving the same model are not interchangeable. A host that returns the answer in the `reasoning` channel and leaves content empty fails every structured call while reporting success, surfacing as `No object generated: the model did not return a response`, and nothing retries or re-routes around it. Exclude that host with `OPENROUTER_IGNORE` (a CSV of provider slugs) or an `ignore` array in `--openrouter-routing`. A base slug (`baseten`) drops all of that provider's endpoints, a full slug (`baseten/fast`) just one.
 
 ---
 
