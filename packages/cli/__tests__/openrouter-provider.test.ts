@@ -12,6 +12,7 @@ const ENV_KEYS = [
   "OPENROUTER_MAX_PRICE_PROMPT",
   "OPENROUTER_MAX_PRICE_COMPLETION",
   "OPENROUTER_ZDR",
+  "OPENROUTER_IGNORE",
 ];
 afterEach(() => {
   for (const k of ENV_KEYS) delete process.env[k];
@@ -38,6 +39,33 @@ describe("buildProviderRouting", () => {
     process.env.OPENROUTER_MAX_PRICE_PROMPT = "1.5";
     process.env.OPENROUTER_MAX_PRICE_COMPLETION = "4.5";
     expect(buildProviderRouting().max_price).toEqual({ prompt: 1.5, completion: 4.5 });
+  });
+
+  it("omits `ignore` entirely when OPENROUTER_IGNORE is unset", () => {
+    expect(buildProviderRouting().ignore).toBeUndefined();
+  });
+
+  it("excludes providers listed in OPENROUTER_IGNORE", () => {
+    process.env.OPENROUTER_IGNORE = "novita, baseten/fast";
+    // Whitespace trimmed by the shared csv() helper; a bare slug and a
+    // variant-suffixed slug are both valid and mean different things to
+    // OpenRouter (base matches every endpoint, suffixed matches one).
+    expect(buildProviderRouting().ignore).toEqual(["novita", "baseten/fast"]);
+  });
+
+  it("applies `ignore` alongside an explicit provider order", () => {
+    // The two are not alternatives: an order is a preference list, and a
+    // broken endpoint still has to be excluded from the fallback tail.
+    process.env.OPENROUTER_IGNORE = "novita";
+    process.env.OPENROUTER_PROVIDER_ORDER = "streamlake/fp8,baidu/fp8";
+    const r = buildProviderRouting();
+    expect(r.ignore).toEqual(["novita"]);
+    expect(r.order).toEqual(["streamlake/fp8", "baidu/fp8"]);
+  });
+
+  it("lets the JSON override replace an env-derived ignore list", () => {
+    process.env.OPENROUTER_IGNORE = "novita";
+    expect(buildProviderRouting('{"ignore":["sail-research"]}').ignore).toEqual(["sail-research"]);
   });
 });
 

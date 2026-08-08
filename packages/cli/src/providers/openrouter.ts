@@ -24,6 +24,20 @@ function csv(raw: string | undefined): string[] {
  * (drops providers that would silently ignore tool-calls), and route by
  * throughput. An explicit OPENROUTER_PROVIDER_ORDER pins an allow-list
  * and switches off open fallback.
+ *
+ * OPENROUTER_IGNORE is the escape hatch for a provider whose serving stack
+ * is broken for this model. It is a CSV of provider slugs and applies in
+ * every branch, because a bad endpoint has to be excluded whether we are
+ * sorting or pinning an order. Base slugs match all of a provider's
+ * endpoints (`baseten` covers `baseten/fp8` and `baseten/fast`); use the
+ * full slug to drop one variant.
+ *
+ * Why it exists: Novita's GLM-5.2 endpoint returns the model's JSON answer
+ * in the `reasoning` channel and leaves `message.content` empty, so every
+ * `generateObject` call against it fails with NoObjectGeneratedError while
+ * reporting `finishReason: "stop"`. The model answers correctly; the
+ * provider files it in the wrong field. That is unfixable from our side and
+ * invisible until a scan dies, so it needs to be excludable by config.
  */
 export function buildProviderRouting(overrideJson?: string): Record<string, unknown> {
   const quant = csv(process.env.OPENROUTER_QUANTIZATIONS);
@@ -31,6 +45,8 @@ export function buildProviderRouting(overrideJson?: string): Record<string, unkn
     quantizations: quant.length > 0 ? quant : ["fp8"],
     require_parameters: true,
   };
+  const ignore = csv(process.env.OPENROUTER_IGNORE);
+  if (ignore.length > 0) routing.ignore = ignore;
   const order = csv(process.env.OPENROUTER_PROVIDER_ORDER);
   if (order.length > 0) {
     routing.order = order;
