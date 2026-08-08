@@ -505,6 +505,13 @@ export class VercelAgentDetector implements Detector {
           }),
         args.signal,
       );
+      // The tool loop can burn its whole budget without ever emitting findings
+      // JSON — typically the model degenerates into repeating one tool call.
+      // The reformat fallback below turns that into a valid empty result, so
+      // without this line a capped batch is indistinguishable from clean code.
+      // Warn only: a capped batch still records 0 findings and the agent still
+      // completes, so one bad batch never fails the scan.
+      warnIfTurnCapped(args.agent.slug, gen, args.maxTurns);
       let result: DetectionResultType;
       try {
         result = await this.parseOrReformat(gen.text, false, args.signal);
@@ -1083,7 +1090,7 @@ function createAgentJsonInstruction(): string {
 
 After your investigation, output the agent spec as a single JSON object matching EXACTLY this shape — no prose, no markdown fences, no trailing text:
 
-{"slug":"kebab-case-slug","name":"Short name","description":"One-line description of the anti-pattern.","noiseTier":"normal","references":["CWE-89"],"precondition":{"regex":{"extensions":["ts"],"files":[],"directories":[],"patterns":[]}},"where":{"extensions":["ts","tsx"],"filePatterns":[],"excludePatterns":["**/__tests__/**"],"preFilter":[{"regex":"\\\\.query\\\\s*\\\\(","label":"raw SQL call"}],"maxFilesPerBatch":5,"maxTurnsPerBatch":30},"prompt":"Markdown body of the agent's instructions."}
+{"slug":"kebab-case-slug","name":"Short name","description":"One-line description of the anti-pattern.","noiseTier":"normal","references":["CWE-89"],"precondition":{"regex":{"extensions":["ts"],"files":[],"directories":[],"patterns":[]}},"where":{"extensions":["ts","tsx"],"filePatterns":[],"excludePatterns":["**/__tests__/**"],"preFilter":[{"regex":"\\\\.query\\\\s*\\\\(","label":"raw SQL call"}],"maxFilesPerBatch":5,"maxTurnsPerBatch":50},"prompt":"Markdown body of the agent's instructions."}
 
 Every regex MUST be a valid JavaScript RegExp. The slug MUST match ^[a-z0-9][a-z0-9-]*$. Omit precondition entirely if the agent should always run; include the where object (at minimum with extensions).`;
 }
@@ -1168,6 +1175,29 @@ export function extractCallUsage(result: unknown): CallUsage {
 /** A finite positive number, else 0. Token counts are never negative. */
 function numberish(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
+}
+
+/**
+ * Warn when a tool loop ended because it ran out of turns rather than because
+ * the model was done. `generateText` is called with `maxSteps = maxTurns + 1`,
+ * so `steps.length` reaching that ceiling means the cap cut the loop off.
+ *
+ * Always logs (not gated on AGENTGG_DEBUG) — a capped batch silently yields 0
+ * findings, so this line is the only evidence in the run log. Never throws and
+ * never changes the batch's outcome: exhaustion is a quality signal, not a
+ * failure. Reads every field defensively so a provider that omits `steps`
+ * degrades to no warning rather than breaking the scan.
+ */
+export function warnIfTurnCapped(slug: string, result: unknown, maxTurns: number): void {
+  const steps = (result as { steps?: unknown[] })?.steps;
+  if (!Array.isArray(steps) || steps.length < maxTurns + 1) return;
+  const last = steps[steps.length - 1] as { toolCalls?: unknown[] } | undefined;
+  const stillCalling = Array.isArray(last?.toolCalls) && last.toolCalls.length > 0;
+  console.warn(
+    `[runAgent:${slug}] hit the ${maxTurns}-turn cap (${steps.length} steps` +
+      `${stillCalling ? ", still mid tool-call" : ""}): analysis was cut short, ` +
+      `findings for this batch may be incomplete. Raise maxTurnsPerBatch or pass --max-turns.`,
+  );
 }
 
 /**

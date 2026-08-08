@@ -106,7 +106,7 @@ Three Detector methods, so any provider participates without bespoke wiring:
 
 | Flag | Applies to | Notes |
 |---|---|---|
-| `--max-turns <n>` | recon, agent runs, validator | When set, a uniform cap. Unset: agent batches use `where.maxTurnsPerBatch` (default 30), recon 30, validator 30. |
+| `--max-turns <n>` | recon, agent runs, validator | When set, a uniform cap. Unset: agent batches use `where.maxTurnsPerBatch` (default 50), recon 50, validator 50. |
 | `--max-files-per-batch <n>` | agent runs | Candidate files per batch. Overrides `where.maxFilesPerBatch` (default 5). |
 | `--concurrency <n>` | precondition gates, agent runs, validation, scoring | One scan-wide cap on in-flight LLM sessions. Phase 3 flattens every `(agent, batch)` pair into a single pool; validation and scoring fan out one finding per session through the same `runConcurrent` worker pool. Default 5. |
 | `--re-recon` | recon + plan | Re-run recon **and** re-evaluate the precondition plan instead of reusing the cached brief/plan. |
@@ -127,7 +127,7 @@ Three Detector methods, so any provider participates without bespoke wiring:
 
 ```
 batchSize        = opts.maxFilesPerBatch ?? agent.where.maxFilesPerBatch (default 5)
-maxTurnsPerBatch = opts.maxTurns         ?? agent.where.maxTurnsPerBatch (default 30)
+maxTurnsPerBatch = opts.maxTurns         ?? agent.where.maxTurnsPerBatch (default 50)
 ```
 
 ## Tool restriction

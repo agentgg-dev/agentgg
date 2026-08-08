@@ -42,7 +42,7 @@ function makeAgent(slug: string, filePatterns: string[]): Agent {
       useDefaultExcludes: true,
       preFilter: [],
       maxFilesPerBatch: 5,
-      maxTurnsPerBatch: 30,
+      maxTurnsPerBatch: 50,
     },
     prompt: "x",
   };

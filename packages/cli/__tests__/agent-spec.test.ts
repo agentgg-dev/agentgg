@@ -35,7 +35,7 @@ const BASE_SPEC: AgentSpec = {
       },
     ],
     maxFilesPerBatch: 5,
-    maxTurnsPerBatch: 30,
+    maxTurnsPerBatch: 50,
   },
   prompt: `You are reviewing a batch of API handlers for tenant-leak-on-find.
 
@@ -83,7 +83,7 @@ describe("renderAgentSpecMd", () => {
         excludePatterns: [],
         preFilter: [],
         maxFilesPerBatch: 5,
-        maxTurnsPerBatch: 30,
+        maxTurnsPerBatch: 50,
       },
       prompt: "A short prompt body that survives parsing.",
     };
@@ -113,7 +113,7 @@ describe("renderAgentSpecMd", () => {
         excludePatterns: [],
         preFilter: [],
         maxFilesPerBatch: 5,
-        maxTurnsPerBatch: 30,
+        maxTurnsPerBatch: 50,
       },
       prompt: "Body.",
     };

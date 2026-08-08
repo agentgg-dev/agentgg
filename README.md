@@ -132,7 +132,7 @@ preamble ─▶ recon ─▶ preconditions ─▶ AGENTS ─▶ validate ─▶ 
 
 **3. Agents.** The core, split into a cheap sequential setup and a parallel drain.
 - *3a. Enqueue* (sequential, no LLM). For each queued agent, in order: resolve `where` → walk + `preFilter` to candidate files, intersect with the `--diff` set, apply the `--max-files-per-agent` cap (default 300), drop already-analyzed files via per-file resume, then split the remainder into **batches of `maxFilesPerBatch` (default 5)**. Every `(agent, batch)` pair is pushed onto **one shared queue**. An agent whose prior run still matches scope is lifted from disk and skipped entirely here. `--max-batches` (default 250) then truncates the queue.
-- *3b. Drain* (concurrent). One bounded pool runs over **every `(agent, batch)` pair across all agents** at `--concurrency`. This is the key design point: batches from *different* agents interleave in the same pool, so agents are **not** run one-at-a-time. Each batch is one tool-enabled LLM session (up to the agent's `maxTurnsPerBatch`, default 30) that reviews its files and follows imports/callers outward. A fast agent's batches and a slow agent's batches overlap instead of blocking each other.
+- *3b. Drain* (concurrent). One bounded pool runs over **every `(agent, batch)` pair across all agents** at `--concurrency`. This is the key design point: batches from *different* agents interleave in the same pool, so agents are **not** run one-at-a-time. Each batch is one tool-enabled LLM session (up to the agent's `maxTurnsPerBatch`, default 50) that reviews its files and follows imports/callers outward. A fast agent's batches and a slow agent's batches overlap instead of blocking each other.
 
   ```
   batch pool (--concurrency = 5)

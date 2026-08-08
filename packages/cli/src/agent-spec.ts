@@ -103,8 +103,8 @@ const SpecWhere = z.object({
     .number()
     .int()
     .min(1)
-    .default(30)
-    .describe("Tool-use turn budget per investigation session. Default 30."),
+    .default(50)
+    .describe("Tool-use turn budget per investigation session. Default 50."),
 });
 
 export const AgentSpec = z.object({
@@ -248,7 +248,7 @@ function renderWhere(w: AgentSpec["where"]): string | null {
     }
   }
   if (w.maxFilesPerBatch !== 5) lines.push(`  maxFilesPerBatch: ${w.maxFilesPerBatch}`);
-  if (w.maxTurnsPerBatch !== 30) lines.push(`  maxTurnsPerBatch: ${w.maxTurnsPerBatch}`);
+  if (w.maxTurnsPerBatch !== 50) lines.push(`  maxTurnsPerBatch: ${w.maxTurnsPerBatch}`);
   return lines.length > 1 ? lines.join("\n") : null;
 }
 

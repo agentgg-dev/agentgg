@@ -16,7 +16,7 @@ function makeAgent(slug: string, overrides: Partial<Agent> = {}): Agent {
       useDefaultExcludes: true,
       preFilter: [],
       maxFilesPerBatch: 5,
-      maxTurnsPerBatch: 30,
+      maxTurnsPerBatch: 50,
     },
     references: [],
     prompt: "placeholder prompt body",

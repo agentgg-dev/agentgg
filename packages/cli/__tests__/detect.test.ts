@@ -18,7 +18,7 @@ function makeAgent(slug = "sql-injection"): Agent {
       useDefaultExcludes: true,
       preFilter: [],
       maxFilesPerBatch: 5,
-      maxTurnsPerBatch: 30,
+      maxTurnsPerBatch: 50,
     },
     references: ["CWE-89"],
     prompt: "You are looking for SQL injection. Report any string-concatenated queries.",

@@ -90,7 +90,7 @@ export class ClaudeAgentDetector implements Detector {
     model: string;
     /** Stream tool-use messages (Glob/Grep/Read/etc.) to stdout as the agent runs. */
     verbose?: boolean;
-    /** Turn cap for the validator's single-finding call. Default 30. */
+    /** Turn cap for the validator's single-finding call. Default 50. */
     validateMaxTurns?: number;
     /** SDK `effort` passed on every tool-using call. */
     effort?: "low" | "medium" | "high" | "max";

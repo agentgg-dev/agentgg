@@ -165,7 +165,7 @@ export const Where = z.object({
   /** How many candidate files to pack into one investigation session. */
   maxFilesPerBatch: z.number().int().min(1).default(5),
   /** Tool-use turn budget per investigation session. */
-  maxTurnsPerBatch: z.number().int().min(1).default(30),
+  maxTurnsPerBatch: z.number().int().min(1).default(50),
 });
 export type Where = z.infer<typeof Where>;
 
