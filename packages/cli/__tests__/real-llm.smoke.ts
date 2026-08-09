@@ -34,6 +34,7 @@ import { runScan } from "../src/commands/scan.js";
  * block (handy for CI or ambient cloud creds):
  *   ANTHROPIC_API_KEY                             → anthropic
  *   OPENAI_API_KEY                                → openai
+ *   OPENROUTER_API_KEY                            → openrouter
  *   AGENTGG_SMOKE_OLLAMA_URL                       → ollama (e.g. http://localhost:11434)
  *   AGENTGG_SMOKE_BEDROCK=1 + AWS_REGION           → bedrock (creds via AWS chain)
  *   AGENTGG_SMOKE_VERTEX=1 + GOOGLE_CLOUD_PROJECT  → vertex (creds via ADC)
@@ -70,6 +71,7 @@ function providerCases(): ProviderCase[] {
   const cfg = loadConfig();
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
   const openaiKey = process.env.OPENAI_API_KEY;
+  const openrouterKey = process.env.OPENROUTER_API_KEY;
   const ollamaUrl = process.env.AGENTGG_SMOKE_OLLAMA_URL;
   const awsRegion = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION;
   const gcpProject = process.env.GOOGLE_CLOUD_PROJECT ?? process.env.GCLOUD_PROJECT;
@@ -87,6 +89,14 @@ function providerCases(): ProviderCase[] {
       enabled: Boolean(cfg?.openai?.apiKey || openaiKey),
       model: model("AGENTGG_SMOKE_OPENAI_MODEL", "gpt-4o"),
       opts: { provider: "openai", ...(openaiKey ? { apiKey: openaiKey } : {}) },
+    },
+    {
+      name: "openrouter",
+      enabled: Boolean(cfg?.openrouter?.apiKey || openrouterKey),
+      // The platform's production model. Routing comes from the OPENROUTER_*
+      // env defaults, same as a real run.
+      model: model("AGENTGG_SMOKE_OPENROUTER_MODEL", "z-ai/glm-5.2"),
+      opts: { provider: "openrouter", ...(openrouterKey ? { apiKey: openrouterKey } : {}) },
     },
     {
       name: "ollama",
