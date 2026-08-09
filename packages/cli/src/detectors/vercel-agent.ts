@@ -872,21 +872,56 @@ function buildTools(
     Grep: tool({
       description:
         "Search for a regex pattern across files. Returns matching lines as 'file:line: content'.",
+      // `glob` is optional, and `path` is accepted as an alias for it. Both
+      // concessions are to what the model actually emits: with `glob` required
+      // it calls `Grep({pattern})` and the call is rejected outright, and it
+      // reaches for `path` because the sibling Read tool takes `path`. Every
+      // rejection costs a turn out of the batch budget and returns nothing, so
+      // the schema meets the model where it is rather than the reverse.
       parameters: z.object({
         pattern: z.string().describe("Regular expression to search for"),
         glob: z
           .string()
+          .optional()
           .describe(
-            "Glob to restrict which files are searched, e.g. '**/*.ts'. Pass an empty string to search all files.",
+            "Optional glob restricting which files are searched, e.g. '**/*.ts'. Omit to search all files.",
+          ),
+        path: z
+          .string()
+          .optional()
+          .describe(
+            "Optional file or directory path to search under, relative to the repository root. Alias for `glob`.",
           ),
       }),
-      execute: async ({ pattern, glob }) => {
+      execute: async ({ pattern, glob, path }) => {
         logTool("Grep", pattern);
         if (budgetExhausted()) return budgetNotice();
-        return account(await grepToolExecute(pattern, glob || undefined, cwd, exclude));
+        // A bare directory path is not a glob — `src/api` matches that one
+        // entry, not the files under it — so widen it before handing it over.
+        const scope = glob || (path ? toSearchGlob(path) : undefined);
+        return account(await grepToolExecute(pattern, scope, cwd, exclude));
       },
     }),
   };
+}
+
+/**
+ * Widen a `path` argument into a glob that matches the path itself AND anything
+ * beneath it, so `Grep({path: "ghost/core"})` searches the directory rather than
+ * matching nothing.
+ *
+ * The brace form is what makes this work without a stat: `walkAndMatch` only
+ * ever tests FILE paths, so a bare directory name matches zero of them, and its
+ * `matchBase` shortcut would additionally reinterpret a slash-less path as a
+ * basename match against every file in the tree. Emitting a two-arm brace keeps
+ * both readings correct and always contains a `/`, which disables matchBase.
+ * Left alone when the caller already passed a glob.
+ */
+export function toSearchGlob(path: string): string {
+  const trimmed = path.replace(/\/+$/, "");
+  if (trimmed === "") return "**/*";
+  if (/[*?[\]{}]/.test(trimmed)) return trimmed;
+  return `{${trimmed},${trimmed}/**}`;
 }
 
 /** Returned by every tool once the per-session output budget is spent — an
