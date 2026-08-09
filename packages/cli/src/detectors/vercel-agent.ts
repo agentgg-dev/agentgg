@@ -1150,26 +1150,47 @@ async function debugLog(label: string, err: unknown): Promise<void> {
 
 /**
  * Pull normalized token counts out of a Vercel AI SDK result. Reads the
- * documented `usage` shape ({ promptTokens, completionTokens })
- * and the provider metadata's cache figure when present — OpenAI-compatible
- * surfaces, including Vertex MaaS (GLM-5), report it under
- * `providerMetadata.openai.cachedPromptTokens`. Defensive by design: any
- * missing field degrades to 0 rather than throwing, so a provider that omits
- * usage never breaks a scan.
+ * documented `usage` shape ({ promptTokens, completionTokens }) and the
+ * provider metadata's cache figure when present — OpenAI-compatible surfaces
+ * (OpenRouter, OpenAI, Vertex MaaS) report it under
+ * `providerMetadata.openai.cachedPromptTokens`. Bedrock and ollama never
+ * report one and stay at 0.
+ *
+ * Cache is summed PER STEP, not read off the result: `usage` is cumulative
+ * across a tool loop while `providerMetadata` is the final step's alone, so
+ * the top-level figure is short by roughly the step count. Billing prices
+ * cache hits ~5x cheaper than fresh input, so that gap over-charges.
+ *
+ * Defensive by design: any missing field degrades to 0 rather than throwing,
+ * so a provider that omits usage never breaks a scan.
  */
 export function extractCallUsage(result: unknown): CallUsage {
   const r = (result ?? {}) as {
     usage?: { promptTokens?: unknown; completionTokens?: unknown };
-    providerMetadata?: unknown;
-    experimental_providerMetadata?: unknown;
+    steps?: unknown;
   };
   const inputTokens = numberish(r.usage?.promptTokens);
   const outputTokens = numberish(r.usage?.completionTokens);
-  const meta = (r.providerMetadata ?? r.experimental_providerMetadata) as
+  // `usage` is summed over every step of a tool loop, but `providerMetadata` on
+  // the result is only the FINAL step's — so reading cache off the top level
+  // under-counts it by roughly the step count. Walk the steps instead; a
+  // generateObject result has none, and falls back to the top level.
+  const steps = Array.isArray(r.steps) && r.steps.length > 0 ? r.steps : undefined;
+  const cachedInputTokens =
+    steps?.reduce((n: number, step) => n + cachedTokensOf(step), 0) ?? cachedTokensOf(r);
+  return { inputTokens, outputTokens, cachedInputTokens };
+}
+
+/** Cache-hit tokens off one result-or-step. 0 for providers that omit them. */
+function cachedTokensOf(node: unknown): number {
+  const n = (node ?? {}) as {
+    providerMetadata?: unknown;
+    experimental_providerMetadata?: unknown;
+  };
+  const meta = (n.providerMetadata ?? n.experimental_providerMetadata) as
     | { openai?: { cachedPromptTokens?: unknown } }
     | undefined;
-  const cachedInputTokens = numberish(meta?.openai?.cachedPromptTokens);
-  return { inputTokens, outputTokens, cachedInputTokens };
+  return numberish(meta?.openai?.cachedPromptTokens);
 }
 
 /** A finite positive number, else 0. Token counts are never negative. */

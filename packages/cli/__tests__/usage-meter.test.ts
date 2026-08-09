@@ -49,6 +49,86 @@ describe("extractCallUsage", () => {
     expect(extractCallUsage({ usage: { promptTokens: "lots" } })).toEqual(zero);
     expect(extractCallUsage({ usage: { promptTokens: -5 } })).toEqual(zero);
   });
+
+  // A multi-step tool loop is the shape every scan actually runs. The SDK sums
+  // `usage` across steps but exposes only the LAST step's `providerMetadata`,
+  // so reading the top level under-counts cache hits by ~the step count.
+  it("sums cached tokens across every step of a tool loop", () => {
+    const step = (prompt: number, cached: number) => ({
+      usage: { promptTokens: prompt, completionTokens: 5 },
+      providerMetadata: { openai: { cachedPromptTokens: cached } },
+    });
+    const usage = extractCallUsage({
+      // What the SDK reports: cumulative usage, final step's metadata.
+      usage: { promptTokens: 300, completionTokens: 15 },
+      providerMetadata: { openai: { cachedPromptTokens: 90 } },
+      steps: [step(50, 0), step(100, 70), step(150, 90)],
+    });
+    expect(usage.inputTokens).toBe(300);
+    expect(usage.outputTokens).toBe(15);
+    expect(usage.cachedInputTokens).toBe(160);
+  });
+
+  it("reads experimental_providerMetadata on steps too", () => {
+    const usage = extractCallUsage({
+      usage: { promptTokens: 200, completionTokens: 4 },
+      steps: [
+        { experimental_providerMetadata: { openai: { cachedPromptTokens: 30 } } },
+        { experimental_providerMetadata: { openai: { cachedPromptTokens: 45 } } },
+      ],
+    });
+    expect(usage.cachedInputTokens).toBe(75);
+  });
+
+  // generateObject results carry no `steps` — the structured-output paths in
+  // MultiProviderDetector and the reformat fallbacks depend on this.
+  it("falls back to top-level metadata when there are no steps", () => {
+    expect(
+      extractCallUsage({
+        usage: { promptTokens: 100, completionTokens: 40 },
+        providerMetadata: { openai: { cachedPromptTokens: 64 } },
+      }).cachedInputTokens,
+    ).toBe(64);
+    expect(
+      extractCallUsage({
+        usage: { promptTokens: 100, completionTokens: 40 },
+        providerMetadata: { openai: { cachedPromptTokens: 64 } },
+        steps: [],
+      }).cachedInputTokens,
+    ).toBe(64);
+  });
+
+  // Bedrock (@ai-sdk/amazon-bedrock) and ollama never emit a cache figure;
+  // they must stay at 0 rather than picking up noise from the step walk.
+  it("reports zero cache for providers that omit the metadata", () => {
+    const usage = extractCallUsage({
+      usage: { promptTokens: 500, completionTokens: 20 },
+      steps: [
+        { usage: { promptTokens: 200, completionTokens: 10 } },
+        { usage: { promptTokens: 300, completionTokens: 10 }, providerMetadata: { bedrock: {} } },
+      ],
+    });
+    expect(usage).toEqual({ inputTokens: 500, outputTokens: 20, cachedInputTokens: 0 });
+  });
+
+  // Billing subtracts cached from input; cached > input would clamp input to 0
+  // and misprice the whole scan at the cache rate.
+  it("never reports more cached tokens than input tokens", () => {
+    const usage = extractCallUsage({
+      usage: { promptTokens: 300, completionTokens: 10 },
+      steps: [
+        {
+          usage: { promptTokens: 100, completionTokens: 5 },
+          providerMetadata: { openai: { cachedPromptTokens: 100 } },
+        },
+        {
+          usage: { promptTokens: 200, completionTokens: 5 },
+          providerMetadata: { openai: { cachedPromptTokens: 200 } },
+        },
+      ],
+    });
+    expect(usage.cachedInputTokens).toBeLessThanOrEqual(usage.inputTokens);
+  });
 });
 
 describe("extractClaudeUsage", () => {
