@@ -3,10 +3,17 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { password } from "@inquirer/prompts";
 import type { Detector } from "../detect.js";
 import { VercelAgentDetector } from "../detectors/index.js";
-import { createThrottledFetch, TpmBucket } from "../tpm-bucket.js";
+import {
+  announceThrottle,
+  createThrottledFetch,
+  resolveTpmLimit,
+  TpmBucket,
+} from "../tpm-bucket.js";
 import type { CollectCredentialsArgs, ProviderModule, ResolveOptions } from "./types.js";
 
 const DEFAULT_MODEL = "gpt-5";
+/** Starting value only, until the first response reports the account cap. */
+const DEFAULT_TPM = 30_000;
 
 function buildDetector(config: UserConfig, options: ResolveOptions): Detector {
   const apiKey = options.credentials?.openaiApiKey ?? config.openai?.apiKey;
@@ -18,11 +25,19 @@ function buildDetector(config: UserConfig, options: ResolveOptions): Detector {
   const modelName = options.model ?? config.openai?.model ?? DEFAULT_MODEL;
   // Shared TPM bucket so concurrent workers cooperate on one rolling
   // 60-second token budget instead of independently slamming the cap.
-  // Override via AGENTGG_OPENAI_TPM — default 30000 matches OpenAI Tier 1.
-  const tpmLimit = Number.parseInt(process.env.AGENTGG_OPENAI_TPM ?? "30000", 10);
+  // The default is only a starting value: the first response carries
+  // `x-ratelimit-limit-tokens`, and the bucket then adopts the account's
+  // real cap. AGENTGG_OPENAI_TPM pins it by hand (0 disables throttling).
+  const envVar = "AGENTGG_OPENAI_TPM";
+  const { limit: tpmLimit, pinned } = resolveTpmLimit(process.env[envVar], DEFAULT_TPM, {
+    label: "openai",
+    envVar,
+  });
+  const labels = { label: "openai", envVar, pinned };
+  announceThrottle(labels, tpmLimit);
   const openai =
     tpmLimit > 0
-      ? createOpenAI({ apiKey, fetch: createThrottledFetch(new TpmBucket(tpmLimit)) })
+      ? createOpenAI({ apiKey, fetch: createThrottledFetch(new TpmBucket(tpmLimit), labels) })
       : createOpenAI({ apiKey });
   return new VercelAgentDetector("openai", openai(modelName), {
     effort: options.effort,

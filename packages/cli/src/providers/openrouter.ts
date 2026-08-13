@@ -4,7 +4,12 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { password } from "@inquirer/prompts";
 import type { Detector } from "../detect.js";
 import { VercelAgentDetector } from "../detectors/index.js";
-import { createThrottledFetch, TpmBucket } from "../tpm-bucket.js";
+import {
+  announceThrottle,
+  createThrottledFetch,
+  resolveTpmLimit,
+  TpmBucket,
+} from "../tpm-bucket.js";
 import type { CollectCredentialsArgs, ProviderModule, ResolveOptions } from "./types.js";
 
 const DEFAULT_MODEL = "z-ai/glm-5.2";
@@ -166,8 +171,16 @@ function buildDetector(config: UserConfig, options: ResolveOptions): Detector {
   // Optional shared TPM throttle (same knob shape as openai.ts). Off by
   // default: OpenRouter's TPM headroom is provider-dependent, not a fixed
   // account cap we need to pace against.
-  const tpmLimit = Number.parseInt(process.env.AGENTGG_OPENROUTER_TPM ?? "0", 10);
-  const innerFetch = tpmLimit > 0 ? createThrottledFetch(new TpmBucket(tpmLimit)) : fetch;
+  const orEnvVar = "AGENTGG_OPENROUTER_TPM";
+  // Always pinned: OpenRouter's cap depends on the routed upstream provider,
+  // so a single `x-ratelimit-limit-tokens` value is not a cap to adopt.
+  const orLabels = { label: "openrouter", envVar: orEnvVar, pinned: true };
+  const { limit: tpmLimit } = resolveTpmLimit(process.env[orEnvVar], 0, orLabels);
+  let innerFetch: typeof fetch = fetch;
+  if (tpmLimit > 0) {
+    announceThrottle(orLabels, tpmLimit);
+    innerFetch = createThrottledFetch(new TpmBucket(tpmLimit), orLabels);
+  }
   const routingFetch = createRoutingFetch(
     buildProviderRouting(options.openrouterRouting),
     innerFetch,
