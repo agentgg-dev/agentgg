@@ -87,7 +87,11 @@ function providerCases(): ProviderCase[] {
     {
       name: "openai",
       enabled: Boolean(cfg?.openai?.apiKey || openaiKey),
-      model: model("AGENTGG_SMOKE_OPENAI_MODEL", "gpt-4o"),
+      // Must be a gpt-5 / o-series id. @ai-sdk/openai turns on strict function
+      // schemas for exactly those (`isReasoningModel`), and strict mode is what
+      // rejects a tool whose `required` omits a property. gpt-4o never sets the
+      // flag, so it silently skipped the whole class of tool-schema failures.
+      model: model("AGENTGG_SMOKE_OPENAI_MODEL", "gpt-5-mini"),
       opts: { provider: "openai", ...(openaiKey ? { apiKey: openaiKey } : {}) },
     },
     {
@@ -307,8 +311,8 @@ for (const pc of CASES) {
       // "flag doesn't break the scan" smoke rather than a provider 400.
       // `thinking` is Anthropic-only (a no-op elsewhere, never sent). `effort`
       // is safe on Anthropic; on OpenAI it becomes `reasoning_effort`, which
-      // ONLY reasoning models accept — so it's opt-in there via a reasoning
-      // AGENTGG_SMOKE_OPENAI_MODEL, not forced on the cheap default.
+      // ONLY reasoning models accept — and AGENTGG_SMOKE_OPENAI_MODEL can be
+      // pointed at a non-reasoning id, so it stays off there.
       const extra: Partial<ScanOpts> =
         pc.name === "anthropic" ? { effort: "low", thinking: "off" } : { thinking: "off" };
       const out = await runSmoke(pc, extra);

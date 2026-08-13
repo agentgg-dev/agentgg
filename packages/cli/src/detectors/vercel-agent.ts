@@ -824,6 +824,41 @@ export class VercelAgentDetector implements Detector {
 // Tool implementations
 // ---------------------------------------------------------------------------
 
+/**
+ * Grep's argument schema. `glob` and `path` are nullable-but-REQUIRED, and a
+ * missing key is filled in as null, because the two providers pull in opposite
+ * directions:
+ *
+ * - OpenAI reasoning models get `strict: true` function schemas by default in
+ *   @ai-sdk/openai, and strict mode rejects the whole tool (HTTP 400) unless
+ *   every key in `properties` is also in `required`. An `.optional()` field
+ *   fails every request, so scoping has to be expressed as `string | null`.
+ * - Non-strict providers omit the key instead: GLM-5 calls `Grep({pattern})`
+ *   on its own, and a rejected call burns a turn and returns nothing. The
+ *   preprocess defaults the absent keys rather than failing the call.
+ *
+ * `path` is an alias for `glob` because the model reaches for the sibling Read
+ * tool's parameter name.
+ */
+export const GrepParameters = z.preprocess(
+  (v) => (typeof v === "object" && v !== null ? { glob: null, path: null, ...v } : v),
+  z.object({
+    pattern: z.string().describe("Regular expression to search for"),
+    glob: z
+      .string()
+      .nullable()
+      .describe(
+        "Glob restricting which files are searched, e.g. '**/*.ts'. Pass null to search all files.",
+      ),
+    path: z
+      .string()
+      .nullable()
+      .describe(
+        "File or directory path to search under, relative to the repository root. Alias for `glob`. Pass null to search all files.",
+      ),
+  }),
+);
+
 function buildTools(
   cwd: string,
   maxFileSizeKb: number | undefined,
@@ -872,27 +907,7 @@ function buildTools(
     Grep: tool({
       description:
         "Search for a regex pattern across files. Returns matching lines as 'file:line: content'.",
-      // `glob` is optional, and `path` is accepted as an alias for it. Both
-      // concessions are to what the model actually emits: with `glob` required
-      // it calls `Grep({pattern})` and the call is rejected outright, and it
-      // reaches for `path` because the sibling Read tool takes `path`. Every
-      // rejection costs a turn out of the batch budget and returns nothing, so
-      // the schema meets the model where it is rather than the reverse.
-      parameters: z.object({
-        pattern: z.string().describe("Regular expression to search for"),
-        glob: z
-          .string()
-          .optional()
-          .describe(
-            "Optional glob restricting which files are searched, e.g. '**/*.ts'. Omit to search all files.",
-          ),
-        path: z
-          .string()
-          .optional()
-          .describe(
-            "Optional file or directory path to search under, relative to the repository root. Alias for `glob`.",
-          ),
-      }),
+      parameters: GrepParameters,
       execute: async ({ pattern, glob, path }) => {
         logTool("Grep", pattern);
         if (budgetExhausted()) return budgetNotice();
