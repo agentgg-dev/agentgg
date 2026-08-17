@@ -1,6 +1,12 @@
 import { existsSync, readdirSync } from "node:fs";
 import { basename, extname, join } from "node:path";
-import { type Agent, getOfficialAgentsDir, loadAgentsFromDir } from "@agentgg/core";
+import {
+  type Agent,
+  type AgentPreFilterRegex,
+  getOfficialAgentsDir,
+  isSemgrepPreFilter,
+  loadAgentsFromDir,
+} from "@agentgg/core";
 import { getCustomAgentsDir } from "./agents-fs.js";
 
 /** Official subtree that is opt-in only, never part of the default set. */
@@ -135,7 +141,9 @@ export function lintOfficialAgents(agents: ReadonlyArray<Agent>): string[] {
   for (const a of agents) {
     const path = a.source?.path ?? "(unknown path)";
     const patterns: Array<{ regex: string; field: string }> = [
-      ...a.where.preFilter.map((p) => ({ regex: p.regex, field: "where.preFilter" })),
+      ...a.where.preFilter
+        .filter((p): p is AgentPreFilterRegex => !isSemgrepPreFilter(p))
+        .map((p) => ({ regex: p.regex, field: "where.preFilter" })),
       ...(a.precondition?.regex?.patterns ?? []).map((p) => ({
         regex: p.regex,
         field: "precondition.regex.patterns",

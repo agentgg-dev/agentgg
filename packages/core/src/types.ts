@@ -31,17 +31,43 @@ export type NoiseTier = z.infer<typeof NoiseTier>;
  */
 
 /**
- * One regex in a walker agent's `preFilter`. Files where any
- * `preFilter` regex matches at least one line become "candidates" the
- * LLM investigates. The optional `label` is shown to the model
- * alongside the line number so it knows *why* the scanner flagged
- * the line.
+ * One entry in a walker agent's `preFilter`. Files where any entry
+ * matches at least one line become "candidates" the LLM investigates.
+ * The optional `label` is shown to the model alongside the line number
+ * so it knows *why* the scanner flagged the line.
+ *
+ * Two forms. `{ regex }` is a per-line JS regex — cheap, but blind to
+ * syntax. `{ semgrepRule }` names a rule file under the catalog's
+ * `semgrep-rules/` directory (no extension), which matches on the parsed
+ * syntax tree instead.
  */
-export const AgentPreFilterPattern = z.object({
+export const AgentPreFilterRegex = z.object({
   regex: z.string(),
   label: z.string().optional(),
 });
+export type AgentPreFilterRegex = z.infer<typeof AgentPreFilterRegex>;
+
+/**
+ * `semgrepRule` is a NAME, never a path and never a registry id. The
+ * resolver joins it to the local rules dir, so a value like
+ * `p/typescript` can only ever look for a file that does not exist —
+ * it can never reach the Semgrep registry, whose rules are licensed for
+ * internal use only and cannot ship in a product. The character set
+ * forbids `.`, so `..` cannot escape the directory either.
+ */
+export const AgentPreFilterSemgrep = z.object({
+  semgrepRule: z.string().regex(/^[a-z0-9][a-z0-9-]*(\/[a-z0-9][a-z0-9-]*)*$/),
+  label: z.string().optional(),
+});
+export type AgentPreFilterSemgrep = z.infer<typeof AgentPreFilterSemgrep>;
+
+export const AgentPreFilterPattern = z.union([AgentPreFilterRegex, AgentPreFilterSemgrep]);
 export type AgentPreFilterPattern = z.infer<typeof AgentPreFilterPattern>;
+
+/** Narrow a preFilter entry to its semgrep form. */
+export function isSemgrepPreFilter(p: AgentPreFilterPattern): p is AgentPreFilterSemgrep {
+  return "semgrepRule" in p;
+}
 
 export const ValidationVerdict = z.enum([
   "confirmed",

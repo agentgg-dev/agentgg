@@ -40,6 +40,7 @@ import { selectAgents } from "../precondition.js";
 import { buildCredentialsFromOpts, validateProviderFlags } from "../providers/index.js";
 import { renderReconForPrompt, runRecon } from "../recon.js";
 import { findingFilenameSlug, writeMarkdownReport } from "../reporters/md.js";
+import { getSemgrepRulesDir, isSemgrepSuppressed, runSemgrepPreFilter } from "../semgrep.js";
 import { runSmartExclude } from "../smart-exclude.js";
 import { resolveTemplates } from "../template.js";
 import { createUsageMeter, type UsageMeter } from "../usage-meter.js";
@@ -888,6 +889,16 @@ export async function runScan(
       const [work] = walkForAgents(root, [agent], agentWalkCfg);
       const files = work ? work.files : [];
       const scopedFiles = diffFiles ? files.filter((f) => diffFiles.has(f)) : files;
+      // `semgrepRule` preFilters need the whole file set, so they run here
+      // in one pass; the per-line regex entries stay in the loop below.
+      const semgrepHits = await runSemgrepPreFilter(
+        root,
+        agent,
+        scopedFiles,
+        getSemgrepRulesDir(officialAgentsDir),
+        concurrency,
+        (m) => console.warn(`warning: ${m}`),
+      );
       for (const relPath of scopedFiles) {
         let content: string;
         try {
@@ -896,6 +907,18 @@ export async function runScan(
           continue;
         }
         const hits = evaluatePreFilter(content, agent.where.preFilter);
+        const fileSemgrepHits = semgrepHits.get(relPath);
+        if (fileSemgrepHits && fileSemgrepHits.length > 0) {
+          const lines = content.split("\n");
+          for (const h of fileSemgrepHits) {
+            if (isSemgrepSuppressed(lines, h.line)) continue;
+            hits.push({
+              line: h.line,
+              label: h.label,
+              snippet: (lines[h.line - 1] ?? "").trim().slice(0, 200),
+            });
+          }
+        }
         if (hits.length === 0) continue;
         candidates.push({ filePath: relPath, content, hits });
       }
