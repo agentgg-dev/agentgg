@@ -85,6 +85,21 @@ export function getOfficialAgentsVersionPath(env: NodeJS.ProcessEnv = process.en
   return join(getOfficialAgentsDir(env), ".version.json");
 }
 
+/**
+ * Directory holding the fetched semgrep binary, keyed by version so a
+ * pinned-version bump lands beside the old copy instead of colliding with it:
+ * `<dataDir>/semgrep/<version>/`.
+ */
+export function getSemgrepDir(version: string, env: NodeJS.ProcessEnv = process.env): string {
+  return join(getDataDir(env), "semgrep", version);
+}
+
+/** Path to the cached analysis binary inside `getSemgrepDir`. */
+export function getSemgrepCorePath(version: string, env: NodeJS.ProcessEnv = process.env): string {
+  const exe = process.platform === "win32" ? "semgrep-core.exe" : "semgrep-core";
+  return join(getSemgrepDir(version, env), exe);
+}
+
 // ---------------------------------------------------------------------------
 // Per-scan state — lives inside each scan's --output dir
 // ---------------------------------------------------------------------------
