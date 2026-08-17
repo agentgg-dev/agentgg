@@ -958,6 +958,7 @@ export async function runScan(
             findingCount: 0,
             filesReviewed,
             hitCount,
+            degraded: [],
           });
           allRecordsCache = null;
         } catch {
@@ -1020,6 +1021,7 @@ export async function runScan(
             findingCount: byAgent[agent.slug] ?? 0,
             filesReviewed,
             hitCount,
+            degraded: [],
           });
           allRecordsCache = null;
         } catch {
@@ -1177,6 +1179,7 @@ export async function runScan(
               findingCount: byAgent[agent.slug] ?? 0,
               filesReviewed: rt.filesReviewed,
               hitCount: rt.hitCount,
+              degraded: [],
             });
             allRecordsCache = null;
           } catch (err) {

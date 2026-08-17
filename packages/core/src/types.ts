@@ -857,6 +857,13 @@ export const AgentRun = z.object({
    * Defaults to 0 for older sidecars.
    */
   hitCount: z.number().int().nonnegative().default(0),
+  /**
+   * Detectors that could not run for this agent, so no report implies
+   * coverage the scan did not have. Empty means every declared detector ran.
+   * The literal `kind` leaves room for a second detector later without
+   * inventing one now. Defaults to [] for older sidecars.
+   */
+  degraded: z.array(z.object({ kind: z.literal("semgrep"), reason: z.string() })).default([]),
 });
 export type AgentRun = z.infer<typeof AgentRun>;
 

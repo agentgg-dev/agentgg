@@ -1,5 +1,38 @@
 import { describe, expect, it } from "vitest";
-import { Agent, CvssScore, FileRecord, Finding, ScopeConfig, UserConfig } from "../src/types.js";
+import {
+  Agent,
+  AgentRun,
+  CvssScore,
+  FileRecord,
+  Finding,
+  ScopeConfig,
+  UserConfig,
+} from "../src/types.js";
+
+describe("AgentRun.degraded", () => {
+  const base = {
+    agentSlug: "missing-access-control",
+    lastCompletedRunId: "r1",
+    lastCompletedAt: "2026-08-17T00:00:00.000Z",
+    scope: { maxFileSizeKb: 500, rootPath: "/repo" },
+  };
+
+  it("defaults to empty so an older sidecar still parses", () => {
+    expect(AgentRun.parse(base).degraded).toEqual([]);
+  });
+
+  it("carries a semgrep reason", () => {
+    const parsed = AgentRun.parse({
+      ...base,
+      degraded: [{ kind: "semgrep", reason: "download failed" }],
+    });
+    expect(parsed.degraded).toEqual([{ kind: "semgrep", reason: "download failed" }]);
+  });
+
+  it("rejects an unknown detector kind", () => {
+    expect(() => AgentRun.parse({ ...base, degraded: [{ kind: "nope", reason: "x" }] })).toThrow();
+  });
+});
 
 describe("UserConfig schema", () => {
   it("accepts a valid anthropic config", () => {
