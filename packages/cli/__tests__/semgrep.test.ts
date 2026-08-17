@@ -264,14 +264,14 @@ describe("runSemgrepPreFilter", () => {
     ({ slug: "t", where: { preFilter } }) as unknown as Parameters<typeof runSemgrepPreFilter>[1];
 
   it("does nothing and spawns nothing when the agent declares no semgrep rules", async () => {
-    const hits = await runSemgrepPreFilter(dir, agentWith([{ regex: "x" }]), ["a.ts"], dir, 4);
-    expect(hits.size).toBe(0);
+    const out = await runSemgrepPreFilter(dir, agentWith([{ regex: "x" }]), ["a.ts"], dir, 4);
+    expect(out.hits.size).toBe(0);
   });
 
   it("warns and skips when the named rule file is absent", async () => {
     const warnings: string[] = [];
     mkdirSync(join(dir, "rules"), { recursive: true });
-    const hits = await runSemgrepPreFilter(
+    const out = await runSemgrepPreFilter(
       dir,
       agentWith([{ semgrepRule: "absent" }]),
       ["a.ts"],
@@ -279,12 +279,73 @@ describe("runSemgrepPreFilter", () => {
       4,
       (m) => warnings.push(m),
     );
-    expect(hits.size).toBe(0);
+    expect(out.hits.size).toBe(0);
     expect(warnings[0]).toMatch(/semgrep rule 'absent' not found/);
   });
 
   it("returns nothing when there are no files to scan", async () => {
-    const hits = await runSemgrepPreFilter(dir, agentWith([{ semgrepRule: "x" }]), [], dir, 4);
-    expect(hits.size).toBe(0);
+    const out = await runSemgrepPreFilter(dir, agentWith([{ semgrepRule: "x" }]), [], dir, 4);
+    expect(out.hits.size).toBe(0);
+  });
+});
+
+describe("runSemgrepPreFilter degradation", () => {
+  const agentWithSemgrep = () =>
+    ({
+      slug: "t",
+      where: { preFilter: [{ semgrepRule: "http-endpoints" }] },
+    }) as unknown as Parameters<typeof runSemgrepPreFilter>[1];
+
+  beforeEach(() => {
+    resetSemgrepResolution();
+    writeFileSync(join(dir, "http-endpoints.yml"), "rules:\n  - id: x\n    languages: [ts]\n");
+  });
+
+  it("reports no degradation when the agent declares no semgrep rules", async () => {
+    const agent = { slug: "t", where: { preFilter: [{ regex: "x" }] } } as unknown as Parameters<
+      typeof runSemgrepPreFilter
+    >[1];
+    const out = await runSemgrepPreFilter(dir, agent, ["a.ts"], dir, 4);
+    expect(out.degraded).toBeNull();
+    expect(out.hits.size).toBe(0);
+  });
+
+  it("returns the reason when the binary cannot be resolved", async () => {
+    const out = await runSemgrepPreFilter(
+      dir,
+      agentWithSemgrep(),
+      ["a.ts"],
+      dir,
+      4,
+      undefined,
+      {
+        AGENTGG_HOME: dir,
+        PATH: "",
+      },
+      { ensure: async () => ({ ok: false, reason: "download failed" }) },
+    );
+    expect(out.degraded).toBe("download failed");
+    expect(out.hits.size).toBe(0);
+  });
+
+  it("never resolves the binary when no file matches the rule's language", async () => {
+    let asked = 0;
+    const out = await runSemgrepPreFilter(
+      dir,
+      agentWithSemgrep(),
+      ["a.py"],
+      dir,
+      4,
+      undefined,
+      { AGENTGG_HOME: dir, PATH: "" },
+      {
+        ensure: async () => {
+          asked++;
+          return { ok: false, reason: "download failed" };
+        },
+      },
+    );
+    expect(asked).toBe(0);
+    expect(out.degraded).toBeNull();
   });
 });

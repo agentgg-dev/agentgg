@@ -831,6 +831,7 @@ export async function runScan(
       maxTurns: number;
       filesReviewed: number;
       hitCount: number;
+      degraded: { kind: "semgrep"; reason: string }[];
     };
     const runtimeBySlug = new Map<string, AgentRuntime>();
     const batchQueue: { agent: Agent; batch: AgentCandidate[] }[] = [];
@@ -891,7 +892,7 @@ export async function runScan(
       const scopedFiles = diffFiles ? files.filter((f) => diffFiles.has(f)) : files;
       // `semgrepRule` preFilters need the whole file set, so they run here
       // in one pass; the per-line regex entries stay in the loop below.
-      const semgrepHits = await runSemgrepPreFilter(
+      const { hits: semgrepHits, degraded: semgrepDegraded } = await runSemgrepPreFilter(
         root,
         agent,
         scopedFiles,
@@ -899,6 +900,11 @@ export async function runScan(
         concurrency,
         (m) => console.warn(`warning: ${m}`),
       );
+      // Recorded on the sidecar so the report cannot imply coverage this
+      // agent did not have.
+      const degraded = semgrepDegraded
+        ? [{ kind: "semgrep" as const, reason: semgrepDegraded }]
+        : [];
       for (const relPath of scopedFiles) {
         let content: string;
         try {
@@ -958,7 +964,7 @@ export async function runScan(
             findingCount: 0,
             filesReviewed,
             hitCount,
-            degraded: [],
+            degraded,
           });
           allRecordsCache = null;
         } catch {
@@ -1021,7 +1027,7 @@ export async function runScan(
             findingCount: byAgent[agent.slug] ?? 0,
             filesReviewed,
             hitCount,
-            degraded: [],
+            degraded,
           });
           allRecordsCache = null;
         } catch {
@@ -1052,6 +1058,7 @@ export async function runScan(
         maxTurns,
         filesReviewed,
         hitCount,
+        degraded,
       });
       for (const batch of batches) batchQueue.push({ agent, batch });
     }
@@ -1179,7 +1186,7 @@ export async function runScan(
               findingCount: byAgent[agent.slug] ?? 0,
               filesReviewed: rt.filesReviewed,
               hitCount: rt.hitCount,
-              degraded: [],
+              degraded: rt.degraded,
             });
             allRecordsCache = null;
           } catch (err) {

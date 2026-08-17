@@ -127,13 +127,24 @@ export async function installSemgrepCore(
   const target = getSemgrepCorePath(SEMGREP_VERSION, env);
   try {
     const zip = new AdmZip(bytes);
-    const wanted = zip
+    // The binary sits under a wheel data prefix, e.g.
+    // `semgrep-1.173.0.data/purelib/semgrep/bin/semgrep-core.exe`, so match on
+    // the tail rather than the whole path.
+    const binEntries = zip
       .getEntries()
-      .find((e) => /^semgrep\/bin\/semgrep-core(\.exe)?$/.test(e.entryName));
-    if (!wanted) return { ok: false, reason: "verification failed" };
+      .filter((e) => !e.isDirectory && /(^|\/)semgrep\/bin\/[^/]+$/.test(e.entryName));
+    const core = binEntries.find((e) => /\/semgrep-core(\.exe)?$/.test(`/${e.entryName}`));
+    if (!core) return { ok: false, reason: "verification failed" };
 
+    // Take the whole bin/ directory, not just the executable. On Windows
+    // semgrep-core loads sibling DLLs (libcrypto, libcurl, libgmp, …) and will
+    // not start without them.
     mkdirSync(dir, { recursive: true });
-    writeFileSync(target, wanted.getData());
+    for (const e of binEntries) {
+      const name = e.entryName.split("/").pop();
+      if (!name) continue;
+      writeFileSync(join(dir, name), e.getData());
+    }
     if (process.platform !== "win32") chmodSync(target, 0o755);
     writeFileSync(
       join(dir, ".version.json"),

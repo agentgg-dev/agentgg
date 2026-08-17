@@ -26,6 +26,17 @@ export interface SemgrepHit {
 /** repo-relative path → hits in that file. */
 export type SemgrepHits = Map<string, SemgrepHit[]>;
 
+export interface PreFilterOutcome {
+  hits: SemgrepHits;
+  /** Non-null when semgrep could not run; the caller records it. */
+  degraded: SemgrepFailure | null;
+}
+
+export interface PreFilterDeps {
+  /** Injected so the degraded path is testable without a real install. */
+  ensure?: (env: NodeJS.ProcessEnv) => Promise<EnsureResult>;
+}
+
 /**
  * File extension → the value `semgrep-core -lang` expects.
  *
@@ -269,10 +280,11 @@ export async function runSemgrepPreFilter(
   concurrency: number,
   onWarn?: (message: string) => void,
   env: NodeJS.ProcessEnv = process.env,
-): Promise<SemgrepHits> {
+  deps: PreFilterDeps = {},
+): Promise<PreFilterOutcome> {
   const hits: SemgrepHits = new Map();
   const entries = agent.where.preFilter.filter(isSemgrepPreFilter);
-  if (entries.length === 0 || files.length === 0) return hits;
+  if (entries.length === 0 || files.length === 0) return { hits, degraded: null };
 
   const rules: Array<{ path: string; label?: string; langs: Set<string> | null }> = [];
   for (const entry of entries) {
@@ -290,7 +302,7 @@ export async function runSemgrepPreFilter(
     }
     rules.push({ path, label: entry.label, langs });
   }
-  if (rules.length === 0) return hits;
+  if (rules.length === 0) return { hits, degraded: null };
 
   const jobs: Array<{ rule: (typeof rules)[number]; relPath: string; lang: string }> = [];
   for (const relPath of files) {
@@ -302,10 +314,21 @@ export async function runSemgrepPreFilter(
     }
   }
 
-  const bin = resolveSemgrepCore(env);
-  let spawnFailed = false;
+  // Resolve the binary only once there is real work, so an agent whose rules
+  // match no file's language never triggers a 60 MB download.
+  if (jobs.length === 0) return { hits, degraded: null };
+
+  const ensure = deps.ensure ?? ((e: NodeJS.ProcessEnv) => ensureSemgrepCore(e));
+  const resolved = await ensure(env);
+  if (!resolved.ok) {
+    onWarn?.(`${agent.slug}: semgrep unavailable (${resolved.reason}) — regex preFilters only`);
+    return { hits, degraded: resolved.reason };
+  }
+  const bin = resolved.bin;
+
+  let startFailure: SemgrepFailure | null = null;
   await runConcurrent(jobs, Math.max(1, concurrency), async (job) => {
-    if (spawnFailed) return;
+    if (startFailure) return;
     let stdout: string;
     try {
       const out = await execFileAsync(
@@ -315,10 +338,12 @@ export async function runSemgrepPreFilter(
       );
       stdout = out.stdout;
     } catch (err) {
-      // ENOENT means the binary is missing — warn once, not per file.
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-        spawnFailed = true;
-        onWarn?.(`semgrep-core not found ('${bin}') — semgrepRule preFilters were skipped`);
+      // A binary that will not start (missing, wrong glibc, not executable)
+      // fails the same way for every job. Record it once and stop the rest.
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" || code === "EACCES") {
+        startFailure = "binary failed to start";
+        onWarn?.(`${agent.slug}: semgrep-core would not start (${bin})`);
       }
       return;
     }
@@ -338,5 +363,5 @@ export async function runSemgrepPreFilter(
     if (bucket.length > 0) hits.set(job.relPath, bucket);
   });
 
-  return hits;
+  return { hits, degraded: startFailure };
 }
