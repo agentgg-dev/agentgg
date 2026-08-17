@@ -35,6 +35,12 @@ export interface PreFilterOutcome {
 export interface PreFilterDeps {
   /** Injected so the degraded path is testable without a real install. */
   ensure?: (env: NodeJS.ProcessEnv) => Promise<EnsureResult>;
+  /**
+   * Progress lines for `--verbose`. Separate from `onWarn` because these are
+   * the positive signal that semgrep ran at all — nothing else in the scan
+   * output distinguishes "semgrep found these anchors" from "the regexes did".
+   */
+  onInfo?: (message: string) => void;
 }
 
 /**
@@ -194,7 +200,16 @@ export function resolveSemgrepCore(env: NodeJS.ProcessEnv = process.env): string
   return "semgrep-core";
 }
 
-export type EnsureResult = { ok: true; bin: string } | { ok: false; reason: SemgrepFailure };
+/**
+ * Which arm of the resolution order won. Logged because "semgrep ran" and
+ * "semgrep ran the version we pinned" are different claims — a `path` result
+ * is neither version-pinned nor checksum-verified.
+ */
+export type SemgrepSource = "override" | "cache" | "path" | "fetched";
+
+export type EnsureResult =
+  | { ok: true; bin: string; source: SemgrepSource }
+  | { ok: false; reason: SemgrepFailure };
 
 export interface EnsureDeps {
   install?: (env: NodeJS.ProcessEnv) => Promise<InstallResult>;
@@ -241,10 +256,10 @@ export async function ensureSemgrepCore(
   if (inflight) return inflight;
   inflight = (async (): Promise<EnsureResult> => {
     const override = env.AGENTGG_SEMGREP_CORE;
-    if (override && existsSync(override)) return { ok: true, bin: override };
+    if (override && existsSync(override)) return { ok: true, bin: override, source: "override" };
 
     const cached = getSemgrepCorePath(SEMGREP_VERSION, env);
-    if (existsSync(cached)) return { ok: true, bin: cached };
+    if (existsSync(cached)) return { ok: true, bin: cached, source: "cache" };
 
     // A copy the developer already installed. Neither version-pinned nor
     // checksum-verified, so it ranks below the cache and is only reached when
@@ -252,12 +267,14 @@ export async function ensureSemgrepCore(
     const onPath = findOnPath("semgrep-core", env);
     if (onPath) {
       console.warn(`warning: using semgrep-core from PATH (${onPath}); version is not pinned`);
-      return { ok: true, bin: onPath };
+      return { ok: true, bin: onPath, source: "path" };
     }
 
     const install = deps.install ?? ((e: NodeJS.ProcessEnv) => installSemgrepCore(e));
     const result = await install(env);
-    return result.ok ? { ok: true, bin: result.path } : { ok: false, reason: result.reason };
+    return result.ok
+      ? { ok: true, bin: result.path, source: "fetched" }
+      : { ok: false, reason: result.reason };
   })();
   return inflight;
 }
@@ -325,6 +342,7 @@ export async function runSemgrepPreFilter(
     return { hits, degraded: resolved.reason };
   }
   const bin = resolved.bin;
+  deps.onInfo?.(`semgrep-core: ${bin} (${resolved.source})`);
 
   let startFailure: SemgrepFailure | null = null;
   await runConcurrent(jobs, Math.max(1, concurrency), async (job) => {
@@ -362,6 +380,12 @@ export async function runSemgrepPreFilter(
     }
     if (bucket.length > 0) hits.set(job.relPath, bucket);
   });
+
+  let anchors = 0;
+  for (const bucket of hits.values()) anchors += bucket.length;
+  deps.onInfo?.(
+    `${agent.slug}: semgrep ran ${rules.length} rule(s) over ${jobs.length} file-job(s) → ${anchors} anchor(s) in ${hits.size} file(s)`,
+  );
 
   return { hits, degraded: startFailure };
 }

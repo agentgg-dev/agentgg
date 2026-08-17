@@ -83,6 +83,30 @@ describe("lintOfficialAgents", () => {
   });
 });
 
+describe("lintOfficialAgents — unrecognized preFilter forms", () => {
+  const withPreFilter = (preFilter: unknown[]) =>
+    [
+      {
+        slug: "t",
+        source: { kind: "official", path: "/a/t.md" },
+        where: { preFilter },
+      },
+    ] as unknown as Parameters<typeof lintOfficialAgents>[0];
+
+  it("flags a form the CLI does not understand, so a typo is caught in CI", () => {
+    const violations = lintOfficialAgents(withPreFilter([{ semgreprule: "http-endpoints" }]));
+    expect(violations).toHaveLength(1);
+    expect(violations[0]).toMatch(/not a form this agentgg understands/);
+    expect(violations[0]).toMatch(/semgreprule/);
+  });
+
+  it("accepts the two known forms without complaint", () => {
+    expect(
+      lintOfficialAgents(withPreFilter([{ regex: "x" }, { semgrepRule: "http-endpoints" }])),
+    ).toEqual([]);
+  });
+});
+
 describe("defaultAgentDirs", () => {
   it("returns every category under agents/ except deep", () => {
     for (const d of ["injection", "auth", "deep"]) {

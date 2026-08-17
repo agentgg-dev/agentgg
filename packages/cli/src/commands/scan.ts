@@ -15,6 +15,7 @@ import {
   fingerprint,
   getOfficialAgentsDir,
   hashContent,
+  isSemgrepPreFilter,
   loadAllFileRecords,
   readAgentRun,
   readFileRecord,
@@ -832,6 +833,7 @@ export async function runScan(
       filesReviewed: number;
       hitCount: number;
       degraded: { kind: "semgrep"; reason: string }[];
+      preFilterHits: { regex: number; semgrep: number };
     };
     const runtimeBySlug = new Map<string, AgentRuntime>();
     const batchQueue: { agent: Agent; batch: AgentCandidate[] }[] = [];
@@ -899,12 +901,19 @@ export async function runScan(
         getSemgrepRulesDir(officialAgentsDir),
         concurrency,
         (m) => console.warn(`warning: ${m}`),
+        env,
+        { onInfo: opts.verbose ? (m) => console.log(`  ${m}`) : undefined },
       );
       // Recorded on the sidecar so the report cannot imply coverage this
       // agent did not have.
       const degraded = semgrepDegraded
         ? [{ kind: "semgrep" as const, reason: semgrepDegraded }]
         : [];
+      // Anchors split by source. An agent with no regex entries must not have
+      // the synthetic "(no preFilter)" hit counted as one.
+      const hasRegexEntry = agent.where.preFilter.some((p) => !isSemgrepPreFilter(p));
+      const declaresSemgrep = agent.where.preFilter.some(isSemgrepPreFilter);
+      const preFilterHits = { regex: 0, semgrep: 0 };
       for (const relPath of scopedFiles) {
         let content: string;
         try {
@@ -913,6 +922,7 @@ export async function runScan(
           continue;
         }
         const hits = evaluatePreFilter(content, agent.where.preFilter);
+        if (hasRegexEntry) preFilterHits.regex += hits.length;
         const fileSemgrepHits = semgrepHits.get(relPath);
         if (fileSemgrepHits && fileSemgrepHits.length > 0) {
           const lines = content.split("\n");
@@ -923,6 +933,7 @@ export async function runScan(
               label: h.label,
               snippet: (lines[h.line - 1] ?? "").trim().slice(0, 200),
             });
+            preFilterHits.semgrep++;
           }
         }
         if (hits.length === 0) continue;
@@ -965,6 +976,7 @@ export async function runScan(
             filesReviewed,
             hitCount,
             degraded,
+            preFilterHits,
           });
           allRecordsCache = null;
         } catch {
@@ -1028,6 +1040,7 @@ export async function runScan(
             filesReviewed,
             hitCount,
             degraded,
+            preFilterHits,
           });
           allRecordsCache = null;
         } catch {
@@ -1047,8 +1060,13 @@ export async function runScan(
         batches.push(pending.slice(i, i + batchSize));
       }
 
+      // Only agents that declare a semgrep rule get the attribution suffix, so
+      // the other 159 agents' output is unchanged.
+      const anchorNote = declaresSemgrep
+        ? `, ${preFilterHits.regex + preFilterHits.semgrep} anchor(s) (semgrep ${preFilterHits.semgrep}, regex ${preFilterHits.regex})`
+        : "";
       console.log(
-        `  ${agent.slug}: ${pending.length} candidate file(s) → ${batches.length} batch(es) of up to ${batchSize}`,
+        `  ${agent.slug}: ${pending.length} candidate file(s)${anchorNote} → ${batches.length} batch(es) of up to ${batchSize}`,
       );
 
       runtimeBySlug.set(agent.slug, {
@@ -1059,6 +1077,7 @@ export async function runScan(
         filesReviewed,
         hitCount,
         degraded,
+        preFilterHits,
       });
       for (const batch of batches) batchQueue.push({ agent, batch });
     }
@@ -1187,6 +1206,7 @@ export async function runScan(
               filesReviewed: rt.filesReviewed,
               hitCount: rt.hitCount,
               degraded: rt.degraded,
+              preFilterHits: rt.preFilterHits,
             });
             allRecordsCache = null;
           } catch (err) {

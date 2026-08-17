@@ -1,4 +1,4 @@
-import { type AgentPreFilterPattern, isSemgrepPreFilter } from "@agentgg/core";
+import { type AgentPreFilterPattern, isRegexPreFilter } from "@agentgg/core";
 
 /**
  * One line where a walker-mode agent's preFilter regex matched. The
@@ -38,10 +38,12 @@ export function evaluatePreFilter(
 
   const lines = content.split("\n");
   const hits: PreFilterHit[] = [];
-  // Semgrep entries are resolved by `runSemgrepPreFilter`, which needs the
-  // whole file set at once; the caller merges its hits with these.
+  // Only the regex form is handled here. Semgrep entries are resolved by
+  // `runSemgrepPreFilter`, which needs the whole file set at once; anything
+  // else is a form this build does not know and is ignored rather than
+  // mis-read as a regex.
   for (const entry of preFilter) {
-    if (isSemgrepPreFilter(entry)) continue;
+    if (!isRegexPreFilter(entry)) continue;
     const { regex, label } = entry;
     let re: RegExp;
     try {

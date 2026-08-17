@@ -4,6 +4,7 @@ import {
   type Agent,
   type AgentPreFilterRegex,
   getOfficialAgentsDir,
+  isRegexPreFilter,
   isSemgrepPreFilter,
   loadAgentsFromDir,
 } from "@agentgg/core";
@@ -134,6 +135,23 @@ export function lintOfficialAgents(agents: ReadonlyArray<Agent>): string[] {
     }
   }
 
+  // Unrecognized preFilter forms. The schema lets these through so a newer
+  // agent file degrades instead of killing the agent on an older CLI, but
+  // they do nothing at scan time — so the repo's own gate must catch them.
+  // In practice this is either a typo (`semgreprule`) or a catalog that has
+  // outrun the installed CLI.
+  for (const a of agents) {
+    const path = a.source?.path ?? "(unknown path)";
+    a.where.preFilter.forEach((p, i) => {
+      if (isRegexPreFilter(p) || isSemgrepPreFilter(p)) return;
+      violations.push(
+        `where.preFilter[${i}] is not a form this agentgg understands ` +
+          `(expected 'regex' or 'semgrepRule'; got ${JSON.stringify(Object.keys(p))}). ` +
+          `Check for a typo, or update agentgg — this catalog may be newer than your CLI.\n    ${path}`,
+      );
+    });
+  }
+
   // Regex-compilation check. Every regex an agent declares — in
   // `where.preFilter` and in `precondition.regex.patterns` — must compile
   // under `new RegExp`, or it silently does nothing at scan time (the
@@ -142,7 +160,7 @@ export function lintOfficialAgents(agents: ReadonlyArray<Agent>): string[] {
     const path = a.source?.path ?? "(unknown path)";
     const patterns: Array<{ regex: string; field: string }> = [
       ...a.where.preFilter
-        .filter((p): p is AgentPreFilterRegex => !isSemgrepPreFilter(p))
+        .filter((p): p is AgentPreFilterRegex => isRegexPreFilter(p))
         .map((p) => ({ regex: p.regex, field: "where.preFilter" })),
       ...(a.precondition?.regex?.patterns ?? []).map((p) => ({
         regex: p.regex,

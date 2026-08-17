@@ -61,12 +61,39 @@ export const AgentPreFilterSemgrep = z.object({
 });
 export type AgentPreFilterSemgrep = z.infer<typeof AgentPreFilterSemgrep>;
 
-export const AgentPreFilterPattern = z.union([AgentPreFilterRegex, AgentPreFilterSemgrep]);
+/**
+ * A form this build does not recognise — almost always an agent file written
+ * against a newer CLI. It parses and is ignored at scan time rather than
+ * killing the whole agent, so adding a third preFilter form later does not
+ * hard-fail every older install the moment the catalog ships it.
+ *
+ * Deliberately refuses entries that carry `regex` or `semgrepRule`: those are
+ * forms this build *does* know, so a malformed one is an authoring error and
+ * must still fail loudly instead of silently becoming a no-op.
+ */
+export const AgentPreFilterUnknown = z
+  .object({ label: z.string().optional() })
+  .passthrough()
+  .refine((v) => !("regex" in v) && !("semgrepRule" in v), {
+    message: "unrecognized preFilter form",
+  });
+export type AgentPreFilterUnknown = z.infer<typeof AgentPreFilterUnknown>;
+
+export const AgentPreFilterPattern = z.union([
+  AgentPreFilterRegex,
+  AgentPreFilterSemgrep,
+  AgentPreFilterUnknown,
+]);
 export type AgentPreFilterPattern = z.infer<typeof AgentPreFilterPattern>;
+
+/** Narrow a preFilter entry to its regex form. */
+export function isRegexPreFilter(p: AgentPreFilterPattern): p is AgentPreFilterRegex {
+  return typeof (p as AgentPreFilterRegex).regex === "string";
+}
 
 /** Narrow a preFilter entry to its semgrep form. */
 export function isSemgrepPreFilter(p: AgentPreFilterPattern): p is AgentPreFilterSemgrep {
-  return "semgrepRule" in p;
+  return typeof (p as AgentPreFilterSemgrep).semgrepRule === "string";
 }
 
 export const ValidationVerdict = z.enum([
@@ -864,6 +891,19 @@ export const AgentRun = z.object({
    * inventing one now. Defaults to [] for older sidecars.
    */
   degraded: z.array(z.object({ kind: z.literal("semgrep"), reason: z.string() })).default([]),
+  /**
+   * `hitCount` split by which preFilter produced each anchor. Without this,
+   * "did semgrep actually run?" is unanswerable after the fact: an empty
+   * `degraded` means "nothing failed", which is equally true of an agent that
+   * never declared a semgrep rule. `semgrep: 0` beside a recorded `degraded`
+   * reason is a different story from `semgrep: 0` with none.
+   */
+  preFilterHits: z
+    .object({
+      regex: z.number().int().nonnegative().default(0),
+      semgrep: z.number().int().nonnegative().default(0),
+    })
+    .default({ regex: 0, semgrep: 0 }),
 });
 export type AgentRun = z.infer<typeof AgentRun>;
 

@@ -1,8 +1,14 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { AgentPreFilterPattern, getSemgrepCorePath } from "@agentgg/core";
+import {
+  AgentPreFilterPattern,
+  getSemgrepCorePath,
+  isRegexPreFilter,
+  isSemgrepPreFilter,
+} from "@agentgg/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { evaluatePreFilter } from "../src/pre-filter.js";
 import {
   ensureSemgrepCore,
   getSemgrepRulesDir,
@@ -55,6 +61,33 @@ describe("AgentPreFilterPattern union", () => {
     "-leading",
   ])("rejects unsafe rule name %s", (name) => {
     expect(() => AgentPreFilterPattern.parse({ semgrepRule: name })).toThrow();
+  });
+
+  it("accepts a form this build does not know, so a newer catalog degrades", () => {
+    // The point of the third union member: an agent file written against a
+    // future CLI must not kill the whole agent on an older install.
+    const parsed = AgentPreFilterPattern.parse({ astQuery: "foo(...)", label: "future form" });
+    expect(isRegexPreFilter(parsed)).toBe(false);
+    expect(isSemgrepPreFilter(parsed)).toBe(false);
+  });
+
+  it("still rejects a malformed known form rather than treating it as unknown", () => {
+    // A bad semgrepRule is an authoring error, not a future form — it must
+    // fail loudly instead of silently becoming a no-op.
+    expect(() => AgentPreFilterPattern.parse({ semgrepRule: "Bad Name" })).toThrow();
+    expect(() => AgentPreFilterPattern.parse({ regex: 42 })).toThrow();
+  });
+});
+
+describe("evaluatePreFilter with an unknown form", () => {
+  it("ignores it instead of mis-reading it as a regex", () => {
+    const preFilter = AgentPreFilterPattern.array().parse([
+      { astQuery: "foo(...)" },
+      { regex: "needle" },
+    ]);
+    const hits = evaluatePreFilter("a needle here\nnothing\n", preFilter);
+    expect(hits).toHaveLength(1);
+    expect(hits[0].line).toBe(1);
   });
 });
 
@@ -173,7 +206,7 @@ describe("ensureSemgrepCore", () => {
         },
       },
     );
-    expect(result).toEqual({ ok: true, bin });
+    expect(result).toEqual({ ok: true, bin, source: "override" });
     expect(installs).toBe(0);
   });
 
@@ -191,7 +224,7 @@ describe("ensureSemgrepCore", () => {
         },
       },
     );
-    expect(result).toEqual({ ok: true, bin: cached });
+    expect(result).toEqual({ ok: true, bin: cached, source: "cache" });
     expect(installs).toBe(0);
   });
 
@@ -209,7 +242,7 @@ describe("ensureSemgrepCore", () => {
         },
       },
     );
-    expect(result).toEqual({ ok: true, bin: onPath });
+    expect(result).toEqual({ ok: true, bin: onPath, source: "path" });
     expect(installs).toBe(0);
   });
 
@@ -218,7 +251,7 @@ describe("ensureSemgrepCore", () => {
       { AGENTGG_HOME: dir, PATH: "" },
       { install: async () => ({ ok: true, path: "/fetched/semgrep-core" }) },
     );
-    expect(result).toEqual({ ok: true, bin: "/fetched/semgrep-core" });
+    expect(result).toEqual({ ok: true, bin: "/fetched/semgrep-core", source: "fetched" });
   });
 
   it("installs once when several callers race", async () => {
@@ -234,7 +267,8 @@ describe("ensureSemgrepCore", () => {
       ensureSemgrepCore({ AGENTGG_HOME: dir, PATH: "" }, { install }),
     ]);
     expect(installs).toBe(1);
-    for (const r of results) expect(r).toEqual({ ok: true, bin: "/fetched/semgrep-core" });
+    for (const r of results)
+      expect(r).toEqual({ ok: true, bin: "/fetched/semgrep-core", source: "fetched" });
   });
 
   it("remembers a failure instead of retrying it per agent", async () => {
@@ -326,6 +360,44 @@ describe("runSemgrepPreFilter degradation", () => {
     );
     expect(out.degraded).toBe("download failed");
     expect(out.hits.size).toBe(0);
+  });
+
+  it("reports the resolution source through onInfo so a scan can prove it ran", async () => {
+    const info: string[] = [];
+    await runSemgrepPreFilter(
+      dir,
+      agentWithSemgrep(),
+      ["a.ts"],
+      dir,
+      4,
+      undefined,
+      { AGENTGG_HOME: dir, PATH: "" },
+      {
+        ensure: async () => ({ ok: true, bin: "/fake/semgrep-core", source: "cache" }),
+        onInfo: (m) => info.push(m),
+      },
+    );
+    expect(info[0]).toBe("semgrep-core: /fake/semgrep-core (cache)");
+    expect(info.some((m) => m.includes("semgrep ran 1 rule(s)"))).toBe(true);
+  });
+
+  it("stays silent through onInfo when the binary cannot be resolved", async () => {
+    const info: string[] = [];
+    const out = await runSemgrepPreFilter(
+      dir,
+      agentWithSemgrep(),
+      ["a.ts"],
+      dir,
+      4,
+      undefined,
+      { AGENTGG_HOME: dir, PATH: "" },
+      {
+        ensure: async () => ({ ok: false, reason: "download failed" }),
+        onInfo: (m) => info.push(m),
+      },
+    );
+    expect(out.degraded).toBe("download failed");
+    expect(info).toEqual([]);
   });
 
   it("never resolves the binary when no file matches the rule's language", async () => {

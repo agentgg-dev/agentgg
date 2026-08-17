@@ -32,6 +32,15 @@ describe("AgentRun.degraded", () => {
   it("rejects an unknown detector kind", () => {
     expect(() => AgentRun.parse({ ...base, degraded: [{ kind: "nope", reason: "x" }] })).toThrow();
   });
+
+  it("defaults preFilterHits to zeroes so an older sidecar still parses", () => {
+    expect(AgentRun.parse(base).preFilterHits).toEqual({ regex: 0, semgrep: 0 });
+  });
+
+  it("carries the per-source anchor split", () => {
+    const parsed = AgentRun.parse({ ...base, preFilterHits: { regex: 0, semgrep: 4 } });
+    expect(parsed.preFilterHits).toEqual({ regex: 0, semgrep: 4 });
+  });
 });
 
 describe("UserConfig schema", () => {
