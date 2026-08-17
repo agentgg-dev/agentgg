@@ -26,7 +26,7 @@ import {
   writeScanPlan,
 } from "@agentgg/core";
 import type { Command } from "commander";
-import { loadAllAgents } from "../agent-catalog.js";
+import { defaultAgentDirs, loadAllAgents } from "../agent-catalog.js";
 import { installOfficialAgents } from "../agents-install.js";
 import { runConcurrent } from "../concurrent.js";
 import { resolveDedup } from "../deduper.js";
@@ -382,16 +382,16 @@ export async function runScan(
 
     // `--template` / `-t` filters the catalog. Each value is a slug,
     // a path to a .md file/dir, or a subdirectory name relative to the
-    // official agents dir (e.g. "base/injection/" or "demo-agents/").
-    // When no -t is given, default to the official base/ folder — the
-    // full vulnerability library.
+    // official agents dir (e.g. "agents/injection/" or "agents/deep/").
+    // When no -t is given, default to every category under agents/
+    // except the opt-in ones — see `defaultAgentDirs`.
     const templateInputs = opts.template ?? [];
-    const baseDir = join(officialAgentsDir, "base");
+    const defaultDirs = defaultAgentDirs(officialAgentsDir);
     const selectedAgents: Agent[] =
       templateInputs.length > 0
         ? resolveTemplates(templateInputs, catalog.agents, officialAgentsDir)
-        : existsSync(baseDir)
-          ? resolveTemplates([baseDir], catalog.agents, officialAgentsDir)
+        : defaultDirs.length > 0
+          ? resolveTemplates(defaultDirs, catalog.agents, officialAgentsDir)
           : catalog.agents;
     if (selectedAgents.length === 0) {
       throw new Error("No agents selected — nothing to scan.");

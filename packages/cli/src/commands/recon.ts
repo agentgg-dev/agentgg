@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import type { Agent, Provider } from "@agentgg/core";
 import {
   completeRun,
@@ -11,7 +11,7 @@ import {
   writeScanPlan,
 } from "@agentgg/core";
 import type { Command } from "commander";
-import { loadAllAgents } from "../agent-catalog.js";
+import { defaultAgentDirs, loadAllAgents } from "../agent-catalog.js";
 import { installOfficialAgents } from "../agents-install.js";
 import { loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
 import { selectAgents } from "../precondition.js";
@@ -160,12 +160,12 @@ export async function runReconCommand(
 
     const officialAgentsDir = getOfficialAgentsDir(env);
     const templateInputs = opts.template ?? [];
-    const baseDir = join(officialAgentsDir, "base");
+    const defaultDirs = defaultAgentDirs(officialAgentsDir);
     const selectedAgents: Agent[] =
       templateInputs.length > 0
         ? resolveTemplates(templateInputs, catalog.agents, officialAgentsDir)
-        : existsSync(baseDir)
-          ? resolveTemplates([baseDir], catalog.agents, officialAgentsDir)
+        : defaultDirs.length > 0
+          ? resolveTemplates(defaultDirs, catalog.agents, officialAgentsDir)
           : catalog.agents;
     if (selectedAgents.length === 0) {
       throw new Error("No agents selected — nothing to plan.");

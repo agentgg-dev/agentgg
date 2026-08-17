@@ -263,7 +263,7 @@ Hosts serving the same model are not interchangeable. A host that returns the an
 
 ### Pick which agents to run
 
-Run the default agent set (`~/.agentgg/agentgg-agents/base/`):
+Run the default agent set (every category under `~/.agentgg/agentgg-agents/agents/` except `deep/`, which is opt-in via `-t agents/deep/`):
 
 ```bash
 agentgg scan ./src -o ./out

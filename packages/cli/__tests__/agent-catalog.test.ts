@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadAgentsFromDir } from "@agentgg/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { lintOfficialAgents, loadAllAgents } from "../src/agent-catalog.js";
+import { defaultAgentDirs, lintOfficialAgents, loadAllAgents } from "../src/agent-catalog.js";
 
 const VALID_MD = `---
 slug: SLUG_PLACEHOLDER
@@ -80,6 +80,39 @@ describe("lintOfficialAgents", () => {
     );
     const { agents } = loadAgentsFromDir(officialDir, { kind: "official" });
     expect(lintOfficialAgents(agents)).toEqual([]);
+  });
+});
+
+describe("defaultAgentDirs", () => {
+  it("returns every category under agents/ except deep", () => {
+    for (const d of ["injection", "auth", "deep"]) {
+      mkdirSync(join(officialDir, "agents", d), { recursive: true });
+    }
+    const dirs = defaultAgentDirs(officialDir);
+    expect(dirs.sort()).toEqual(
+      [join(officialDir, "agents", "auth"), join(officialDir, "agents", "injection")].sort(),
+    );
+  });
+
+  it("ignores loose files sitting directly under agents/", () => {
+    mkdirSync(join(officialDir, "agents", "auth"), { recursive: true });
+    writeFileSync(join(officialDir, "agents", "README.md"), "not an agent dir");
+    expect(defaultAgentDirs(officialDir)).toEqual([join(officialDir, "agents", "auth")]);
+  });
+
+  it("falls back to the pre-restructure base/ layout", () => {
+    mkdirSync(join(officialDir, "base", "injection"), { recursive: true });
+    expect(defaultAgentDirs(officialDir)).toEqual([join(officialDir, "base")]);
+  });
+
+  it("prefers agents/ over base/ when both exist", () => {
+    mkdirSync(join(officialDir, "agents", "auth"), { recursive: true });
+    mkdirSync(join(officialDir, "base", "injection"), { recursive: true });
+    expect(defaultAgentDirs(officialDir)).toEqual([join(officialDir, "agents", "auth")]);
+  });
+
+  it("returns nothing when neither layout is present", () => {
+    expect(defaultAgentDirs(officialDir)).toEqual([]);
   });
 });
 

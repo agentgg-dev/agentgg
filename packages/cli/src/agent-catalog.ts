@@ -1,7 +1,30 @@
-import { existsSync } from "node:fs";
-import { basename, extname } from "node:path";
+import { existsSync, readdirSync } from "node:fs";
+import { basename, extname, join } from "node:path";
 import { type Agent, getOfficialAgentsDir, loadAgentsFromDir } from "@agentgg/core";
 import { getCustomAgentsDir } from "./agents-fs.js";
+
+/** Official subtree that is opt-in only, never part of the default set. */
+const OPT_IN_DIRS = new Set(["deep"]);
+
+/**
+ * The agent dirs `scan`/`recon` run when no `-t` is given: every category
+ * under `agents/` except the opt-in ones. `deep/` agents scan far more
+ * files per run, so they stay reachable via `-t agents/deep/` but never default.
+ *
+ * Falls back to the pre-restructure `base/` layout so a CLI that has not
+ * re-run `agentgg agents update` keeps working. Returns `[]` when neither
+ * exists — the caller then uses the whole catalog.
+ */
+export function defaultAgentDirs(officialAgentsDir: string): string[] {
+  const agentsDir = join(officialAgentsDir, "agents");
+  if (existsSync(agentsDir)) {
+    return readdirSync(agentsDir, { withFileTypes: true })
+      .filter((e) => e.isDirectory() && !OPT_IN_DIRS.has(e.name))
+      .map((e) => join(agentsDir, e.name));
+  }
+  const legacyBaseDir = join(officialAgentsDir, "base");
+  return existsSync(legacyBaseDir) ? [legacyBaseDir] : [];
+}
 
 /**
  * Build the active agent catalog: official agents downloaded from the
