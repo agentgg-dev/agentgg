@@ -1,17 +1,20 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { AgentPreFilterPattern } from "@agentgg/core";
+import { dirname, join } from "node:path";
+import { AgentPreFilterPattern, getSemgrepCorePath } from "@agentgg/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  ensureSemgrepCore,
   getSemgrepRulesDir,
   isSemgrepSuppressed,
+  resetSemgrepResolution,
   resolveSemgrepCore,
   resolveSemgrepRule,
   runSemgrepPreFilter,
   semgrepLangFor,
   semgrepRuleLanguages,
 } from "../src/semgrep.js";
+import { SEMGREP_VERSION } from "../src/semgrep-install.js";
 
 let dir: string;
 
@@ -149,6 +152,110 @@ describe("resolveSemgrepCore", () => {
 
   it("falls back to PATH when the override does not exist", () => {
     expect(resolveSemgrepCore({ AGENTGG_SEMGREP_CORE: join(dir, "absent") })).toBe("semgrep-core");
+  });
+});
+
+describe("ensureSemgrepCore", () => {
+  beforeEach(() => {
+    resetSemgrepResolution();
+  });
+
+  it("prefers AGENTGG_SEMGREP_CORE over everything else", async () => {
+    const bin = join(dir, "explicit-core");
+    writeFileSync(bin, "");
+    let installs = 0;
+    const result = await ensureSemgrepCore(
+      { AGENTGG_SEMGREP_CORE: bin, AGENTGG_HOME: dir },
+      {
+        install: async () => {
+          installs++;
+          return { ok: true, path: "should-not-be-used" };
+        },
+      },
+    );
+    expect(result).toEqual({ ok: true, bin });
+    expect(installs).toBe(0);
+  });
+
+  it("uses the cached binary without installing", async () => {
+    const cached = getSemgrepCorePath(SEMGREP_VERSION, { AGENTGG_HOME: dir });
+    mkdirSync(dirname(cached), { recursive: true });
+    writeFileSync(cached, "");
+    let installs = 0;
+    const result = await ensureSemgrepCore(
+      { AGENTGG_HOME: dir, PATH: "" },
+      {
+        install: async () => {
+          installs++;
+          return { ok: true, path: cached };
+        },
+      },
+    );
+    expect(result).toEqual({ ok: true, bin: cached });
+    expect(installs).toBe(0);
+  });
+
+  it("takes semgrep-core from PATH before downloading", async () => {
+    const name = process.platform === "win32" ? "semgrep-core.exe" : "semgrep-core";
+    const onPath = join(dir, name);
+    writeFileSync(onPath, "");
+    let installs = 0;
+    const result = await ensureSemgrepCore(
+      { AGENTGG_HOME: dir, PATH: dir },
+      {
+        install: async () => {
+          installs++;
+          return { ok: true, path: "should-not-be-used" };
+        },
+      },
+    );
+    expect(result).toEqual({ ok: true, bin: onPath });
+    expect(installs).toBe(0);
+  });
+
+  it("installs when nothing is cached and PATH has nothing", async () => {
+    const result = await ensureSemgrepCore(
+      { AGENTGG_HOME: dir, PATH: "" },
+      { install: async () => ({ ok: true, path: "/fetched/semgrep-core" }) },
+    );
+    expect(result).toEqual({ ok: true, bin: "/fetched/semgrep-core" });
+  });
+
+  it("installs once when several callers race", async () => {
+    let installs = 0;
+    const install = async () => {
+      installs++;
+      await new Promise((r) => setTimeout(r, 10));
+      return { ok: true as const, path: "/fetched/semgrep-core" };
+    };
+    const results = await Promise.all([
+      ensureSemgrepCore({ AGENTGG_HOME: dir, PATH: "" }, { install }),
+      ensureSemgrepCore({ AGENTGG_HOME: dir, PATH: "" }, { install }),
+      ensureSemgrepCore({ AGENTGG_HOME: dir, PATH: "" }, { install }),
+    ]);
+    expect(installs).toBe(1);
+    for (const r of results) expect(r).toEqual({ ok: true, bin: "/fetched/semgrep-core" });
+  });
+
+  it("remembers a failure instead of retrying it per agent", async () => {
+    let installs = 0;
+    const install = async () => {
+      installs++;
+      return { ok: false as const, reason: "download failed" as const };
+    };
+    const first = await ensureSemgrepCore({ AGENTGG_HOME: dir, PATH: "" }, { install });
+    const second = await ensureSemgrepCore({ AGENTGG_HOME: dir, PATH: "" }, { install });
+    expect(first).toEqual({ ok: false, reason: "download failed" });
+    expect(second).toEqual({ ok: false, reason: "download failed" });
+    expect(installs).toBe(1);
+  });
+
+  it("reports the unsupported platform without any install attempt", async () => {
+    const result = await ensureSemgrepCore(
+      { AGENTGG_HOME: dir, PATH: "" },
+      { install: async () => ({ ok: false, reason: "unsupported platform" }) },
+    );
+    expect(result).toEqual({ ok: false, reason: "unsupported platform" });
   });
 });
 

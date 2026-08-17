@@ -1,9 +1,15 @@
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { extname, join, resolve } from "node:path";
+import { delimiter, extname, join, resolve } from "node:path";
 import { promisify } from "node:util";
-import { type Agent, isSemgrepPreFilter } from "@agentgg/core";
+import { type Agent, getSemgrepCorePath, isSemgrepPreFilter } from "@agentgg/core";
 import { runConcurrent } from "./concurrent.js";
+import {
+  type InstallResult,
+  installSemgrepCore,
+  SEMGREP_VERSION,
+  type SemgrepFailure,
+} from "./semgrep-install.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -175,6 +181,74 @@ export function resolveSemgrepCore(env: NodeJS.ProcessEnv = process.env): string
   const override = env.AGENTGG_SEMGREP_CORE;
   if (override && existsSync(override)) return override;
   return "semgrep-core";
+}
+
+export type EnsureResult = { ok: true; bin: string } | { ok: false; reason: SemgrepFailure };
+
+export interface EnsureDeps {
+  install?: (env: NodeJS.ProcessEnv) => Promise<InstallResult>;
+}
+
+/**
+ * First match for `name` on PATH, or null. Node has no `which`, and shelling
+ * out to one would cost a process on every scan.
+ */
+function findOnPath(name: string, env: NodeJS.ProcessEnv): string | null {
+  const exts = process.platform === "win32" ? [".exe", ".cmd", ""] : [""];
+  for (const entry of (env.PATH ?? "").split(delimiter)) {
+    if (!entry) continue;
+    for (const ext of exts) {
+      const candidate = join(entry, `${name}${ext}`);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
+/**
+ * Process-lifetime memo. One scan asks per agent, so without this a dead
+ * network would be retried once per agent, and two agents starting together
+ * would both download the same 60 MB wheel.
+ */
+let inflight: Promise<EnsureResult> | null = null;
+
+/** Test-only: forget the memo so each case starts clean. */
+export function resetSemgrepResolution(): void {
+  inflight = null;
+}
+
+/**
+ * Resolve the analysis binary, fetching it if this is the first scan that
+ * needs it. Order: explicit override, versioned cache, PATH, download.
+ * Never throws — a failure is a typed reason the caller records against the
+ * agent so the report cannot imply coverage the scan did not have.
+ */
+export async function ensureSemgrepCore(
+  env: NodeJS.ProcessEnv = process.env,
+  deps: EnsureDeps = {},
+): Promise<EnsureResult> {
+  if (inflight) return inflight;
+  inflight = (async (): Promise<EnsureResult> => {
+    const override = env.AGENTGG_SEMGREP_CORE;
+    if (override && existsSync(override)) return { ok: true, bin: override };
+
+    const cached = getSemgrepCorePath(SEMGREP_VERSION, env);
+    if (existsSync(cached)) return { ok: true, bin: cached };
+
+    // A copy the developer already installed. Neither version-pinned nor
+    // checksum-verified, so it ranks below the cache and is only reached when
+    // nothing has been fetched yet.
+    const onPath = findOnPath("semgrep-core", env);
+    if (onPath) {
+      console.warn(`warning: using semgrep-core from PATH (${onPath}); version is not pinned`);
+      return { ok: true, bin: onPath };
+    }
+
+    const install = deps.install ?? ((e: NodeJS.ProcessEnv) => installSemgrepCore(e));
+    const result = await install(env);
+    return result.ok ? { ok: true, bin: result.path } : { ok: false, reason: result.reason };
+  })();
+  return inflight;
 }
 
 /**
