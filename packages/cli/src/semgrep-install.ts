@@ -1,3 +1,9 @@
+import { createHash } from "node:crypto";
+import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { getSemgrepCorePath, getSemgrepDir } from "@agentgg/core";
+import AdmZip from "adm-zip";
+
 /**
  * Acquisition of the semgrep analysis binary. Knows nothing about agents or
  * preFilters — it downloads, verifies, and caches, and that is all.
@@ -51,4 +57,92 @@ export function currentPlatformKey(): string {
 /** The pinned wheel for this machine, or null when unsupported. */
 export function wheelForCurrentPlatform(): WheelEntry | null {
   return WHEELS[currentPlatformKey()] ?? null;
+}
+
+const PYPI_JSON = `https://pypi.org/pypi/semgrep/${SEMGREP_VERSION}/json`;
+
+/** Why a scan could not use semgrep. Each calls for a different user response. */
+export type SemgrepFailure =
+  | "unsupported platform"
+  | "binary failed to start"
+  | "download failed"
+  | "verification failed";
+
+export type InstallResult = { ok: true; path: string } | { ok: false; reason: SemgrepFailure };
+
+export interface InstallDeps {
+  fetchImpl?: typeof fetch;
+  /**
+   * Overrides the pinned wheel. Tests supply a digest matching their fixture,
+   * since no fake archive can ever hash to the real pinned value. An explicit
+   * `null` simulates an unsupported platform.
+   */
+  entry?: WheelEntry | null;
+}
+
+interface PypiFile {
+  packagetype?: string;
+  filename?: string;
+  url?: string;
+}
+
+/**
+ * Download the pinned wheel, verify it against the pinned digest, and extract
+ * `semgrep-core` into the versioned cache. Never throws: every failure comes
+ * back as a typed reason the caller records.
+ */
+export async function installSemgrepCore(
+  env: NodeJS.ProcessEnv = process.env,
+  deps: InstallDeps = {},
+): Promise<InstallResult> {
+  const entry = deps.entry !== undefined ? deps.entry : wheelForCurrentPlatform();
+  if (!entry) return { ok: false, reason: "unsupported platform" };
+
+  const doFetch = deps.fetchImpl ?? fetch;
+  let bytes: Buffer;
+  try {
+    const meta = await doFetch(PYPI_JSON, { headers: { "User-Agent": "agentgg-cli" } });
+    if (!meta.ok) return { ok: false, reason: "download failed" };
+    const files = ((await meta.json()) as { urls?: PypiFile[] }).urls ?? [];
+    const match = files.find(
+      (f) => f.packagetype === "bdist_wheel" && f.filename === entry.filename,
+    );
+    if (!match?.url) return { ok: false, reason: "download failed" };
+
+    const res = await doFetch(match.url, { headers: { "User-Agent": "agentgg-cli" } });
+    if (!res.ok) return { ok: false, reason: "download failed" };
+    bytes = Buffer.from(await res.arrayBuffer());
+  } catch {
+    return { ok: false, reason: "download failed" };
+  }
+
+  // Verify BEFORE opening the archive, and against the digest pinned in this
+  // file rather than the one PyPI reports beside the file it describes. An
+  // unverified binary is never written to the cache, let alone executed.
+  if (createHash("sha256").update(bytes).digest("hex") !== entry.sha256) {
+    return { ok: false, reason: "verification failed" };
+  }
+
+  const dir = getSemgrepDir(SEMGREP_VERSION, env);
+  const target = getSemgrepCorePath(SEMGREP_VERSION, env);
+  try {
+    const zip = new AdmZip(bytes);
+    const wanted = zip
+      .getEntries()
+      .find((e) => /^semgrep\/bin\/semgrep-core(\.exe)?$/.test(e.entryName));
+    if (!wanted) return { ok: false, reason: "verification failed" };
+
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(target, wanted.getData());
+    if (process.platform !== "win32") chmodSync(target, 0o755);
+    writeFileSync(
+      join(dir, ".version.json"),
+      `${JSON.stringify({ version: SEMGREP_VERSION, installedAt: new Date().toISOString() }, null, 2)}\n`,
+    );
+  } catch {
+    rmSync(dir, { recursive: true, force: true });
+    return { ok: false, reason: "download failed" };
+  }
+
+  return { ok: true, path: target };
 }
