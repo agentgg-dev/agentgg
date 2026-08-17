@@ -85,10 +85,20 @@ upstream.
 4. Verify the bytes against the pinned SHA-256 **before** opening the archive.
    A mismatch deletes the download and degrades. The binary is never executed
    unverified.
-5. Extract only `semgrep/bin/semgrep-core` with `adm-zip`, already a
+5. Extract the whole `semgrep/bin/` directory with `adm-zip`, already a
    dependency.
 6. Set the executable bit on POSIX.
 7. Write a `.version.json` marker, matching what `installOfficialAgents` does.
+
+Two corrections found during implementation, both by the integration test:
+
+- The binary is **not** at `semgrep/bin/semgrep-core` inside the wheel. It sits
+  under a wheel data prefix, `semgrep-1.173.0.data/purelib/semgrep/bin/semgrep-core.exe`,
+  so the match is on the path tail rather than the whole path.
+- Extracting only the executable is **wrong on Windows**, where `semgrep-core.exe`
+  loads sibling DLLs (`libcrypto-3.dll`, `libcurl-4.dll`, `libgmp-10.dll`, and
+  others) from the same directory and will not start without them. The whole
+  `bin/` directory is taken instead: 19 files, about 244 MB extracted on Windows.
 
 Resolution is attempted once per scan process, not once per agent, and is
 single-flighted so concurrent agents cannot race into two downloads. The
