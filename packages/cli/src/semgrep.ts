@@ -4,6 +4,7 @@ import { delimiter, extname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { type Agent, getSemgrepCorePath, isSemgrepPreFilter } from "@agentgg/core";
 import { runConcurrent } from "./concurrent.js";
+import type { TaintStep } from "./pre-filter.js";
 import {
   type InstallResult,
   installSemgrepCore,
@@ -23,6 +24,12 @@ export interface SemgrepHit {
   /** Last line of the match. Unset when the engine reports no end. */
   endLine?: number;
   label: string;
+  /** Rule `message`, metavariables already substituted. Unset if it equals `label`. */
+  message?: string;
+  /** Allow-listed `metadata:` keys. See `METADATA_KEYS`. */
+  metadata?: Record<string, string>;
+  /** Taint-mode path. Only `mode: taint` rules produce one. */
+  taint?: TaintStep[];
 }
 
 /** repo-relative path → hits in that file. */
@@ -152,18 +159,22 @@ export function semgrepRuleLanguages(source: string): Set<string> | null {
 }
 
 /**
- * Resolve a `semgrepRule` name to a file under the catalog's rules dir.
+ * Resolve a `semgrepRule` name to a file, searching `rulesDirs` in order.
+ * The caller puts the `--semgrep-rules` dirs first and the catalog's own
+ * rules dir last, so a local rule shadows a catalog rule of the same name.
  * The name is schema-constrained to lowercase segments with no dots, so
  * it cannot traverse out and cannot name a registry pack. Returns null
  * when the file is absent; the caller warns rather than failing the scan.
  */
-export function resolveSemgrepRule(rulesDir: string, name: string): string | null {
-  // Both extensions: semgrep treats them interchangeably, and the installer
-  // accepts both, so resolving only `.yml` would put a `.yaml` rule on disk
-  // and then report it missing at scan time.
-  for (const ext of [".yml", ".yaml"]) {
-    const path = join(rulesDir, `${name}${ext}`);
-    if (existsSync(path)) return path;
+export function resolveSemgrepRule(rulesDirs: ReadonlyArray<string>, name: string): string | null {
+  for (const rulesDir of rulesDirs) {
+    // Both extensions: semgrep treats them interchangeably, and the installer
+    // accepts both, so resolving only `.yml` would put a `.yaml` rule on disk
+    // and then report it missing at scan time.
+    for (const ext of [".yml", ".yaml"]) {
+      const path = join(rulesDir, `${name}${ext}`);
+      if (existsSync(path)) return path;
+    }
   }
   return null;
 }
@@ -191,11 +202,129 @@ function parseCoreJson(stdout: string): { results?: RawResult[] } {
   return JSON.parse(stdout.slice(start));
 }
 
+interface RawLoc {
+  line?: number;
+}
+
+/**
+ * A taint endpoint is a two-element tuple, not an object:
+ * `["CliLoc", [{ start, end, path }, "req.query"]]`. The second slot holds
+ * the source text, which is why we do not re-read the line from the file.
+ */
+type RawTaintEndpoint = [string, [{ start?: RawLoc }, string]];
+
+interface RawDataflowTrace {
+  taint_source?: unknown;
+  intermediate_vars?: Array<{ location?: { start?: RawLoc }; content?: string }>;
+  taint_sink?: unknown;
+}
+
 interface RawResult {
   check_id?: string;
-  start?: { line?: number };
-  end?: { line?: number };
-  extra?: { message?: string };
+  start?: RawLoc;
+  end?: RawLoc;
+  extra?: {
+    message?: string;
+    metadata?: Record<string, unknown>;
+    dataflow_trace?: RawDataflowTrace;
+  };
+}
+
+/**
+ * The `metadata:` keys worth prompt space. A registry rule carries vendor
+ * bookkeeping (`semgrep.dev`, `source-rule-url`, `technology`, licence ids)
+ * that costs tokens and tells the model nothing about the code.
+ */
+const METADATA_KEYS: ReadonlyArray<string> = ["cwe", "owasp", "confidence", "likelihood", "impact"];
+
+/** Collapse to one line and cap, so one anchor cannot flood the prompt. */
+function oneLine(text: string, max = 200): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/** Allow-listed metadata, flattened. Arrays join; anything else is dropped. */
+function pickMetadata(meta: Record<string, unknown> | undefined): Record<string, string> | null {
+  if (!meta) return null;
+  const out: Record<string, string> = {};
+  for (const key of METADATA_KEYS) {
+    const value = meta[key];
+    if (typeof value === "string") out[key] = oneLine(value, 80);
+    else if (typeof value === "number" || typeof value === "boolean") out[key] = String(value);
+    else if (Array.isArray(value)) {
+      const parts = value.filter((v) => typeof v === "string") as string[];
+      if (parts.length > 0) out[key] = oneLine(parts.join(", "), 80);
+    }
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/** One end of a taint path, or null when the tuple is not the shape we expect. */
+function taintEndpoint(raw: unknown, kind: TaintStep["kind"]): TaintStep | null {
+  if (!Array.isArray(raw) || raw.length < 2) return null;
+  const payload = (raw as RawTaintEndpoint)[1];
+  if (!Array.isArray(payload) || payload.length < 2) return null;
+  const line = payload[0]?.start?.line;
+  const code = payload[1];
+  if (typeof line !== "number" || typeof code !== "string") return null;
+  return { kind, line, code: oneLine(code, 120) };
+}
+
+/** How many intermediate steps survive. Beyond this the path stops informing. */
+const MAX_TAINT_STEPS = 6;
+
+/**
+ * Flatten `dataflow_trace` into source → through → sink. Returns null unless
+ * both ends parsed: half a path is worse than none, because the model would
+ * read the surviving end as the whole story.
+ */
+function taintSteps(trace: RawDataflowTrace | undefined): TaintStep[] | null {
+  if (!trace) return null;
+  const source = taintEndpoint(trace.taint_source, "source");
+  const sink = taintEndpoint(trace.taint_sink, "sink");
+  if (!source || !sink) return null;
+  const kept: TaintStep[] = [];
+  let dropped = 0;
+  for (const v of trace.intermediate_vars ?? []) {
+    const line = v.location?.start?.line;
+    if (typeof line !== "number" || typeof v.content !== "string") continue;
+    const code = oneLine(v.content, 120);
+    // The engine emits token fragments (a lone backtick, a brace) as steps.
+    // They carry no dataflow meaning and read as noise beside real variables.
+    if (code.length < 2 || !/\w/.test(code)) continue;
+    const prev = kept[kept.length - 1];
+    if (prev && prev.line === line && prev.code === code) continue;
+    if (kept.length >= MAX_TAINT_STEPS) {
+      dropped++;
+      continue;
+    }
+    kept.push({ kind: "through", line, code });
+  }
+  // Say what was cut. A silently shortened path still reads as the whole
+  // path, and the model would then trust a route it was never shown.
+  const middle =
+    dropped > 0
+      ? [...kept, { kind: "through" as const, line: sink.line, code: `(${dropped} more steps)` }]
+      : kept;
+  return [source, ...middle, sink];
+}
+
+/**
+ * One engine result → one anchor. Exported for tests: the interesting logic
+ * is this mapping, and covering it needs no binary and no child process.
+ */
+export function toSemgrepHit(r: RawResult, line: number, entryLabel?: string): SemgrepHit {
+  const message = r.extra?.message ? oneLine(r.extra.message) : undefined;
+  const label = entryLabel ?? message ?? r.check_id ?? "semgrep";
+  const hit: SemgrepHit = { line, endLine: r.end?.line, label };
+  // Without a declared `label`, the label already IS the message. Printing
+  // both would repeat the same sentence on two lines of every anchor.
+  if (message && message !== label) hit.message = message;
+  const metadata = pickMetadata(r.extra?.metadata);
+  if (metadata) hit.metadata = metadata;
+  const taint = taintSteps(r.extra?.dataflow_trace);
+  if (taint) hit.taint = taint;
+  return hit;
 }
 
 /**
@@ -325,7 +454,7 @@ export async function runSemgrepPreFilter(
   root: string,
   agent: Agent,
   files: ReadonlyArray<string>,
-  rulesDir: string,
+  rulesDirs: ReadonlyArray<string>,
   concurrency: number,
   onWarn?: (message: string) => void,
   env: NodeJS.ProcessEnv = process.env,
@@ -337,9 +466,11 @@ export async function runSemgrepPreFilter(
 
   const rules: Array<{ path: string; label?: string; langs: Set<string> | null }> = [];
   for (const entry of entries) {
-    const path = resolveSemgrepRule(rulesDir, entry.semgrepRule);
+    const path = resolveSemgrepRule(rulesDirs, entry.semgrepRule);
     if (!path) {
-      onWarn?.(`${agent.slug}: semgrep rule '${entry.semgrepRule}' not found in ${rulesDir}`);
+      onWarn?.(
+        `${agent.slug}: semgrep rule '${entry.semgrepRule}' not found in ${rulesDirs.join(", ")}`,
+      );
       continue;
     }
     let langs: Set<string> | null = null;
@@ -417,11 +548,7 @@ export async function runSemgrepPreFilter(
     for (const r of results) {
       const line = r.start?.line;
       if (typeof line !== "number") continue;
-      bucket.push({
-        line,
-        endLine: r.end?.line,
-        label: job.rule.label ?? r.extra?.message ?? r.check_id ?? "semgrep",
-      });
+      bucket.push(toSemgrepHit(r, line, job.rule.label));
     }
     if (bucket.length > 0) hits.set(job.relPath, bucket);
   });

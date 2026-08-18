@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import type {
   Agent,
@@ -87,6 +87,10 @@ interface ScanOpts {
   concurrency?: number;
   diff?: string;
   template?: string[];
+  /** `--semgrep-rules <dir>`: extra rule dirs searched BEFORE the catalog's
+   *  own `semgrep-rules/`, so a local file shadows a catalog rule of the same
+   *  name. Repeatable. Only `semgrepRule` preFilters read it. */
+  semgrepRules?: string[];
   verbose?: boolean;
   exclude?: string[];
   only?: string[];
@@ -381,6 +385,26 @@ export async function runScan(
     for (const e of catalog.errors) console.warn(`warning: ${e}`);
 
     const officialAgentsDir = getOfficialAgentsDir(env);
+
+    // Rule dirs for `semgrepRule` preFilters. `--semgrep-rules` dirs come
+    // first, so a local rule shadows the catalog rule of the same name, and
+    // `agentgg agents update` (which clears the catalog dir) cannot delete it.
+    // A bad path fails here, before any LLM call.
+    const semgrepRuleDirs = [
+      ...(opts.semgrepRules ?? []).map((d) => {
+        const abs = resolve(d);
+        if (!existsSync(abs) || !statSync(abs).isDirectory()) {
+          throw new Error(`--semgrep-rules: not a directory: ${abs}`);
+        }
+        return abs;
+      }),
+      getSemgrepRulesDir(officialAgentsDir),
+    ];
+    if (semgrepRuleDirs.length > 1) {
+      console.log(
+        `Semgrep rules: ${semgrepRuleDirs.slice(0, -1).join(", ")} (searched before the catalog)`,
+      );
+    }
 
     // `--template` / `-t` filters the catalog. Each value is a slug,
     // a path to a .md file/dir, or a subdirectory name relative to the
@@ -898,7 +922,7 @@ export async function runScan(
         root,
         agent,
         scopedFiles,
-        getSemgrepRulesDir(officialAgentsDir),
+        semgrepRuleDirs,
         concurrency,
         (m) => console.warn(`warning: ${m}`),
         env,
@@ -928,10 +952,10 @@ export async function runScan(
           const lines = content.split("\n");
           for (const h of fileSemgrepHits) {
             if (isSemgrepSuppressed(lines, h.line)) continue;
+            // Spread, so message/metadata/taint ride along without this
+            // call site having to know every enrichment field.
             hits.push({
-              line: h.line,
-              endLine: h.endLine,
-              label: h.label,
+              ...h,
               snippet: (lines[h.line - 1] ?? "").trim().slice(0, 200),
             });
             preFilterHits.semgrep++;
@@ -1862,6 +1886,12 @@ export function registerScanCommand(program: Command): void {
     .option(
       "-t, --template <value>",
       "Restrict the scan to specific agents. A value can be: a slug (`sql-injection`), a path to a `.md` agent file, a directory of `.md` files, or a `.txt` file listing slugs/paths one per line (# for comments). Multiple values can be comma- or whitespace-separated within one `-t`, or `-t` may be repeated.",
+      collect,
+      [] as string[],
+    )
+    .option(
+      "--semgrep-rules <dir>",
+      "Directory of local semgrep rule files (.yml/.yaml) that an agent's `where.preFilter` can name via `semgrepRule`. Searched BEFORE the downloaded catalog's own rules dir, so a local file shadows a catalog rule of the same name, and `agentgg agents update` cannot delete it. Repeat the flag for several dirs. The value is a directory; the rule is still referenced by bare name (no path, no extension).",
       collect,
       [] as string[],
     )

@@ -23,6 +23,7 @@
 - [How a scan runs](#how-a-scan-runs)
 - [Execution model: ordering, batching, and concurrency](#execution-model-ordering-batching-and-concurrency)
 - [Agent templates](#agent-templates)
+- [Semgrep rules as anchors](#semgrep-rules-as-anchors)
 - [Authoring agents from past reports](#authoring-agents-from-past-reports)
 - [Providers](#providers)
 - [Examples](#examples)
@@ -187,11 +188,35 @@ You are reviewing source for SQL injection. ...   # 3. the instructions
 
 **Precondition** (optional) decides whether the agent is queued. `regex` is a cheap, no-LLM filesystem check — file `extensions`, sentinel `files`, `directories`, or content `patterns`. `prompt` is a one-shot LLM check that sees the recon brief. Both present = AND; omit it = always run. (This replaces the old per-stack tech gate: a PHP agent simply preconditions on `.php` existing, so it skips a Go-only repo on its own.)
 
-**Where** is the file set the agent runs on. Use plain `extensions` (nuclei-style — `ts`, `php`), plus optional `filePatterns`/`excludePatterns` for complex include/exclude rules (globs, or a bare directory/file path — a directory matches everything under it), and a `preFilter` regex that narrows to files containing a match (and hands the model those lines as anchors). Empty `where` = all files. The matching files are reviewed in batches of `maxFilesPerBatch` (default 5).
+**Where** is the file set the agent runs on. Use plain `extensions` (nuclei-style — `ts`, `php`), plus optional `filePatterns`/`excludePatterns` for complex include/exclude rules (globs, or a bare directory/file path — a directory matches everything under it), and a `preFilter` regex that narrows to files containing a match (and hands the model those lines as anchors). Empty `where` = all files. The matching files are reviewed in batches of `maxFilesPerBatch` (default 5). A `preFilter` entry can also name a semgrep rule instead of a regex — see [Semgrep rules as anchors](#semgrep-rules-as-anchors). A `mode: taint` rule additionally hands the model the dataflow path it traced (source, the variables between, sink) beside the anchor line, along with the rule's `message` and its risk-rating `metadata:` keys.
 
 **Instructions** are the prompt body. Every agent is tool-enabled (Read/Glob/Grep), so although it's seeded with specific files, it can follow imports and chase callers into other files to confirm a finding.
 
 Templates live in the **official catalog** (`~/.agentgg/agentgg-agents/`; refresh with `agentgg agents update`), are **user-installed** (`agentgg agents add ./my-agent.md`), or passed **per-scan** via `-t` — a slug, a `.md` file, a directory of `.md` files, or a `.txt` list.
+
+## Semgrep rules as anchors
+
+A `preFilter` entry can be a semgrep rule instead of a regex. Use one where a regex cannot express the shape you want — a call whose argument is not a literal, a handler declared by position rather than by a path string, a decorator on a method.
+
+```yaml
+where:
+  extensions: [ts, tsx]
+  preFilter:
+    - { regex: 'req\.query\.', label: "Request input" }   # single quotes keep the backslashes
+    - { semgrepRule: "dangerous-exec", label: "Shell sink with a computed argument" }
+```
+
+The value is a bare **name** — never a path, never a filename with an extension, never a registry pack id. It resolves to `<name>.yml` or `<name>.yaml` in each directory passed to `--semgrep-rules`, in the order given, and then in the catalog's own `semgrep-rules/` dir. Your directories come first, so a local rule shadows a catalog rule of the same name, and `agentgg agents update` (which clears the catalog dir) cannot delete it.
+
+```bash
+agentgg scan ./src -t ./my-agents --semgrep-rules ./my-rules -o ./out   # repeat the flag for more dirs
+```
+
+Write the rule as an ordinary semgrep rule file, and give it a `languages:` key — without one it is run against every file the agent's `where` includes, which costs time and finds nothing new. Each file is scanned on its own with the file set agentgg already picked, so per-file patterns work and cross-file modes (`join`) do not. A `nosemgrep` comment on the matching line or the line above suppresses the anchor.
+
+A match becomes an anchor — line, line range, and the entry's `label` — handed to the model exactly like a regex anchor. It is a starting point, not a finding; the prompt still decides what is reportable.
+
+To confirm a rule ran, read the per-agent line in the scan output: it splits the count by source, as in `3 anchor(s) (semgrep 3, regex 0)`. `--verbose` adds the binary that ran and the per-agent rule count. A name that resolves nowhere warns and lists every directory searched, then the scan continues on the regex entries alone; the agent's sidecar records that as degraded coverage. Editing a rule does not invalidate resume state — pass `--rescan` after you change one.
 
 ## Authoring agents from past reports
 
@@ -608,6 +633,7 @@ Run `agentgg <command> --help` for the full flag list on any subcommand.
 ```
 -t, --template <value>          slug, .md path, directory, or .txt list file;
                                 comma- or whitespace-separated; repeatable
+--semgrep-rules <dir>           directory of local semgrep rule files an agent's preFilter can name via `semgrepRule`; searched before the catalog's own rules dir; repeatable
 -o, --output <path>             output directory (default ./scan-results/)
 --source-id <id>                stable identity for the scanned source; resume state in -o is reused only when it matches (default: the absolute scan root — set it when the path changes between runs, e.g. CI checkouts or container mounts)
 --validate / --no-validate      second-pass validation phase per finding (on by default; --no-validate for a detection-only run)

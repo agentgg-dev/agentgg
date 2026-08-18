@@ -19,6 +19,7 @@ import {
   runSemgrepPreFilter,
   semgrepLangFor,
   semgrepRuleLanguages,
+  toSemgrepHit,
 } from "../src/semgrep.js";
 import { SEMGREP_VERSION } from "../src/semgrep-install.js";
 
@@ -94,28 +95,49 @@ describe("evaluatePreFilter with an unknown form", () => {
 describe("resolveSemgrepRule", () => {
   it("resolves a name to a .yml under the rules dir", () => {
     writeFileSync(join(dir, "http-endpoints.yml"), "rules: []");
-    expect(resolveSemgrepRule(dir, "http-endpoints")).toBe(join(dir, "http-endpoints.yml"));
+    expect(resolveSemgrepRule([dir], "http-endpoints")).toBe(join(dir, "http-endpoints.yml"));
   });
 
   it("returns null for a missing rule", () => {
-    expect(resolveSemgrepRule(dir, "nope")).toBeNull();
+    expect(resolveSemgrepRule([dir], "nope")).toBeNull();
   });
 
   it("resolves a .yaml rule too — the installer accepts both extensions", () => {
     writeFileSync(join(dir, "sql.yaml"), "rules: []");
-    expect(resolveSemgrepRule(dir, "sql")).toBe(join(dir, "sql.yaml"));
+    expect(resolveSemgrepRule([dir], "sql")).toBe(join(dir, "sql.yaml"));
   });
 
   it("prefers .yml when both exist, so resolution is deterministic", () => {
     writeFileSync(join(dir, "dup.yml"), "rules: []");
     writeFileSync(join(dir, "dup.yaml"), "rules: []");
-    expect(resolveSemgrepRule(dir, "dup")).toBe(join(dir, "dup.yml"));
+    expect(resolveSemgrepRule([dir], "dup")).toBe(join(dir, "dup.yml"));
   });
 
   it("cannot reach the Semgrep registry — a pack id is just a missing file", () => {
     // The schema already rejects most of these, but resolution is the
     // second guarantee: the value is always joined to the local dir.
-    expect(resolveSemgrepRule(dir, "p/typescript")).toBeNull();
+    expect(resolveSemgrepRule([dir], "p/typescript")).toBeNull();
+  });
+
+  it("searches the dirs in order, so a local rule shadows the catalog's", () => {
+    const local = join(dir, "local");
+    const catalog = join(dir, "catalog");
+    mkdirSync(local);
+    mkdirSync(catalog);
+    writeFileSync(join(local, "shared.yml"), "rules: []");
+    writeFileSync(join(catalog, "shared.yml"), "rules: []");
+    expect(resolveSemgrepRule([local, catalog], "shared")).toBe(join(local, "shared.yml"));
+  });
+
+  it("falls through to a later dir when an earlier one does not hold the rule", () => {
+    const local = join(dir, "local");
+    const catalog = join(dir, "catalog");
+    mkdirSync(local);
+    mkdirSync(catalog);
+    writeFileSync(join(catalog, "http-endpoints.yml"), "rules: []");
+    expect(resolveSemgrepRule([local, catalog], "http-endpoints")).toBe(
+      join(catalog, "http-endpoints.yml"),
+    );
   });
 
   it("derives the rules dir from the catalog dir", () => {
@@ -309,7 +331,7 @@ describe("runSemgrepPreFilter", () => {
     ({ slug: "t", where: { preFilter } }) as unknown as Parameters<typeof runSemgrepPreFilter>[1];
 
   it("does nothing and spawns nothing when the agent declares no semgrep rules", async () => {
-    const out = await runSemgrepPreFilter(dir, agentWith([{ regex: "x" }]), ["a.ts"], dir, 4);
+    const out = await runSemgrepPreFilter(dir, agentWith([{ regex: "x" }]), ["a.ts"], [dir], 4);
     expect(out.hits.size).toBe(0);
   });
 
@@ -320,7 +342,7 @@ describe("runSemgrepPreFilter", () => {
       dir,
       agentWith([{ semgrepRule: "absent" }]),
       ["a.ts"],
-      join(dir, "rules"),
+      [join(dir, "rules")],
       4,
       (m) => warnings.push(m),
     );
@@ -328,8 +350,26 @@ describe("runSemgrepPreFilter", () => {
     expect(warnings[0]).toMatch(/semgrep rule 'absent' not found/);
   });
 
+  it("names every rule dir it searched when the rule is missing", async () => {
+    const warnings: string[] = [];
+    const local = join(dir, "local");
+    const catalog = join(dir, "catalog");
+    mkdirSync(local);
+    mkdirSync(catalog);
+    await runSemgrepPreFilter(
+      dir,
+      agentWith([{ semgrepRule: "absent" }]),
+      ["a.ts"],
+      [local, catalog],
+      4,
+      (m) => warnings.push(m),
+    );
+    expect(warnings[0]).toContain(local);
+    expect(warnings[0]).toContain(catalog);
+  });
+
   it("returns nothing when there are no files to scan", async () => {
-    const out = await runSemgrepPreFilter(dir, agentWith([{ semgrepRule: "x" }]), [], dir, 4);
+    const out = await runSemgrepPreFilter(dir, agentWith([{ semgrepRule: "x" }]), [], [dir], 4);
     expect(out.hits.size).toBe(0);
   });
 });
@@ -350,7 +390,7 @@ describe("runSemgrepPreFilter degradation", () => {
     const agent = { slug: "t", where: { preFilter: [{ regex: "x" }] } } as unknown as Parameters<
       typeof runSemgrepPreFilter
     >[1];
-    const out = await runSemgrepPreFilter(dir, agent, ["a.ts"], dir, 4);
+    const out = await runSemgrepPreFilter(dir, agent, ["a.ts"], [dir], 4);
     expect(out.degraded).toBeNull();
     expect(out.hits.size).toBe(0);
   });
@@ -360,7 +400,7 @@ describe("runSemgrepPreFilter degradation", () => {
       dir,
       agentWithSemgrep(),
       ["a.ts"],
-      dir,
+      [dir],
       4,
       undefined,
       {
@@ -379,7 +419,7 @@ describe("runSemgrepPreFilter degradation", () => {
       dir,
       agentWithSemgrep(),
       ["a.ts"],
-      dir,
+      [dir],
       4,
       undefined,
       { AGENTGG_HOME: dir, PATH: "" },
@@ -398,7 +438,7 @@ describe("runSemgrepPreFilter degradation", () => {
       dir,
       agentWithSemgrep(),
       ["a.ts"],
-      dir,
+      [dir],
       4,
       undefined,
       { AGENTGG_HOME: dir, PATH: "" },
@@ -420,7 +460,7 @@ describe("runSemgrepPreFilter degradation", () => {
       dir,
       agentWithSemgrep(),
       ["a.ts"],
-      dir,
+      [dir],
       4,
       (m) => warnings.push(m),
       { AGENTGG_HOME: dir, PATH: "" },
@@ -436,7 +476,7 @@ describe("runSemgrepPreFilter degradation", () => {
       dir,
       agentWithSemgrep(),
       ["a.py"],
-      dir,
+      [dir],
       4,
       undefined,
       { AGENTGG_HOME: dir, PATH: "" },
@@ -449,5 +489,153 @@ describe("runSemgrepPreFilter degradation", () => {
     );
     expect(asked).toBe(0);
     expect(out.degraded).toBeNull();
+  });
+});
+
+describe("toSemgrepHit", () => {
+  // Shapes copied from a real `semgrep-core -json` run, including the
+  // two-element tuple the engine uses for a taint endpoint.
+  const taintTrace = {
+    taint_source: ["CliLoc", [{ start: { line: 7 } }, "req.query"]],
+    intermediate_vars: [
+      { location: { start: { line: 7 } }, content: "host" },
+      { location: { start: { line: 8 } }, content: "cmd" },
+    ],
+    taint_sink: ["CliLoc", [{ start: { line: 9 } }, "execSync(cmd)"]],
+  };
+
+  it("keeps a declared label and carries the rule message beside it", () => {
+    const hit = toSemgrepHit(
+      { check_id: "r", extra: { message: "Input reaches a shell sink." } },
+      9,
+      "Shell sink",
+    );
+    expect(hit.label).toBe("Shell sink");
+    expect(hit.message).toBe("Input reaches a shell sink.");
+  });
+
+  it("promotes the message to the label and does not repeat it", () => {
+    const hit = toSemgrepHit({ check_id: "r", extra: { message: "Input reaches a sink." } }, 9);
+    expect(hit.label).toBe("Input reaches a sink.");
+    expect(hit.message).toBeUndefined();
+  });
+
+  it("falls back to the check id when the rule has no message", () => {
+    expect(toSemgrepHit({ check_id: "local-exec" }, 3).label).toBe("local-exec");
+  });
+
+  it("collapses a multi-line message onto one line", () => {
+    const hit = toSemgrepHit({ extra: { message: "line one\n  line two" } }, 1, "l");
+    expect(hit.message).toBe("line one line two");
+  });
+
+  it("keeps allow-listed metadata and drops vendor bookkeeping", () => {
+    const hit = toSemgrepHit(
+      {
+        extra: {
+          metadata: {
+            cwe: "CWE-78",
+            confidence: "MEDIUM",
+            "semgrep.dev": { rule: { id: 1 } },
+            technology: ["express"],
+            license: "Commons Clause",
+          },
+        },
+      },
+      1,
+      "l",
+    );
+    expect(hit.metadata).toEqual({ cwe: "CWE-78", confidence: "MEDIUM" });
+  });
+
+  it("joins an allow-listed array value", () => {
+    const hit = toSemgrepHit({ extra: { metadata: { owasp: ["A01", "A03"] } } }, 1, "l");
+    expect(hit.metadata).toEqual({ owasp: "A01, A03" });
+  });
+
+  it("omits metadata entirely when no allow-listed key is present", () => {
+    const hit = toSemgrepHit({ extra: { metadata: { technology: ["express"] } } }, 1, "l");
+    expect(hit.metadata).toBeUndefined();
+  });
+
+  it("flattens a dataflow trace into source, intermediates, then sink", () => {
+    const hit = toSemgrepHit({ extra: { dataflow_trace: taintTrace } }, 9, "l");
+    expect(hit.taint).toEqual([
+      { kind: "source", line: 7, code: "req.query" },
+      { kind: "through", line: 7, code: "host" },
+      { kind: "through", line: 8, code: "cmd" },
+      { kind: "sink", line: 9, code: "execSync(cmd)" },
+    ]);
+  });
+
+  it("drops token fragments the engine reports as intermediate steps", () => {
+    // A real trace on a template literal emits a lone backtick as a step.
+    const hit = toSemgrepHit(
+      {
+        extra: {
+          dataflow_trace: {
+            ...taintTrace,
+            intermediate_vars: [
+              { location: { start: { line: 7 } }, content: "raw" },
+              { location: { start: { line: 8 } }, content: "`" },
+            ],
+          },
+        },
+      },
+      9,
+      "l",
+    );
+    expect(hit.taint?.map((s) => s.code)).toEqual(["req.query", "raw", "execSync(cmd)"]);
+  });
+
+  it("drops a repeated consecutive step", () => {
+    const hit = toSemgrepHit(
+      {
+        extra: {
+          dataflow_trace: {
+            ...taintTrace,
+            intermediate_vars: [
+              { location: { start: { line: 7 } }, content: "host" },
+              { location: { start: { line: 7 } }, content: "host" },
+            ],
+          },
+        },
+      },
+      9,
+      "l",
+    );
+    expect(hit.taint?.filter((s) => s.kind === "through")).toHaveLength(1);
+  });
+
+  it("caps a long intermediate chain", () => {
+    const many = Array.from({ length: 20 }, (_, i) => ({
+      location: { start: { line: i + 1 } },
+      content: `v${i}`,
+    }));
+    const hit = toSemgrepHit(
+      { extra: { dataflow_trace: { ...taintTrace, intermediate_vars: many } } },
+      9,
+      "l",
+    );
+    const through = hit.taint?.filter((s) => s.kind === "through") ?? [];
+    // 6 real steps plus one that names the omission, so a shortened path
+    // cannot be mistaken for the whole path.
+    expect(through).toHaveLength(7);
+    expect(through[6].code).toBe("(14 more steps)");
+  });
+
+  it("reports no taint when only one end of the path parses", () => {
+    // Half a path is worse than none: the model would read the surviving
+    // end as the whole story.
+    const hit = toSemgrepHit(
+      { extra: { dataflow_trace: { taint_source: taintTrace.taint_source } } },
+      9,
+      "l",
+    );
+    expect(hit.taint).toBeUndefined();
+  });
+
+  it("reports no taint for a pattern-mode result", () => {
+    expect(toSemgrepHit({ extra: { message: "m" } }, 9, "l").taint).toBeUndefined();
   });
 });

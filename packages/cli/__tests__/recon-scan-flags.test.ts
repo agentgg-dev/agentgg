@@ -280,6 +280,33 @@ describe("scan --no-summary", () => {
   });
 });
 
+describe("scan --semgrep-rules", () => {
+  it("rejects a path that is not a directory, before any LLM call", async () => {
+    suppressLogs();
+    const notADir = join(projectRoot, "server.js");
+    await expect(
+      runScan(
+        projectRoot,
+        { template: [agentPlain], output: outputDir, semgrepRules: [notADir] },
+        env,
+      ),
+    ).rejects.toThrow(/--semgrep-rules: not a directory/);
+    expect(detectorMock.runAgent).not.toHaveBeenCalled();
+  });
+
+  it("accepts a real directory and still scans", async () => {
+    suppressLogs();
+    const rulesDir = join(projectRoot, "my-rules");
+    mkdirSync(rulesDir, { recursive: true });
+    await runScan(
+      projectRoot,
+      { template: [agentPlain], output: outputDir, semgrepRules: [rulesDir] },
+      env,
+    );
+    expect(detectorMock.runAgent).toHaveBeenCalled();
+  });
+});
+
 describe("scan --max-files-per-agent", () => {
   it("caps the agent to N candidate files, reviewing only N and dropping the rest", async () => {
     suppressLogs();
