@@ -930,6 +930,7 @@ export async function runScan(
             if (isSemgrepSuppressed(lines, h.line)) continue;
             hits.push({
               line: h.line,
+              endLine: h.endLine,
               label: h.label,
               snippet: (lines[h.line - 1] ?? "").trim().slice(0, 200),
             });

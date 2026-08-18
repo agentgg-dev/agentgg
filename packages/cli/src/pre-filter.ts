@@ -10,6 +10,8 @@ import { type AgentPreFilterPattern, isRegexPreFilter } from "@agentgg/core";
  */
 export interface PreFilterHit {
   line: number;
+  /** Last line of a multi-line anchor. A regex hit is one line and omits it. */
+  endLine?: number;
   label: string;
   snippet: string;
 }

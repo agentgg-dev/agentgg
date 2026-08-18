@@ -59,6 +59,25 @@ describe("buildAgentPrompt", () => {
     expect(out).toContain("const x = 1;");
   });
 
+  it("renders a multi-line anchor as a range and a single-line one as a point", () => {
+    // A semgrep match spans the whole handler; a regex hit is one line.
+    const out = buildAgentPrompt({
+      agent: makeAgent(),
+      candidates: [
+        {
+          filePath: "src/api/users.ts",
+          content: "a",
+          hits: [
+            { line: 3, endLine: 10, label: "handler", snippet: "export async function GET(" },
+            { line: 12, label: "id param", snippet: "req.params.id" },
+          ],
+        },
+      ],
+    });
+    expect(out).toContain("- L3-10 [handler]:");
+    expect(out).toContain("- L12 [id param]:");
+  });
+
   it("describes the available tools (Read, Glob, and Grep)", () => {
     const out = buildAgentPrompt({ agent: makeAgent(), candidates });
     expect(out).toContain("Read, Glob, and Grep");

@@ -20,6 +20,8 @@ const execFileAsync = promisify(execFile);
  */
 export interface SemgrepHit {
   line: number;
+  /** Last line of the match. Unset when the engine reports no end. */
+  endLine?: number;
   label: string;
 }
 
@@ -192,6 +194,7 @@ function parseCoreJson(stdout: string): { results?: RawResult[] } {
 interface RawResult {
   check_id?: string;
   start?: { line?: number };
+  end?: { line?: number };
   extra?: { message?: string };
 }
 
@@ -382,7 +385,11 @@ export async function runSemgrepPreFilter(
     for (const r of results) {
       const line = r.start?.line;
       if (typeof line !== "number") continue;
-      bucket.push({ line, label: job.rule.label ?? r.extra?.message ?? r.check_id ?? "semgrep" });
+      bucket.push({
+        line,
+        endLine: r.end?.line,
+        label: job.rule.label ?? r.extra?.message ?? r.check_id ?? "semgrep",
+      });
     }
     if (bucket.length > 0) hits.set(job.relPath, bucket);
   });

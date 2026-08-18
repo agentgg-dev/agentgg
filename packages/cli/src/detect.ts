@@ -427,6 +427,8 @@ export interface ReconArgs {
  */
 export interface InvestigateHit {
   line: number;
+  /** Last line of a multi-line anchor. A regex hit is one line and omits it. */
+  endLine?: number;
   label: string;
   snippet: string;
 }
@@ -677,12 +679,19 @@ ${targetBlock}
 ${reporting}`;
 }
 
+/** `L12`, or `L12-18` when the match spans a range. */
+function anchorRange(h: InvestigateHit): string {
+  return h.endLine && h.endLine > h.line ? `L${h.line}-${h.endLine}` : `L${h.line}`;
+}
+
 function renderSeededFile(c: AgentCandidate, idx: number, total: number): string {
   const lang = languageFromPath(c.filePath);
   const visible = c.hits.filter((h) => h.label !== "(no preFilter)");
   const hitsBlock =
     visible.length > 0
-      ? visible.map((h) => `  - L${h.line} [${h.label}]: ${h.snippet || "(line)"}`).join("\n")
+      ? visible
+          .map((h) => `  - ${anchorRange(h)} [${h.label}]: ${h.snippet || "(line)"}`)
+          .join("\n")
       : "  (no specific anchors — review the whole file)";
   return `### Candidate ${idx} / ${total}: \`${c.filePath}\`
 
