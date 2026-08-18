@@ -248,3 +248,52 @@ describe("MultiProviderDetector", () => {
     expect(findings).toEqual([]);
   });
 });
+
+describe("buildAgentPrompt anchor enrichment", () => {
+  const taintHit = {
+    line: 9,
+    label: "Request input reaches a shell or eval sink with no escaping.",
+    snippet: "const out = execSync(cmd);",
+    metadata: { cwe: "CWE-78", confidence: "MEDIUM" },
+    taint: [
+      { kind: "source" as const, line: 7, code: "req.query" },
+      { kind: "through" as const, line: 8, code: "cmd" },
+      { kind: "sink" as const, line: 9, code: "execSync(cmd)" },
+    ],
+  };
+  const withHits = (hits: unknown[]) => [{ filePath: "src/api.ts", content: "a", hits } as never];
+
+  it("renders the taint path as source, intermediates, then sink", () => {
+    const out = buildAgentPrompt({ agent: makeAgent(), candidates: withHits([taintHit]) });
+    expect(out).toContain("taint: L7 `req.query` → L8 `cmd` → L9 `execSync(cmd)`");
+  });
+
+  it("renders allow-listed metadata beside the label", () => {
+    const out = buildAgentPrompt({ agent: makeAgent(), candidates: withHits([taintHit]) });
+    expect(out).toContain("(CWE-78, confidence MEDIUM):");
+  });
+
+  it("renders the rule message on its own line when it differs from the label", () => {
+    const out = buildAgentPrompt({
+      agent: makeAgent(),
+      candidates: withHits([{ ...taintHit, label: "Shell sink", message: "Input reaches exec." }]),
+    });
+    expect(out).toContain("[Shell sink]");
+    expect(out).toContain("why: Input reaches exec.");
+  });
+
+  it("explains the taint format once, in the prompt that carries a path", () => {
+    const out = buildAgentPrompt({ agent: makeAgent(), candidates: withHits([taintHit]) });
+    expect(out).toContain("shows the dataflow the scanner traced");
+  });
+
+  it("leaves a regex-only prompt byte-identical, legend included", () => {
+    // The other agents declare no semgrep rule. Their prompt must not move.
+    const plain = withHits([{ line: 4, label: "exec(", snippet: "exec(cmd)" }]);
+    const out = buildAgentPrompt({ agent: makeAgent(), candidates: plain });
+    expect(out).toContain("  - L4 [exec(]: exec(cmd)");
+    expect(out).not.toContain("taint:");
+    expect(out).not.toContain("why:");
+    expect(out).not.toContain("shows the dataflow the scanner traced");
+  });
+});

@@ -14,6 +14,26 @@ export interface PreFilterHit {
   endLine?: number;
   label: string;
   snippet: string;
+  /**
+   * The rule's own `message`, with metavariables already substituted by the
+   * engine. Only a semgrep hit has one; a regex has no author intent to carry.
+   * Omitted when it would repeat `label`.
+   */
+  message?: string;
+  /** Allow-listed `metadata:` keys from the rule, flattened for display. */
+  metadata?: Record<string, string>;
+  /** Taint-mode dataflow path, source first and sink last. */
+  taint?: TaintStep[];
+}
+
+/**
+ * One node on a taint path. The code text comes from the engine, not from
+ * the file, so it stays correct even when the step is a sub-expression.
+ */
+export interface TaintStep {
+  kind: "source" | "through" | "sink";
+  line: number;
+  code: string;
 }
 
 /**

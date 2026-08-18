@@ -3,6 +3,7 @@ import { extname } from "node:path";
 import type { Agent, CvssScore, Finding, ReconReport } from "@agentgg/core";
 import { z } from "zod";
 import type { AgentSpec } from "./agent-spec.js";
+import type { PreFilterHit, TaintStep } from "./pre-filter.js";
 import type { UsageMeter } from "./usage-meter.js";
 
 /**
@@ -425,13 +426,7 @@ export interface ReconArgs {
  * preFilter pattern matched. Surfaced to the LLM as anchor points so
  * it doesn't have to rediscover what was suspicious.
  */
-export interface InvestigateHit {
-  line: number;
-  /** Last line of a multi-line anchor. A regex hit is one line and omits it. */
-  endLine?: number;
-  label: string;
-  snippet: string;
-}
+export type InvestigateHit = PreFilterHit;
 
 /**
  * Wrap the recon agent's instructions with the runtime scope + structured
@@ -646,12 +641,23 @@ You have Read, Glob, and Grep. Your working directory is the
 repository root. Use them to read the files below, follow imports,
 chase callers, and confirm a finding before reporting it.`;
 
+  // Only prompts that actually carry a path get the legend, so every agent
+  // without a taint rule keeps byte-identical output.
+  const hasTaint = args.candidates.some((c) => c.hits.some((h) => h.taint && h.taint.length > 0));
+  const taintLegend = hasTaint
+    ? `
+
+An anchor with a \`taint:\` path shows the dataflow the scanner traced:
+the source, then each variable the value passes through, then the sink.
+Treat it as a lead to confirm in the code, not as a verdict.`
+    : "";
+
   const targetBlock = `## Candidate files
 
 These files were selected as your starting points (some carry scanner
 anchor lines). Investigate each one, and use your tools to pull in
 related files when judgment requires it. Do NOT re-discover the
-candidate set — the files below are already your targets.
+candidate set — the files below are already your targets.${taintLegend}
 
 ${args.candidates.map((c, i) => renderSeededFile(c, i + 1, args.candidates.length)).join("\n\n---\n\n")}`;
 
@@ -684,14 +690,41 @@ function anchorRange(h: InvestigateHit): string {
   return h.endLine && h.endLine > h.line ? `L${h.line}-${h.endLine}` : `L${h.line}`;
 }
 
-function renderSeededFile(c: AgentCandidate, idx: number, total: number): string {
+/** ` (CWE-79, confidence MEDIUM)`, or empty when the rule declared none. */
+function metadataSuffix(h: InvestigateHit): string {
+  if (!h.metadata) return "";
+  // A bare CWE or OWASP id reads as itself. The rest need their key to mean
+  // anything, so "MEDIUM" alone becomes "confidence MEDIUM".
+  const parts = Object.entries(h.metadata).map(([k, v]) =>
+    k === "cwe" || k === "owasp" ? v : `${k} ${v}`,
+  );
+  return parts.length > 0 ? ` (${parts.join(", ")})` : "";
+}
+
+/** ``L24 `req.query` → L25 `res.send(...)` `` */
+function taintPath(steps: ReadonlyArray<TaintStep>): string {
+  return steps.map((s) => `L${s.line} \`${s.code}\``).join(" → ");
+}
+
+/**
+ * One anchor. The first line is the position; the lines under it are what
+ * the engine already knew and the model would otherwise re-derive by reading.
+ */
+function renderHit(h: InvestigateHit): string {
+  const lines = [
+    `  - ${anchorRange(h)} [${h.label}]${metadataSuffix(h)}: ${h.snippet || "(line)"}`,
+  ];
+  if (h.message) lines.push(`    why: ${h.message}`);
+  if (h.taint && h.taint.length > 0) lines.push(`    taint: ${taintPath(h.taint)}`);
+  return lines.join("\n");
+}
+
+export function renderSeededFile(c: AgentCandidate, idx: number, total: number): string {
   const lang = languageFromPath(c.filePath);
   const visible = c.hits.filter((h) => h.label !== "(no preFilter)");
   const hitsBlock =
     visible.length > 0
-      ? visible
-          .map((h) => `  - ${anchorRange(h)} [${h.label}]: ${h.snippet || "(line)"}`)
-          .join("\n")
+      ? visible.map(renderHit).join("\n")
       : "  (no specific anchors — review the whole file)";
   return `### Candidate ${idx} / ${total}: \`${c.filePath}\`
 
