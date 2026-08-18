@@ -51,6 +51,24 @@ function fakeWheel(binaryBody: string): Buffer {
   return zip.toBuffer();
 }
 
+/**
+ * A wheel shaped like the Linux build: the loader libraries sit one level
+ * down in `bin/libs/`, and the binary's RPATH is `$ORIGIN/libs`. The Windows
+ * wheel instead puts its DLLs directly in `bin/`, which is why a flattening
+ * extractor passes there and leaves Linux with a binary that exits 127.
+ */
+function fakeWheelWithLibs(): Buffer {
+  const zip = new AdmZip();
+  const name = process.platform === "win32" ? "semgrep-core.exe" : "semgrep-core";
+  const base = `semgrep-${SEMGREP_VERSION}.data/purelib/semgrep/bin`;
+  zip.addFile(`${base}/${name}`, Buffer.from("BINARY"));
+  zip.addFile(`${base}/__init__.py`, Buffer.from("# ships beside the binary"));
+  zip.addFile(`${base}/libs/libtree-sitter.so.0.22`, Buffer.from("TREESITTER"));
+  zip.addFile(`${base}/libs/libstdc++.so.6`, Buffer.from("STDCXX"));
+  zip.addFile("semgrep/__init__.py", Buffer.from("# unrelated, must not be extracted"));
+  return zip.toBuffer();
+}
+
 function sha256(buf: Buffer): string {
   return createHash("sha256").update(buf).digest("hex");
 }
@@ -99,6 +117,20 @@ describe("installSemgrepCore", () => {
     expect(existsSync(join(home, "semgrep", SEMGREP_VERSION, "semgrep", "__init__.py"))).toBe(
       false,
     );
+  });
+
+  it("keeps the loader libraries in the libs/ dir the binary's RPATH names", async () => {
+    const wheel = fakeWheelWithLibs();
+    const entry: WheelEntry = { filename: "fake.whl", sha256: sha256(wheel) };
+    const result = await installSemgrepCore(env, { fetchImpl: fakeFetch(wheel, entry), entry });
+    expect(result).toEqual({ ok: true, path: getSemgrepCorePath(SEMGREP_VERSION, env) });
+    const root = join(home, "semgrep", SEMGREP_VERSION);
+    expect(readFileSync(join(root, "libs", "libtree-sitter.so.0.22"), "utf8")).toBe("TREESITTER");
+    expect(readFileSync(join(root, "libs", "libstdc++.so.6"), "utf8")).toBe("STDCXX");
+    // Files beside the binary stay beside it: that is the Windows DLL layout.
+    expect(readFileSync(join(root, "__init__.py"), "utf8")).toBe("# ships beside the binary");
+    // Still nothing from outside `semgrep/bin/`.
+    expect(existsSync(join(root, "semgrep", "__init__.py"))).toBe(false);
   });
 
   it("writes a version marker so a later call can short-circuit", async () => {

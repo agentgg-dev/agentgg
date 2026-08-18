@@ -199,6 +199,29 @@ interface RawResult {
 }
 
 /**
+ * What `execFile` rejects with. `code` is the errno string when the spawn
+ * itself failed and the numeric exit status when the process ran and exited,
+ * so the two cases are told apart by type, not by value.
+ */
+type ExecFailure = Omit<NodeJS.ErrnoException, "code"> & {
+  code?: string | number;
+  killed?: boolean;
+  stdout?: string;
+  stderr?: string;
+};
+
+/** One line naming why a `semgrep-core` call failed, for the warning text. */
+function describeExecError(err: ExecFailure): string {
+  // The loader's reason ("error while loading shared libraries: …") lands on
+  // stderr and is the only thing that identifies a packaging fault, so it wins
+  // over the exit status.
+  const first = (err.stderr ?? "").split(/\r?\n/).find((l) => l.trim());
+  if (first) return first.trim().slice(0, 200);
+  if (err.code !== undefined) return `exit ${err.code}`;
+  return (err.message ?? "unknown error").split(/\r?\n/)[0].slice(0, 200);
+}
+
+/**
  * Locate the analysis binary. `AGENTGG_SEMGREP_CORE` wins so a developer
  * can point at the copy inside a pip install; otherwise we take
  * `semgrep-core` from PATH (and, once packaged, the bundled build).
@@ -365,12 +388,21 @@ export async function runSemgrepPreFilter(
       );
       stdout = out.stdout;
     } catch (err) {
-      // A binary that will not start (missing, wrong glibc, not executable)
-      // fails the same way for every job. Record it once and stop the rest.
-      const code = (err as NodeJS.ErrnoException).code;
-      if (code === "ENOENT" || code === "EACCES") {
+      const e = err as ExecFailure;
+      // A binary that will not start (missing, not executable, wrong glibc, or
+      // unable to load its shared libraries) fails the same way for every job
+      // and prints no JSON. Record it once and stop the rest. Anything that did
+      // print JSON started fine, so only that one file is skipped. Either way
+      // this warns: a silent zero here reads as "semgrep found nothing".
+      if (e.killed || e.code === "ETIMEDOUT") {
+        onWarn?.(`${agent.slug}: semgrep-core timed out on ${job.relPath}`);
+        return;
+      }
+      if (!e.stdout?.includes("{")) {
         startFailure = "binary failed to start";
-        onWarn?.(`${agent.slug}: semgrep-core would not start (${bin})`);
+        onWarn?.(`${agent.slug}: semgrep-core would not start (${bin}): ${describeExecError(e)}`);
+      } else {
+        onWarn?.(`${agent.slug}: semgrep-core failed on ${job.relPath}: ${describeExecError(e)}`);
       }
       return;
     }

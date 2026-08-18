@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { getSemgrepCorePath, getSemgrepDir } from "@agentgg/core";
 import AdmZip from "adm-zip";
 
@@ -129,21 +129,29 @@ export async function installSemgrepCore(
     const zip = new AdmZip(bytes);
     // The binary sits under a wheel data prefix, e.g.
     // `semgrep-1.173.0.data/purelib/semgrep/bin/semgrep-core.exe`, so match on
-    // the tail rather than the whole path.
-    const binEntries = zip
-      .getEntries()
-      .filter((e) => !e.isDirectory && /(^|\/)semgrep\/bin\/[^/]+$/.test(e.entryName));
-    const core = binEntries.find((e) => /\/semgrep-core(\.exe)?$/.test(`/${e.entryName}`));
+    // the tail rather than the whole path. Each entry keeps its path relative
+    // to `bin/`, because the two platforms nest their loader libraries
+    // differently and both layouts have to survive the copy.
+    const binEntries: Array<{ rel: string; entry: AdmZip.IZipEntry }> = [];
+    for (const entry of zip.getEntries()) {
+      if (entry.isDirectory) continue;
+      const m = /(?:^|\/)semgrep\/bin\/(.+)$/.exec(entry.entryName.replace(/\\/g, "/"));
+      // A pinned, digest-verified wheel cannot carry a traversing path, but
+      // this never writes outside the cache even if that assumption breaks.
+      if (m && !m[1].split("/").includes("..")) binEntries.push({ rel: m[1], entry });
+    }
+    const core = binEntries.find((e) => /^semgrep-core(\.exe)?$/.test(e.rel));
     if (!core) return { ok: false, reason: "verification failed" };
 
-    // Take the whole bin/ directory, not just the executable. On Windows
-    // semgrep-core loads sibling DLLs (libcrypto, libcurl, libgmp, …) and will
-    // not start without them.
+    // Take the whole bin/ tree, not just the executable. Windows loads sibling
+    // DLLs (libcrypto, libcurl, libgmp, …) from `bin/` itself; Linux and macOS
+    // load shared objects through an RPATH of `$ORIGIN/libs`, so `bin/libs/`
+    // has to stay a subdirectory. Flattening it makes the binary exit 127.
     mkdirSync(dir, { recursive: true });
     for (const e of binEntries) {
-      const name = e.entryName.split("/").pop();
-      if (!name) continue;
-      writeFileSync(join(dir, name), e.getData());
+      const dest = join(dir, e.rel);
+      mkdirSync(dirname(dest), { recursive: true });
+      writeFileSync(dest, e.entry.getData());
     }
     if (process.platform !== "win32") chmodSync(target, 0o755);
     writeFileSync(

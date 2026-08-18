@@ -411,6 +411,25 @@ describe("runSemgrepPreFilter degradation", () => {
     expect(info).toEqual([]);
   });
 
+  it("records a start failure when the binary exits non-zero", async () => {
+    const warnings: string[] = [];
+    // A binary that cannot load its shared libraries exits 127, and Node
+    // reports no `err.code` for that. Standing in for it: `node -rules …`
+    // rejects the flags and exits non-zero the same way.
+    const out = await runSemgrepPreFilter(
+      dir,
+      agentWithSemgrep(),
+      ["a.ts"],
+      dir,
+      4,
+      (m) => warnings.push(m),
+      { AGENTGG_HOME: dir, PATH: "" },
+      { ensure: async () => ({ ok: true, bin: process.execPath, source: "cache" }) },
+    );
+    expect(out.degraded).toBe("binary failed to start");
+    expect(warnings.some((m) => m.includes("would not start"))).toBe(true);
+  });
+
   it("never resolves the binary when no file matches the rule's language", async () => {
     let asked = 0;
     const out = await runSemgrepPreFilter(
