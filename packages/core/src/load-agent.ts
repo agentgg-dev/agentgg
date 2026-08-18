@@ -179,7 +179,7 @@ function isSkippedDir(name: string): boolean {
   return name === ".git" || name === ".github" || name === "node_modules";
 }
 
-function isReservedDoc(name: string): boolean {
+export function isReservedDoc(name: string): boolean {
   const base = basename(name).toUpperCase();
   return [
     "README.MD",

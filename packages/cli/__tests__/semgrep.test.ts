@@ -101,6 +101,17 @@ describe("resolveSemgrepRule", () => {
     expect(resolveSemgrepRule(dir, "nope")).toBeNull();
   });
 
+  it("resolves a .yaml rule too — the installer accepts both extensions", () => {
+    writeFileSync(join(dir, "sql.yaml"), "rules: []");
+    expect(resolveSemgrepRule(dir, "sql")).toBe(join(dir, "sql.yaml"));
+  });
+
+  it("prefers .yml when both exist, so resolution is deterministic", () => {
+    writeFileSync(join(dir, "dup.yml"), "rules: []");
+    writeFileSync(join(dir, "dup.yaml"), "rules: []");
+    expect(resolveSemgrepRule(dir, "dup")).toBe(join(dir, "dup.yml"));
+  });
+
   it("cannot reach the Semgrep registry — a pack id is just a missing file", () => {
     // The schema already rejects most of these, but resolution is the
     // second guarantee: the value is always joined to the local dir.

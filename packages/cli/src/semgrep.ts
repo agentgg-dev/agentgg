@@ -156,8 +156,14 @@ export function semgrepRuleLanguages(source: string): Set<string> | null {
  * when the file is absent; the caller warns rather than failing the scan.
  */
 export function resolveSemgrepRule(rulesDir: string, name: string): string | null {
-  const path = join(rulesDir, `${name}.yml`);
-  return existsSync(path) ? path : null;
+  // Both extensions: semgrep treats them interchangeably, and the installer
+  // accepts both, so resolving only `.yml` would put a `.yaml` rule on disk
+  // and then report it missing at scan time.
+  for (const ext of [".yml", ".yaml"]) {
+    const path = join(rulesDir, `${name}${ext}`);
+    if (existsSync(path)) return path;
+  }
+  return null;
 }
 
 /** Path to the rules dir inside a downloaded agent catalog. */

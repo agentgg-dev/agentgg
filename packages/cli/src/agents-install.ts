@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { getOfficialAgentsDir, getOfficialAgentsVersionPath } from "@agentgg/core";
+import { getOfficialAgentsDir, getOfficialAgentsVersionPath, isReservedDoc } from "@agentgg/core";
 import AdmZip from "adm-zip";
 
 const AGENTS_REPO = "agentgg-dev/agentgg-agents";
@@ -20,16 +20,62 @@ interface VersionInfo {
 }
 
 /**
- * Count agent files on disk. Only files in a category subdirectory count
- * — top-level `.md` files (README.md etc.) ship in the same install but
- * aren't agents.
+ * What the catalog ships, keyed on the path relative to the catalog root:
+ * agent files anywhere, plus semgrep rule files under `semgrep-rules/`.
+ * Everything else in the repo (workflows, the logo, contributors.json) is
+ * not catalog content.
+ *
+ * Rules are NOT `.md`, so an install that only took `.md` files left every
+ * `semgrepRule` preFilter pointing at a file that was never written — the
+ * agent then degraded to regex-only with nothing but a warning to say why.
  */
-function countAgentFiles(dir: string, depth = 0): number {
+export function isCatalogFile(relativePath: string): boolean {
+  const p = relativePath.replace(/\\/g, "/");
+  // Nothing under a dot directory. `.github/PULL_REQUEST_TEMPLATE.md` is a
+  // `.md` in a subdirectory, so without this it installs into the user's
+  // catalog and inflates the reported agent count by one.
+  if (p.split("/").some((seg) => seg.startsWith("."))) return false;
+  if (p.endsWith(".md")) return true;
+  return p.startsWith("semgrep-rules/") && (p.endsWith(".yml") || p.endsWith(".yaml"));
+}
+
+/**
+ * Does this path count as an agent? The single rule shared by both places
+ * that report a count — the extract loop and the cached-path walk below.
+ * They used to carry separate rules and disagreed by one on any machine
+ * with a stale `.github/*.md` left by an older extractor.
+ *
+ * Top-level `.md` files (README.md etc.) ship in the same install but are
+ * not agents, hence the subdirectory requirement.
+ */
+export function isAgentFile(relativePath: string): boolean {
+  const p = relativePath.replace(/\\/g, "/");
+  if (!isCatalogFile(p) || !p.endsWith(".md") || !p.includes("/")) return false;
+  // The loader skips reserved docs at every depth, not just the top level, so
+  // a future `agents/README.md` would count here and never load. Shares the
+  // loader's list rather than copying it — a second copy would drift.
+  return !isReservedDoc(p);
+}
+
+/**
+ * Broader than `isCatalogFile` on purpose. Removal has to clear anything an
+ * *older* CLI installed, not just what this one would write — otherwise a
+ * file that is no longer catalog content (a `.github/*.md` from before the
+ * dot-directory filter) can never be cleaned up, not even by `--force`.
+ */
+function isRemovableCatalogFile(relativePath: string): boolean {
+  const p = relativePath.replace(/\\/g, "/");
+  return p.endsWith(".md") || isCatalogFile(p);
+}
+
+/** Count agent files on disk, using the same rule as the extract loop. */
+function countAgentFiles(dir: string, rel = ""): number {
   let n = 0;
   for (const f of readdirSync(dir)) {
     const abs = join(dir, f);
-    if (statSync(abs).isDirectory()) n += countAgentFiles(abs, depth + 1);
-    else if (depth > 0 && f.endsWith(".md")) n++;
+    const relPath = rel ? `${rel}/${f}` : f;
+    if (statSync(abs).isDirectory()) n += countAgentFiles(abs, relPath);
+    else if (isAgentFile(relPath)) n++;
   }
   return n;
 }
@@ -98,18 +144,26 @@ export async function installOfficialAgents(
 
   mkdirSync(officialDir, { recursive: true });
 
-  // Remove all existing .md files (recursively) before extracting the fresh pack
-  function removeAgentFiles(dir: string): void {
+  // Clear the previous catalog before extracting the fresh pack. Tracks the
+  // path relative to the catalog root so it removes stale semgrep rules too —
+  // otherwise a rule deleted upstream would linger and keep resolving.
+  function removeCatalogFiles(dir: string, rel = ""): void {
     for (const f of readdirSync(dir)) {
       const abs = join(dir, f);
+      const relPath = rel ? `${rel}/${f}` : f;
       if (statSync(abs).isDirectory()) {
-        removeAgentFiles(abs);
-      } else if (f.endsWith(".md")) {
+        removeCatalogFiles(abs, relPath);
+        // Drop the directory once emptied, so a category deleted upstream
+        // doesn't linger. It matters in one case: with `agents/` absent, a
+        // stale empty `base/` makes `defaultAgentDirs` return a directory
+        // with no agents, and the scan hard-fails instead of falling back.
+        if (readdirSync(abs).length === 0) rmSync(abs, { recursive: true });
+      } else if (isRemovableCatalogFile(relPath)) {
         rmSync(abs);
       }
     }
   }
-  removeAgentFiles(officialDir);
+  removeCatalogFiles(officialDir);
 
   // Extract .md files, preserving directory structure but stripping the
   // top-level archive prefix (e.g. "agentgg-agents-main/default/sql-injection.md"
@@ -122,18 +176,16 @@ export async function installOfficialAgents(
 
   let count = 0;
   for (const entry of entries) {
-    if (entry.isDirectory || !entry.name.endsWith(".md")) continue;
+    if (entry.isDirectory) continue;
 
     // Strip "agentgg-agents-main/" prefix, keep the rest of the path
     const relative = topPrefix ? entry.entryName.slice(topPrefix.length + 1) : entry.entryName;
-    if (!relative) continue;
+    if (!relative || !isCatalogFile(relative)) continue;
 
     const destPath = join(officialDir, relative);
     mkdirSync(dirname(destPath), { recursive: true });
     writeFileSync(destPath, entry.getData());
-    // Only count files in a category subdir as agents. Top-level files
-    // like README.md ship in the same zip but aren't agents.
-    if (relative.includes("/")) count++;
+    if (isAgentFile(relative)) count++;
   }
 
   writeFileSync(
