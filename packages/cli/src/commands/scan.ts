@@ -29,6 +29,7 @@ import {
 import type { Command } from "commander";
 import { defaultAgentDirs, loadAllAgents } from "../agent-catalog.js";
 import { installOfficialAgents } from "../agents-install.js";
+import { anchorLoad, packBatches, shardCandidate, shardKeyOf } from "../anchors.js";
 import { runConcurrent } from "../concurrent.js";
 import { resolveDedup } from "../deduper.js";
 import { loadDefaultScope } from "../default-scope.js";
@@ -131,6 +132,20 @@ interface ScanOpts {
   maxTurns?: number;
   /** Candidate files per agent batch. Overrides the agent's `where.maxFilesPerBatch`. */
   maxFilesPerBatch?: number;
+  /**
+   * Cap the anchor locations packed into one batch. Sibling of
+   * `maxFilesPerBatch`: same container, different unit. Both are ceilings,
+   * and whichever binds first closes the batch. A single file carrying more
+   * anchors than this is split into shards of at most this many, and each
+   * prompt anchors on a contiguous line range — the guard against one rule
+   * matching 500 places in one file and all of them landing in one prompt.
+   * Each shard still carries the whole file as context, so an N-shard file
+   * sends its content N times. Source-agnostic: a regex anchor and a semgrep
+   * anchor count the same, and anchors sharing a line count once.
+   * Defaults to 150 when unset (both CLI and programmatic callers).
+   * `--no-max-anchors-per-batch` sets this to `false`, disabling the cap.
+   */
+  maxAnchorsPerBatch?: number | false;
   /**
    * Cap the candidate files reviewed per agent: when an agent's `where`
    * resolves to more than this many candidates (after prefilter), keep the
@@ -594,15 +609,38 @@ export async function runScan(
     const byAgent: Record<string, number> = {};
     const touchedFiles = new Set<string>();
 
+    // Detection-phase accumulator, keyed by finding id. A file split across
+    // shards can have one shard resumed from disk and another re-run, and the
+    // re-run may re-report what the lift already added — same inputs, same id.
+    // Adding by id keeps that one finding, so the counts, the validator, and
+    // the scorer each see it once. Returns how many were actually new.
+    // Detection only: the dedupe phase reassigns `findings` afterwards.
+    const seenFindingIds = new Set<string>();
+    function addFindings(incoming: readonly Finding[]): number {
+      let added = 0;
+      for (const f of incoming) {
+        if (seenFindingIds.has(f.id)) continue;
+        seenFindingIds.add(f.id);
+        findings.push(f);
+        added++;
+      }
+      return added;
+    }
+
     // Persist findings for one (file, agent) pair into the per-project
-    // FileRecord. Called from both the file-mode loop and the hunt
-    // post-processing step. Merges by finding id so re-runs of the same
-    // agent on the same file replace (not duplicate) prior findings.
+    // FileRecord. Merges by finding id so re-runs of the same agent on the
+    // same file replace (not duplicate) prior findings.
+    // `shardKey` identifies the slice of the file this pass actually
+    // analyzed (see anchors.ts). Every candidate persist supplies one, even
+    // for a file small enough to run whole. It is omitted only when the model
+    // reported a finding in a file that was not a candidate at all, where
+    // there is no shard to record.
     function persistDetection(
       relPath: string,
       agent: Agent,
       fileContent: string,
       newFindings: Finding[],
+      shardKey?: string,
     ): void {
       const normalized = relPath.replace(/\\/g, "/");
       let record: FileRecord | null;
@@ -630,7 +668,25 @@ export async function runScan(
       // analyzed this pass — both are the keys per-file resume checks,
       // and refreshing keeps a re-analyzed (changed) file from looking
       // stale on the next resume.
-      record.contentHash = hashContent(fileContent);
+      const nextContentHash = hashContent(fileContent);
+      // Either stamp changing means every shard re-runs against new inputs,
+      // so the keys recorded under the old ones are dead. Drop them here
+      // rather than let a stale key coincide with a new cut and skip a shard.
+      //
+      // Empty, never `undefined`: absent means "analyzed whole" to resume, and
+      // this branch also covers the write for a file the model reached on its
+      // own. That file was never reviewed as a candidate, so it must not come
+      // out of here looking complete. Only a record written before the cap
+      // existed is allowed to have no `shards` field at all.
+      if (record.contentHash !== nextContentHash || record.reconHash !== recon.reconHash) {
+        record.shards = [];
+      }
+      if (shardKey !== undefined) {
+        const done = record.shards ?? [];
+        if (!done.includes(shardKey)) done.push(shardKey);
+        record.shards = done;
+      }
+      record.contentHash = nextContentHash;
       record.reconHash = recon.reconHash;
       record.analysisHistory.push({
         runId: runMeta.runId,
@@ -842,6 +898,22 @@ export async function runScan(
       opts.maxFilesPerAgent === false ? Number.POSITIVE_INFINITY : (opts.maxFilesPerAgent ?? 300);
     const maxBatches =
       opts.maxBatches === false ? Number.POSITIVE_INFINITY : (opts.maxBatches ?? 250);
+    // Anchor ceiling per batch. Deliberately well above a normal batch's load
+    // so it fires on the pathological file (one rule matching hundreds of
+    // places) instead of quietly reshaping every scan's batching — smaller
+    // batches mean more of them, and more batches run into `maxBatches`.
+    // 0, a negative, and a non-numeric value all resolve to "no cap", matching
+    // the `> 0` sentinel the sibling caps use. Normalizing here rather than at
+    // each use keeps the splitter and the packer from reading one value two
+    // ways — 0 would otherwise disable the split but close a batch per file.
+    const rawMaxAnchors =
+      opts.maxAnchorsPerBatch === false
+        ? Number.POSITIVE_INFINITY
+        : (opts.maxAnchorsPerBatch ?? 150);
+    const maxAnchorsPerBatch =
+      Number.isFinite(rawMaxAnchors) && rawMaxAnchors > 0
+        ? rawMaxAnchors
+        : Number.POSITIVE_INFINITY;
     let cachedAgentCount = 0;
     // Agents whose candidate list was truncated by `--max-files-per-agent`.
     let cappedAgentCount = 0;
@@ -873,8 +945,7 @@ export async function runScan(
           const cached = getAllRecords()
             .flatMap((r) => r.findings)
             .filter((f) => f.agentSlug === agent.slug);
-          findings.push(...cached);
-          byAgent[agent.slug] = (byAgent[agent.slug] ?? 0) + cached.length;
+          byAgent[agent.slug] = (byAgent[agent.slug] ?? 0) + addFindings(cached);
           for (const f of cached) {
             if (f.filePath && f.filePath !== "(unknown)") touchedFiles.add(f.filePath);
           }
@@ -1010,42 +1081,75 @@ export async function runScan(
         continue;
       }
 
+      // `--max-anchors-per-batch`: split a file carrying more anchor
+      // locations than the cap into shards, one prompt each, anchored on a
+      // contiguous line range. Deliberately placed AFTER the per-agent
+      // file cap (so that cap still counts files, not shards) and AFTER
+      // filesReviewed/hitCount (so both stay file-level), but BEFORE resume,
+      // so each shard is resumed on its own key.
+      const shardedCandidates = candidates.flatMap((c) => shardCandidate(c, maxAnchorsPerBatch));
+      if (shardedCandidates.length > candidates.length) {
+        const splitFiles = candidates.filter((c) => anchorLoad(c) > maxAnchorsPerBatch).length;
+        console.log(
+          `  ${agent.slug}: ${splitFiles} anchor-dense file(s) split into ${shardedCandidates.length - candidates.length + splitFiles} prompt(s) (--max-anchors-per-batch ${maxAnchorsPerBatch})`,
+        );
+      }
+
       // Per-file resume: within an agent interrupted before its
       // completion sidecar was written, skip candidate files already
       // analyzed under the SAME content AND recon brief, lifting their
       // saved findings from disk. A changed file (contentHash) or changed
       // brief (reconHash) re-runs that file; --rescan re-runs everything.
-      let pending = candidates;
+      //
+      // Shards make this per-shard, not per-file: the content and recon
+      // stamps are refreshed by whichever shard finishes first, so a file
+      // also has to show this shard's key in `record.shards` to count as
+      // done. A record with no `shards` field predates the anchor cap and
+      // was analyzed whole, so it counts as done for every shard.
+      let pending = shardedCandidates;
       if (!opts.rescan) {
         const todo: AgentCandidate[] = [];
+        // A file's findings are stored per file, not per shard, so they are
+        // lifted at most once even when several of its shards resume.
+        const lifted = new Set<string>();
         let resumedFiles = 0;
+        let resumedShards = 0;
         let resumedFindings = 0;
-        for (const c of candidates) {
+        for (const c of shardedCandidates) {
+          const normalized = c.filePath.replace(/\\/g, "/");
           let rec: FileRecord | null = null;
           try {
-            rec = readFileRecord(outDir, agent.slug, c.filePath.replace(/\\/g, "/"));
+            rec = readFileRecord(outDir, agent.slug, normalized);
           } catch {
             rec = null;
           }
           const reusable =
             rec !== null &&
             rec.contentHash === hashContent(c.content) &&
-            rec.reconHash === recon.reconHash;
+            rec.reconHash === recon.reconHash &&
+            (rec.shards === undefined || rec.shards.includes(shardKeyOf(c)));
           if (reusable && rec) {
-            findings.push(...rec.findings);
-            byAgent[agent.slug] = (byAgent[agent.slug] ?? 0) + rec.findings.length;
-            for (const f of rec.findings) {
-              if (f.filePath && f.filePath !== "(unknown)") touchedFiles.add(f.filePath);
+            resumedShards++;
+            if (!lifted.has(normalized)) {
+              lifted.add(normalized);
+              byAgent[agent.slug] = (byAgent[agent.slug] ?? 0) + addFindings(rec.findings);
+              for (const f of rec.findings) {
+                if (f.filePath && f.filePath !== "(unknown)") touchedFiles.add(f.filePath);
+              }
+              resumedFiles++;
+              resumedFindings += rec.findings.length;
             }
-            resumedFiles++;
-            resumedFindings += rec.findings.length;
             continue;
           }
           todo.push(c);
         }
-        if (resumedFiles > 0) {
+        if (resumedShards > 0) {
+          const shardNote =
+            shardedCandidates.length > candidates.length
+              ? ` (${resumedShards}/${shardedCandidates.length} prompt(s))`
+              : "";
           console.log(
-            `  ${agent.slug}: resuming — ${resumedFiles}/${candidates.length} file(s) already analyzed (${resumedFindings} finding(s)) reused`,
+            `  ${agent.slug}: resuming — ${resumedFiles}/${candidates.length} file(s) already analyzed${shardNote} (${resumedFindings} finding(s)) reused`,
           );
         }
         pending = todo;
@@ -1077,21 +1181,20 @@ export async function runScan(
       const maxTurns = opts.maxTurns ?? agent.where.maxTurnsPerBatch;
       const batchSize = Math.max(1, opts.maxFilesPerBatch ?? agent.where.maxFilesPerBatch);
 
-      // Candidates are reviewed in batches of `batchSize`. The batches are
+      // Candidates are packed into batches under two ceilings: `batchSize`
+      // entries and `maxAnchorsPerBatch` anchor locations. The batches are
       // not run here — they're enqueued into the shared pool drained in
       // Phase 2, so they interleave with every other agent's batches.
-      const batches: AgentCandidate[][] = [];
-      for (let i = 0; i < pending.length; i += batchSize) {
-        batches.push(pending.slice(i, i + batchSize));
-      }
+      const batches = packBatches(pending, batchSize, maxAnchorsPerBatch);
 
       // Only agents that declare a semgrep rule get the attribution suffix, so
       // the other 159 agents' output is unchanged.
       const anchorNote = declaresSemgrep
         ? `, ${preFilterHits.regex + preFilterHits.semgrep} anchor(s) (semgrep ${preFilterHits.semgrep}, regex ${preFilterHits.regex})`
         : "";
+      const pendingFiles = new Set(pending.map((c) => c.filePath)).size;
       console.log(
-        `  ${agent.slug}: ${pending.length} candidate file(s)${anchorNote} → ${batches.length} batch(es) of up to ${batchSize}`,
+        `  ${agent.slug}: ${pendingFiles} candidate file(s)${anchorNote} → ${batches.length} batch(es) of up to ${batchSize}`,
       );
 
       runtimeBySlug.set(agent.slug, {
@@ -1168,8 +1271,7 @@ export async function runScan(
           }
           return false;
         });
-        findings.push(...valid);
-        byAgent[agent.slug] = (byAgent[agent.slug] ?? 0) + valid.length;
+        byAgent[agent.slug] = (byAgent[agent.slug] ?? 0) + addFindings(valid);
         for (const f of valid) {
           if (f.filePath && f.filePath !== "(unknown)") touchedFiles.add(f.filePath);
         }
@@ -1197,13 +1299,21 @@ export async function runScan(
               continue;
             }
           }
-          persistDetection(relPath, agent, content, group);
+          // A file the model reached on its own (not in this batch) has no
+          // shard to record, so it passes no key.
+          persistDetection(
+            relPath,
+            agent,
+            content,
+            group,
+            inBatch ? shardKeyOf(inBatch) : undefined,
+          );
         }
         // Stamp an empty record for candidate files with no findings so
         // `status` reports candidate files with no findings as analyzed.
         for (const c of batch) {
           if (byFile.has(c.filePath)) continue;
-          persistDetection(c.filePath, agent, c.content, []);
+          persistDetection(c.filePath, agent, c.content, [], shardKeyOf(c));
         }
       } catch (err) {
         rt.failed = true;
@@ -1915,6 +2025,13 @@ export function registerScanCommand(program: Command): void {
       "Walker mode: candidate files packed into one investigation batch. Overrides the agent's `maxFilesPerBatch`. Default 5. Different from --concurrency: batch size = files per LLM session; --concurrency = sessions in parallel.",
       (v) => parseInt(v, 10),
     )
+    .option(
+      "--max-anchors-per-batch <n>",
+      "Cap the scanner anchor lines packed into one investigation batch. Sibling of --max-files-per-batch: same batch, different unit. Both are ceilings and whichever binds first closes the batch. A single file with more anchors than <n> is split into shards of at most <n>, and each prompt anchors on a contiguous line range — so one rule matching 500 places in one file no longer arrives in a single prompt. Each shard still carries the whole file as context, so an N-shard file sends its content N times. Anchors sharing a line count once, and regex and semgrep anchors count the same. Default 150; pass --no-max-anchors-per-batch to disable the cap. A low value makes many more batches, so raise --max-batches with it.",
+      (v) => parseInt(v, 10),
+      150,
+    )
+    .option("--no-max-anchors-per-batch", "disable the per-batch anchor cap (never split a file)")
     .option(
       "--max-files-per-agent <n>",
       "Cap the candidate files each agent reviews: if an agent's scope resolves to more than <n> files (after prefilter), keep the first <n> in scan order and drop the rest. A guardrail against an over-broad agent blowing up cost/time on a large repo. Default 300; pass --no-max-files-per-agent to disable the cap. Different from --max-files-per-batch, which only sets how many files pack into one LLM session.",

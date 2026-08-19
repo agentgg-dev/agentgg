@@ -467,6 +467,20 @@ export const FileRecord = z.object({
    * written before per-file resume, or by non-detect paths.
    */
   reconHash: z.string().optional(),
+  /**
+   * Shard keys already analyzed for this file. A file whose anchors exceed
+   * `--max-anchors-per-batch` is split across several prompts, so the
+   * content + recon stamps above are not enough on their own: the first
+   * shard to finish refreshes them, and the rest would look analyzed on the
+   * next run. Resume needs this list too.
+   *
+   * Absent (not empty) means the file was analyzed whole, the shape of every
+   * record written before the cap existed. Absent is therefore read as
+   * complete, so old state still resumes. Cleared whenever the content or
+   * recon stamp changes, so keys from a prior cut never survive into a
+   * re-analysis.
+   */
+  shards: z.array(z.string()).optional(),
   candidates: z.array(CandidateMatch).default([]),
   findings: z.array(Finding).default([]),
   analysisHistory: z.array(AnalysisRun).default([]),

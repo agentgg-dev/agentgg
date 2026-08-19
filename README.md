@@ -134,7 +134,7 @@ preamble ─▶ recon ─▶ preconditions ─▶ AGENTS ─▶ validate ─▶ 
 - *Prompt gates*: agents that declare an LLM `prompt` (and passed regex) are evaluated **concurrently** in a pool at `--concurrency`. Barrier: the entire queued set is decided, and `plan.json` written, before any agent runs. A cached plan covering your `-t` selection is reused instead of re-running the gates.
 
 **3. Agents.** The core, split into a cheap sequential setup and a parallel drain.
-- *3a. Enqueue* (sequential, no LLM). For each queued agent, in order: resolve `where` → walk + `preFilter` to candidate files, intersect with the `--diff` set, apply the `--max-files-per-agent` cap (default 300), drop already-analyzed files via per-file resume, then split the remainder into **batches of `maxFilesPerBatch` (default 5)**. Every `(agent, batch)` pair is pushed onto **one shared queue**. An agent whose prior run still matches scope is lifted from disk and skipped entirely here. `--max-batches` (default 250) then truncates the queue.
+- *3a. Enqueue* (sequential, no LLM). For each queued agent, in order: resolve `where` → walk + `preFilter` to candidate files, intersect with the `--diff` set, apply the `--max-files-per-agent` cap (default 300), drop already-analyzed files via per-file resume, then split any file carrying more than `--max-anchors-per-batch` anchors (default 150) into per-shard candidates, and pack the remainder into batches under two ceilings: **`maxFilesPerBatch` files (default 5)** and that same anchor count. Every `(agent, batch)` pair is pushed onto **one shared queue**. An agent whose prior run still matches scope is lifted from disk and skipped entirely here. `--max-batches` (default 250) then truncates the queue.
 - *3b. Drain* (concurrent). One bounded pool runs over **every `(agent, batch)` pair across all agents** at `--concurrency`. This is the key design point: batches from *different* agents interleave in the same pool, so agents are **not** run one-at-a-time. Each batch is one tool-enabled LLM session (up to the agent's `maxTurnsPerBatch`, default 50) that reviews its files and follows imports/callers outward. A fast agent's batches and a slow agent's batches overlap instead of blocking each other.
 
   ```
@@ -483,6 +483,7 @@ agentgg scan ./src --only "src/api/**/*.ts" --only "src/handlers/**/*.ts" -o ./o
 agentgg scan ./src --max-file-size 200 -o ./out          # skip files larger than 200 KB (default 500)
 agentgg scan ./src --max-files-per-agent 30 -o ./out     # each agent reviews at most 30 files (default 300)
 agentgg scan ./src --max-batches 50 -o ./out             # run at most 50 agent batches this scan (default 250)
+agentgg scan ./src --max-anchors-per-batch 40 -o ./out   # at most 40 scanner anchors per prompt (default 150)
 agentgg scan ./src --no-max-files-per-agent --no-max-batches --no-max-file-size -o ./out   # disable every cap (fully uncapped)
 ```
 
@@ -493,6 +494,8 @@ Auto-exclude (**on by default**; disable with `--no-auto-exclude`) lets the mode
 `--max-files-per-agent` is a per-agent ceiling (**default 300**): when an agent's `where` resolves to more candidate files than the cap, it reviews the first `<n>` (in the walker's deterministic scan order) and drops the rest, rather than being skipped. A guardrail so one over-broad agent can't blow up cost or time on a large repo. Pass `--no-max-files-per-agent` to disable the cap. Different from `--max-files-per-batch`, which only sets how many files pack into a single LLM session.
 
 `--max-batches` is a whole-scan ceiling on the number of agent batches (**default 250**). Once every `(agent, batch)` pair is enqueued, the pool is truncated to `<n>` (in enqueue order) and the rest are dropped before any LLM call runs. Agents whose batches are dropped write no completion sidecar, so a later scan picks them up where this one stopped — a way to spread a large scan across several runs or cap the spend of a single run. Pass `--no-max-batches` to disable the cap. Different from `--concurrency`, which bounds how many batches run in parallel, not how many run at all.
+
+`--max-anchors-per-batch` is a per-batch ceiling on scanner anchor lines (**default 150**) — the sibling of `--max-files-per-batch`: same batch, different unit. Both are ceilings, and whichever binds first closes the batch. When a single file carries more anchors than the cap (one rule matching 500 routes in one router), it is split into shards of at most `<n>`, and each prompt anchors on a contiguous line range, so no prompt gets hundreds of anchors at once. Each shard still receives the whole file as context, so an N-shard file sends its content N times. Anchors on the same line count once, and regex and semgrep anchors count the same. Shards resume independently: an interrupted scan re-runs only the shards that did not finish. Pass `--no-max-anchors-per-batch` to disable the cap. A low value produces many more batches, so raise `--max-batches` alongside it.
 
 `--max-file-size` (**default 500 KB**) skips files larger than the limit before any agent sees them. Pass `--no-max-file-size` to scan files of any size.
 
@@ -647,6 +650,8 @@ Run `agentgg <command> --help` for the full flag list on any subcommand.
 --no-recon                      skip the recon survey AND precondition gating; run every -t agent unconditionally
 --no-summary                    skip writing the markdown report (summary.md + findings/*.md); state still persists
 --max-files-per-batch <n>       candidate files per agent batch (overrides the agent's where.maxFilesPerBatch)
+--max-anchors-per-batch <n>     cap the scanner anchors packed into one batch; a file with more is split into shards, one prompt each (default 150, --no-max-anchors-per-batch disables)
+--no-max-anchors-per-batch      disable the per-batch anchor cap (never split a file)
 --max-files-per-agent <n>       cap the candidate files each agent reviews — keep the first <n> in scan order, drop the rest (guardrail against an over-broad agent; default 300, --no-max-files-per-agent disables)
 --no-max-files-per-agent        disable the per-agent candidate-file cap (review every file)
 --max-batches <n>               cap the total agent batches run this scan — keep the first <n> in enqueue order, drop the rest (dropped agents re-run next scan; default 250, --no-max-batches disables)
