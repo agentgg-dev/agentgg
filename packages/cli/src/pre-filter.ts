@@ -31,7 +31,9 @@ export interface PreFilterHit {
  * the file, so it stays correct even when the step is a sub-expression.
  */
 export interface TaintStep {
-  kind: "source" | "through" | "sink";
+  /** `elided` stands in for the steps a length cap dropped. */
+  kind: "source" | "through" | "sink" | "elided";
+  /** For `elided`, the line of the first dropped step. */
   line: number;
   code: string;
 }

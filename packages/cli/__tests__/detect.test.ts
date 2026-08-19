@@ -268,6 +268,26 @@ describe("buildAgentPrompt anchor enrichment", () => {
     expect(out).toContain("taint: L7 `req.query` → L8 `cmd` → L9 `execSync(cmd)`");
   });
 
+  it("renders an elided marker with no line prefix and no backticks", () => {
+    // It is neither a location nor code. Printing `L99 ...` would name a
+    // real but unrelated line, which is worse than naming none.
+    const out = buildAgentPrompt({
+      agent: makeAgent(),
+      candidates: withHits([
+        {
+          ...taintHit,
+          taint: [
+            { kind: "source" as const, line: 7, code: "req.query" },
+            { kind: "elided" as const, line: 8, code: "4 steps omitted" },
+            { kind: "sink" as const, line: 9, code: "execSync(cmd)" },
+          ],
+        },
+      ]),
+    });
+    expect(out).toContain("taint: L7 `req.query` → (4 steps omitted) → L9 `execSync(cmd)`");
+    expect(out).not.toContain("L8 `4 steps omitted`");
+  });
+
   it("renders allow-listed metadata beside the label", () => {
     const out = buildAgentPrompt({ agent: makeAgent(), candidates: withHits([taintHit]) });
     expect(out).toContain("(CWE-78, confidence MEDIUM):");

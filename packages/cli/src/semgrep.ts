@@ -285,6 +285,7 @@ function taintSteps(trace: RawDataflowTrace | undefined): TaintStep[] | null {
   if (!source || !sink) return null;
   const kept: TaintStep[] = [];
   let dropped = 0;
+  let firstDroppedLine = 0;
   for (const v of trace.intermediate_vars ?? []) {
     const line = v.location?.start?.line;
     if (typeof line !== "number" || typeof v.content !== "string") continue;
@@ -295,16 +296,22 @@ function taintSteps(trace: RawDataflowTrace | undefined): TaintStep[] | null {
     const prev = kept[kept.length - 1];
     if (prev && prev.line === line && prev.code === code) continue;
     if (kept.length >= MAX_TAINT_STEPS) {
+      if (dropped === 0) firstDroppedLine = line;
       dropped++;
       continue;
     }
     kept.push({ kind: "through", line, code });
   }
   // Say what was cut. A silently shortened path still reads as the whole
-  // path, and the model would then trust a route it was never shown.
+  // path, and the model would then trust a route it was never shown. The
+  // marker carries the first dropped step's line, never the sink's: a real
+  // but unrelated line is worse than no line at all.
   const middle =
     dropped > 0
-      ? [...kept, { kind: "through" as const, line: sink.line, code: `(${dropped} more steps)` }]
+      ? [
+          ...kept,
+          { kind: "elided" as const, line: firstDroppedLine, code: `${dropped} steps omitted` },
+        ]
       : kept;
   return [source, ...middle, sink];
 }

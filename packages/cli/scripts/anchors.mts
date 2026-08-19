@@ -3,6 +3,7 @@
 import { readFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { loadAgentsFromDir } from "@agentgg/core";
+import { renderHit } from "../src/detect.js";
 import { evaluatePreFilter } from "../src/pre-filter.js";
 import { runSemgrepPreFilter } from "../src/semgrep.js";
 import { walkForAgents } from "../src/walker.js";
@@ -49,9 +50,9 @@ for (const rel of files) {
     })),
   ].filter((h) => h.label !== "(no preFilter)");
   if (all.length === 0) continue;
+  // Print through the prompt's own renderer. A second format here would let
+  // this script pass while the bytes the model reads are wrong.
   console.log(`\n${relative(root, resolve(root, rel))}`);
-  for (const h of all) {
-    console.log(`  L${h.line} [${h.label}]${h.metadata ? ` ${JSON.stringify(h.metadata)}` : ""}`);
-    if (h.taint) console.log(`      taint: ${h.taint.map((s) => `L${s.line} ${s.code}`).join(" -> ")}`);
-  }
+  console.log("**Scanner anchor lines:**\n");
+  for (const h of all) console.log(renderHit(h));
 }

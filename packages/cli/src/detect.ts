@@ -701,16 +701,23 @@ function metadataSuffix(h: InvestigateHit): string {
   return parts.length > 0 ? ` (${parts.join(", ")})` : "";
 }
 
-/** ``L24 `req.query` → L25 `res.send(...)` `` */
+/**
+ * ``L24 `req.query` → (3 steps omitted) → L25 `res.send(...)` ``
+ *
+ * An elided marker prints with no `L` prefix and no backticks. It is not a
+ * location and not code, and dressing it as either misreads.
+ */
 function taintPath(steps: ReadonlyArray<TaintStep>): string {
-  return steps.map((s) => `L${s.line} \`${s.code}\``).join(" → ");
+  return steps
+    .map((s) => (s.kind === "elided" ? `(${s.code})` : `L${s.line} \`${s.code}\``))
+    .join(" → ");
 }
 
 /**
  * One anchor. The first line is the position; the lines under it are what
  * the engine already knew and the model would otherwise re-derive by reading.
  */
-function renderHit(h: InvestigateHit): string {
+export function renderHit(h: InvestigateHit): string {
   const lines = [
     `  - ${anchorRange(h)} [${h.label}]${metadataSuffix(h)}: ${h.snippet || "(line)"}`,
   ];
@@ -719,7 +726,7 @@ function renderHit(h: InvestigateHit): string {
   return lines.join("\n");
 }
 
-export function renderSeededFile(c: AgentCandidate, idx: number, total: number): string {
+function renderSeededFile(c: AgentCandidate, idx: number, total: number): string {
   const lang = languageFromPath(c.filePath);
   const visible = c.hits.filter((h) => h.label !== "(no preFilter)");
   const hitsBlock =

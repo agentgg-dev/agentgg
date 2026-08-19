@@ -617,11 +617,31 @@ describe("toSemgrepHit", () => {
       9,
       "l",
     );
-    const through = hit.taint?.filter((s) => s.kind === "through") ?? [];
-    // 6 real steps plus one that names the omission, so a shortened path
-    // cannot be mistaken for the whole path.
-    expect(through).toHaveLength(7);
-    expect(through[6].code).toBe("(14 more steps)");
+    // 6 real steps, then a marker that names the omission, so a shortened
+    // path cannot be mistaken for the whole path.
+    expect(hit.taint?.filter((s) => s.kind === "through")).toHaveLength(6);
+    const elided = hit.taint?.filter((s) => s.kind === "elided") ?? [];
+    expect(elided).toHaveLength(1);
+    expect(elided[0].code).toBe("14 steps omitted");
+    // The first dropped step is v6 on line 7. The sink is on line 9, and
+    // pointing the marker there would name a real but unrelated line.
+    expect(elided[0].line).toBe(7);
+  });
+
+  it("puts the marker between the last kept step and the sink", () => {
+    const many = Array.from({ length: 20 }, (_, i) => ({
+      location: { start: { line: i + 1 } },
+      content: `v${i}`,
+    }));
+    const hit = toSemgrepHit(
+      { extra: { dataflow_trace: { ...taintTrace, intermediate_vars: many } } },
+      9,
+      "l",
+    );
+    const kinds = hit.taint?.map((s) => s.kind) ?? [];
+    expect(kinds[0]).toBe("source");
+    expect(kinds[kinds.length - 2]).toBe("elided");
+    expect(kinds[kinds.length - 1]).toBe("sink");
   });
 
   it("reports no taint when only one end of the path parses", () => {
