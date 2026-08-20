@@ -1,7 +1,15 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import type { CvssScore, Finding, ReconReport } from "@agentgg/core";
-import { generateObject, generateText, type LanguageModelV1, tool } from "ai";
+import {
+  generateObject,
+  generateText,
+  type LanguageModelV1,
+  NoSuchToolError,
+  type ToolCallRepairFunction,
+  type ToolSet,
+  tool,
+} from "ai";
 import { minimatch } from "minimatch";
 import { z } from "zod";
 import { AgentSpec } from "../agent-spec.js";
@@ -336,6 +344,38 @@ const TOOL_OUTPUT_BUDGET_BYTES = 400_000;
  *  Truncated reads carry a notice pointing the model at Grep for specifics. */
 const READ_FILE_OUTPUT_CAP_BYTES = 80_000;
 
+/** Repairs allowed per LLM session. A model stuck in a malformed-tool-call
+ *  loop would otherwise burn one repair call per turn for the whole turn
+ *  budget. Past the cap the call is left broken and the batch degrades. */
+const MAX_TOOL_CALL_REPAIRS = 5;
+
+/**
+ * Recover the tool the model MEANT to call from a mangled tool name.
+ *
+ * GLM-5 intermittently leaks its raw tool-call markup into the tool NAME
+ * rather than the arguments, so `Grep` arrives as
+ * `Grep<arg_value>pattern</arg_key><arg_value>get_owned_provider_...</arg_value>`
+ * or `...</tool_call>Read`. The real name is always present as a substring, so
+ * take the earliest one that occurs (leftmost wins: the name leads, the leaked
+ * markup trails it).
+ *
+ * Returns null when nothing matches, which leaves the call unrepaired.
+ */
+export function resolveMangledToolName(mangled: string, available: string[]): string | null {
+  if (available.includes(mangled)) return mangled;
+  let best: { name: string; idx: number } | null = null;
+  for (const name of available) {
+    const idx = mangled.indexOf(name);
+    if (idx < 0) continue;
+    // Leftmost wins; on a tie prefer the longer name so `Read` can't shadow a
+    // hypothetical `ReadMany`.
+    if (best === null || idx < best.idx || (idx === best.idx && name.length > best.name.length)) {
+      best = { name, idx };
+    }
+  }
+  return best?.name ?? null;
+}
+
 /**
  * Detector backed by the Vercel AI SDK's `generateText` for hunt/walker
  * modes (with Read/Glob/Grep tool implementations) and `generateObject`
@@ -390,6 +430,63 @@ export class VercelAgentDetector implements Detector {
     return result;
   }
 
+  /**
+   * Repair a malformed tool call instead of letting it kill the batch.
+   *
+   * WHY: a tool call the SDK can't parse throws out of `generateText`
+   * (`AI_NoSuchToolError` / `AI_InvalidToolArgumentsError`), which fails the
+   * batch, which sets `rt.failed`, which means the agent never gets its resume
+   * sidecar — so the platform marks the WHOLE agent failed even though its
+   * other batches found real issues. One bad turn should not cost an agent.
+   * Prod scan 764dbd1d lost three agents this way.
+   *
+   * Two steps, cheapest first:
+   *   1. Name. `NoSuchToolError` means the name itself is garbage; the real one
+   *      is a substring (see `resolveMangledToolName`). Free.
+   *   2. Arguments. Re-ask the model for arguments that satisfy the tool's own
+   *      schema, given its broken attempt. One small call, capped per session.
+   *
+   * Returns null when neither step lands. The SDK then throws as before, so
+   * this only ever adds recoveries.
+   *
+   * Returned per call site, not shared: the repair budget is per LLM session.
+   */
+  private toolCallRepair(label: string): ToolCallRepairFunction<ToolSet> {
+    let repairs = 0;
+    return async ({ toolCall, tools, error }) => {
+      const names = Object.keys(tools);
+      const toolName = NoSuchToolError.isInstance(error)
+        ? resolveMangledToolName(toolCall.toolName, names)
+        : toolCall.toolName;
+      if (toolName === null || !names.includes(toolName)) return null;
+      if (repairs >= MAX_TOOL_CALL_REPAIRS) {
+        console.warn(`    ${label}: tool-call repair budget spent, leaving the call broken`);
+        return null;
+      }
+      repairs++;
+      const schema = (tools[toolName] as { parameters: z.ZodTypeAny }).parameters;
+      try {
+        const { object } = await generateObject({
+          model: this.structuredModel ?? this.model,
+          schema,
+          mode: this.objectMode,
+          prompt:
+            `You called the tool \`${toolName}\` with arguments that do not match its schema.\n` +
+            `Reply with corrected arguments for the SAME intent.\n\n` +
+            `What you sent as the tool name:\n${toolCall.toolName}\n\n` +
+            `What you sent as the arguments:\n${toolCall.args}\n\n` +
+            `Schema error:\n${error.message}`,
+        });
+        console.warn(`    ${label}: repaired a malformed ${toolName} call`);
+        return { ...toolCall, toolName, args: JSON.stringify(object) };
+      } catch {
+        // The repair call itself failed. Fall through to the original error
+        // rather than masking it with a repair-time one.
+        return null;
+      }
+    };
+  }
+
   async recon(args: ReconArgs & { signal?: AbortSignal }): Promise<ReconResult> {
     const basePrompt = buildReconPrompt({
       instructions: args.instructions,
@@ -412,6 +509,7 @@ export class VercelAgentDetector implements Detector {
               args.excludePatterns,
             ),
             maxSteps: args.maxTurns + 1,
+            experimental_repairToolCall: this.toolCallRepair("recon"),
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
           }),
@@ -472,6 +570,7 @@ export class VercelAgentDetector implements Detector {
               args.excludePatterns,
             ),
             maxSteps: args.maxTurns + 1,
+            experimental_repairToolCall: this.toolCallRepair("createAgent"),
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
           }),
@@ -487,8 +586,9 @@ export class VercelAgentDetector implements Detector {
   async runAgent(args: RunAgentArgs & { signal?: AbortSignal }): Promise<Finding[]> {
     const base = buildAgentPrompt(args);
     const prompt = `${base}\n\n${jsonOutputInstruction(false)}`;
-    try {
-      const gen = await this.metered(
+    const label = `runAgent:${args.agent.slug}`;
+    const hunt = (budgetBytes: number, maxTurns: number) =>
+      this.metered(
         () =>
           generateText({
             model: this.model,
@@ -498,20 +598,41 @@ export class VercelAgentDetector implements Detector {
               args.maxFileSizeKb,
               this.verbose,
               args.excludePatterns,
+              budgetBytes,
             ),
-            maxSteps: args.maxTurns + 1,
+            maxSteps: maxTurns + 1,
+            experimental_repairToolCall: this.toolCallRepair(label),
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
           }),
         args.signal,
       );
+    try {
+      let gen: Awaited<ReturnType<typeof hunt>>;
+      let effectiveTurns = args.maxTurns;
+      try {
+        gen = await hunt(TOOL_OUTPUT_BUDGET_BYTES, effectiveTurns);
+      } catch (err) {
+        // Context overflow: the accumulated tool transcript outgrew the window.
+        // Re-sending it unchanged can't work, which is why withTpmRetry refuses
+        // to retry — but a SMALLER hunt can. The transcript grows with both the
+        // bytes read and the number of turns those bytes get re-sent across, so
+        // halve each. Once only: a second overflow means the batch itself is too
+        // big for this model, and that is a planning problem, not a retry one.
+        if (!isContextLengthError(errorHaystack(err)) || args.signal?.aborted === true) throw err;
+        console.warn(
+          `    ${label}: context overflow; retrying this batch at half the read budget and turn cap`,
+        );
+        effectiveTurns = Math.floor(args.maxTurns / 2);
+        gen = await hunt(Math.floor(TOOL_OUTPUT_BUDGET_BYTES / 2), effectiveTurns);
+      }
       // The tool loop can burn its whole budget without ever emitting findings
       // JSON — typically the model degenerates into repeating one tool call.
       // The reformat fallback below turns that into a valid empty result, so
       // without this line a capped batch is indistinguishable from clean code.
       // Warn only: a capped batch still records 0 findings and the agent still
       // completes, so one bad batch never fails the scan.
-      warnIfTurnCapped(args.agent.slug, gen, args.maxTurns);
+      warnIfTurnCapped(args.agent.slug, gen, effectiveTurns);
       let result: DetectionResultType;
       try {
         result = await this.parseOrReformat(gen.text, false, args.signal);
@@ -611,6 +732,7 @@ export class VercelAgentDetector implements Detector {
               args.excludePatterns ?? [],
             ),
             maxSteps: this.validateMaxTurns + 1,
+            experimental_repairToolCall: this.toolCallRepair(`validate:${args.finding.id}`),
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
           }),
@@ -864,6 +986,7 @@ function buildTools(
   maxFileSizeKb: number | undefined,
   verbose: boolean,
   exclude: string[] = [],
+  budgetBytes: number = TOOL_OUTPUT_BUDGET_BYTES,
 ) {
   const logTool = verbose
     ? (name: string, arg: string) => console.log(`    ${name} ${arg.slice(0, 100)}`)
@@ -874,7 +997,7 @@ function buildTools(
   // running transcript can't outgrow the model's context window. A fresh
   // buildTools — and thus a fresh budget — is created on each retry.
   let bytesReturned = 0;
-  const budgetExhausted = () => bytesReturned >= TOOL_OUTPUT_BUDGET_BYTES;
+  const budgetExhausted = () => bytesReturned >= budgetBytes;
   const account = (out: string): string => {
     bytesReturned += out.length;
     return out;
@@ -888,7 +1011,7 @@ function buildTools(
       }),
       execute: async ({ path }) => {
         logTool("Read", path);
-        if (budgetExhausted()) return budgetNotice();
+        if (budgetExhausted()) return budgetNotice(budgetBytes);
         return account(await readToolExecute(path, cwd, maxFileSizeKb, exclude));
       },
     }),
@@ -900,7 +1023,7 @@ function buildTools(
       }),
       execute: async ({ pattern }) => {
         logTool("Glob", pattern);
-        if (budgetExhausted()) return budgetNotice();
+        if (budgetExhausted()) return budgetNotice(budgetBytes);
         return account(await globToolExecute(pattern, cwd, exclude));
       },
     }),
@@ -910,7 +1033,7 @@ function buildTools(
       parameters: GrepParameters,
       execute: async ({ pattern, glob, path }) => {
         logTool("Grep", pattern);
-        if (budgetExhausted()) return budgetNotice();
+        if (budgetExhausted()) return budgetNotice(budgetBytes);
         // A bare directory path is not a glob — `src/api` matches that one
         // entry, not the files under it — so widen it before handing it over.
         const scope = glob || (path ? toSearchGlob(path) : undefined);
@@ -942,9 +1065,9 @@ export function toSearchGlob(path: string): string {
 /** Returned by every tool once the per-session output budget is spent — an
  *  explicit instruction to stop reading and emit findings now, rather than a
  *  silent empty result the model might keep probing against. */
-function budgetNotice(): string {
+function budgetNotice(budgetBytes: number): string {
   return (
-    `Error: per-session read budget reached (~${Math.round(TOOL_OUTPUT_BUDGET_BYTES / 1024)} KB). ` +
+    `Error: per-session read budget reached (~${Math.round(budgetBytes / 1024)} KB). ` +
     `Do not read more files. Output your final findings JSON now, based on what you have already examined.`
   );
 }
