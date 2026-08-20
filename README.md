@@ -212,11 +212,15 @@ The value is a bare **name** — never a path, never a filename with an extensio
 agentgg scan ./src -t ./my-agents --semgrep-rules ./my-rules -o ./out   # repeat the flag for more dirs
 ```
 
-Write the rule as an ordinary semgrep rule file, and give it a `languages:` key — without one it is run against every file the agent's `where` includes, which costs time and finds nothing new. Each file is scanned on its own with the file set agentgg already picked, so per-file patterns work and cross-file modes (`join`) do not. A `nosemgrep` comment on the matching line or the line above suppresses the anchor.
+Write the rule as an ordinary semgrep rule file, and give it a `languages:` key — without one it is run against every file in scope, which costs time and finds nothing new. Every rule every agent names runs in **one** pass over the files agentgg picked, so a file two agents both claim is parsed once. A `nosemgrep` comment on the matching line or the line above suppresses the anchor.
+
+Use `mode: search` (the default) or `mode: taint`. The bundled engine is Semgrep CE, which cannot run `mode: join`, `mode: step`, or supply-chain rules keyed on `r2c-internal-project-depends-on`. agentgg refuses those before the run rather than after: left to the engine, a join rule loads, scans zero files, reports no error, and the scan reads as clean. A refused rule warns and records degraded coverage on the agent's sidecar.
+
+A rule may also carry its own `paths:` filter. That narrows the file set further than the agent's `where` did, so agentgg names the rules it applies to in a warning.
 
 A match becomes an anchor — line, line range, and the entry's `label` — handed to the model exactly like a regex anchor. It is a starting point, not a finding; the prompt still decides what is reportable.
 
-To confirm a rule ran, read the per-agent line in the scan output: it splits the count by source, as in `3 anchor(s) (semgrep 3, regex 0)`. `--verbose` adds the binary that ran and the per-agent rule count. A name that resolves nowhere warns and lists every directory searched, then the scan continues on the regex entries alone; the agent's sidecar records that as degraded coverage. Editing a rule does not invalidate resume state — pass `--rescan` after you change one.
+To confirm a rule ran, read the per-agent line in the scan output: it splits the count by source, as in `3 anchor(s) (semgrep 3, regex 0)`. `--verbose` adds the binary that ran, the rule and file counts for the pass, and the anchors it produced. It also names any file the engine could only parse in part. A name that resolves nowhere warns and lists every directory searched, then the scan continues on the regex entries alone; the agent's sidecar records that as degraded coverage. Editing a rule does not invalidate resume state — pass `--rescan` after you change one.
 
 ## Authoring agents from past reports
 

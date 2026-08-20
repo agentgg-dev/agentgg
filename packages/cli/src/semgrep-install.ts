@@ -66,7 +66,11 @@ export type SemgrepFailure =
   | "unsupported platform"
   | "binary failed to start"
   | "download failed"
-  | "verification failed";
+  | "verification failed"
+  // The rule loaded but the bundled CE engine cannot run it (join mode,
+  // supply-chain rules). Recorded so the report cannot imply coverage.
+  | "unsupported rule"
+  | "run timed out";
 
 export type InstallResult = { ok: true; path: string } | { ok: false; reason: SemgrepFailure };
 

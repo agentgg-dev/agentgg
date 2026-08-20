@@ -18,7 +18,6 @@ import {
   resolveSemgrepRule,
   runSemgrepPreFilter,
   semgrepLangFor,
-  semgrepRuleLanguages,
   toSemgrepHit,
 } from "../src/semgrep.js";
 import { SEMGREP_VERSION } from "../src/semgrep-install.js";
@@ -159,33 +158,6 @@ describe("semgrepLangFor", () => {
 
   it("returns null for an extension we do not scan", () => {
     expect(semgrepLangFor("README.md")).toBeNull();
-  });
-});
-
-describe("semgrepRuleLanguages", () => {
-  it("reads the flow style and normalizes aliases", () => {
-    const langs = semgrepRuleLanguages(
-      "rules:\n  - id: x\n    languages: [typescript, javascript]\n",
-    );
-    expect(langs && [...langs].sort()).toEqual(["js", "ts"]);
-  });
-
-  it("reads the block style", () => {
-    const langs = semgrepRuleLanguages(
-      "rules:\n  - id: x\n    languages:\n      - python\n      - go\n",
-    );
-    expect(langs && [...langs].sort()).toEqual(["go", "python"]);
-  });
-
-  it("unions across several rules in one file", () => {
-    const langs = semgrepRuleLanguages(
-      "rules:\n  - id: a\n    languages: [ts]\n  - id: b\n    languages: [ruby]\n",
-    );
-    expect(langs && [...langs].sort()).toEqual(["ruby", "ts"]);
-  });
-
-  it("returns null when it cannot tell, so the caller scans everything", () => {
-    expect(semgrepRuleLanguages("rules:\n  - id: x\n    pattern: foo()\n")).toBeNull();
   });
 });
 
@@ -429,7 +401,7 @@ describe("runSemgrepPreFilter degradation", () => {
       },
     );
     expect(info[0]).toBe("semgrep-core: /fake/semgrep-core (cache)");
-    expect(info.some((m) => m.includes("semgrep ran 1 rule(s)"))).toBe(true);
+    expect(info.some((m) => m.includes("semgrep: 1 rule(s) over 1 file(s)"))).toBe(true);
   });
 
   it("stays silent through onInfo when the binary cannot be resolved", async () => {

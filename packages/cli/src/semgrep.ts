@@ -1,9 +1,9 @@
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { delimiter, extname, join, resolve } from "node:path";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, extname, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { type Agent, getSemgrepCorePath, isSemgrepPreFilter } from "@agentgg/core";
-import { runConcurrent } from "./concurrent.js";
 import type { TaintStep } from "./pre-filter.js";
 import {
   type InstallResult,
@@ -11,6 +11,7 @@ import {
   SEMGREP_VERSION,
   type SemgrepFailure,
 } from "./semgrep-install.js";
+import { inspectSemgrepRule, type RuleInspection } from "./semgrep-rule.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -44,6 +45,11 @@ export interface PreFilterOutcome {
 export interface PreFilterDeps {
   /** Injected so the degraded path is testable without a real install. */
   ensure?: (env: NodeJS.ProcessEnv) => Promise<EnsureResult>;
+  /**
+   * The invocation itself, injected so result distribution is testable
+   * without a binary. Resolves to raw stdout; rejects like `execFile` does.
+   */
+  run?: (bin: string, args: ReadonlyArray<string>) => Promise<string>;
   /**
    * Progress lines for `--verbose`. Separate from `onWarn` because these are
    * the positive signal that semgrep ran at all — nothing else in the scan
@@ -102,62 +108,6 @@ export function semgrepLangFor(relPath: string): string | null {
   return LANG_BY_EXT[extname(relPath).toLowerCase()] ?? null;
 }
 
-/** Rule-file spellings that mean the same language as a `-lang` value. */
-const LANG_ALIASES: Readonly<Record<string, string>> = {
-  typescript: "ts",
-  javascript: "js",
-  py: "python",
-  python2: "python",
-  python3: "python",
-  rb: "ruby",
-  golang: "go",
-  kt: "kotlin",
-  "c#": "csharp",
-  "c++": "cpp",
-  sh: "bash",
-  sol: "solidity",
-  tf: "terraform",
-  ex: "elixir",
-};
-
-function normalizeLang(name: string): string {
-  const lower = name
-    .trim()
-    .replace(/^["']|["']$/g, "")
-    .toLowerCase();
-  return LANG_ALIASES[lower] ?? lower;
-}
-
-/**
- * The set of languages a rule file declares, so we only spawn the binary
- * for files it could match. Without this, a TypeScript-only rule still
- * costs one process per Python file an agent's `where` happens to include.
- *
- * Deliberately a text scan, not a YAML parse: the cli has no YAML parser
- * and this needs no dependency to be useful. Returning null means "could
- * not tell", and the caller then runs the rule against everything — the
- * pre-existing behaviour, so a parse miss costs time and never coverage.
- */
-export function semgrepRuleLanguages(source: string): Set<string> | null {
-  const langs = new Set<string>();
-  // Flow style: `languages: [ts, javascript]`
-  for (const m of source.matchAll(/^\s*languages:\s*\[([^\]]*)\]/gm)) {
-    for (const part of m[1].split(",")) {
-      if (part.trim()) langs.add(normalizeLang(part));
-    }
-  }
-  // Block style: `languages:` followed by `- ts` lines.
-  for (const m of source.matchAll(
-    /^([ \t]*)languages:[ \t]*(?:#.*)?\r?\n((?:\1[ \t]+-[ \t]*\S+\r?\n?)+)/gm,
-  )) {
-    for (const line of m[2].split(/\r?\n/)) {
-      const item = line.replace(/^[ \t]*-[ \t]*/, "").trim();
-      if (item) langs.add(normalizeLang(item));
-    }
-  }
-  return langs.size > 0 ? langs : null;
-}
-
 /**
  * Resolve a `semgrepRule` name to a file, searching `rulesDirs` in order.
  * The caller puts the `--semgrep-rules` dirs first and the catalog's own
@@ -195,8 +145,25 @@ export function isSemgrepSuppressed(lines: ReadonlyArray<string>, line: number):
   return own.includes("nosemgrep") || above.includes("nosemgrep");
 }
 
+/**
+ * Per-file engine trouble. `severity` is `warn` for a partial parse, where
+ * the file was still scanned and only the unparsable span was skipped, and
+ * `error` when the file was lost. Both name the file in `location`.
+ */
+interface CoreError {
+  message?: string;
+  severity?: string;
+  location?: { path?: string; start?: RawLoc };
+}
+
+/** What one `-json` run reports: the matches, plus per-file trouble. */
+interface CoreOutput {
+  results?: RawResult[];
+  errors?: CoreError[];
+}
+
 /** `semgrep-core` prints a progress dot before the JSON payload. */
-function parseCoreJson(stdout: string): { results?: RawResult[] } {
+function parseCoreJson(stdout: string): CoreOutput {
   const start = stdout.indexOf("{");
   if (start < 0) return {};
   return JSON.parse(stdout.slice(start));
@@ -221,6 +188,8 @@ interface RawDataflowTrace {
 
 interface RawResult {
   check_id?: string;
+  /** Absolute path, echoed back from the target list. */
+  path?: string;
   start?: RawLoc;
   end?: RawLoc;
   extra?: {
@@ -448,14 +417,306 @@ export async function ensureSemgrepCore(
 }
 
 /**
- * Run every `semgrepRule` an agent declares over the file set the walker
- * already chose, one `semgrep-core` process per (rule file, source file).
+ * A `-targets` entry. `semgrep-core` only accepts `-lang` with ONE file, so
+ * batching needs this file instead. `ppath` is the project-relative path the
+ * engine echoes back in diagnostics; `fpath` is what it actually opens.
+ */
+type CodeTarget = [
+  "CodeTarget",
+  { products: ["sast"]; analyzer: string; path: { fpath: string; ppath: string } },
+];
+
+/** One agent's slice of the project run. */
+export interface ProjectAgentInput {
+  agent: Agent;
+  /** repo-relative paths the walker already chose for this agent. */
+  files: ReadonlyArray<string>;
+}
+
+export interface ProjectOutcome {
+  /** agent slug → that agent's hits, already labelled and file-filtered. */
+  byAgent: Map<string, SemgrepHits>;
+  /** agent slug → why that agent's semgrep coverage is incomplete. */
+  degradedByAgent: Map<string, SemgrepFailure>;
+}
+
+/** One agent's use of one rule file. The label is per entry, not per rule. */
+interface RuleUsage {
+  slug: string;
+  rulePath: string;
+  label?: string;
+}
+
+/** Per-rule-per-file ceiling inside the engine, so one file cannot stall the run. */
+const RULE_TIMEOUT_SECONDS = 5;
+/** Rules allowed to time out on one file before the engine drops that file. */
+const TIMEOUT_THRESHOLD = 3;
+/** Whole-run ceiling. One process now carries the entire scan. */
+const RUN_TIMEOUT_MS = 600_000;
+/** One payload now holds every file's results plus `paths.scanned`. */
+const MAX_BUFFER = 256 * 1024 * 1024;
+/** File-level messages printed in full before the rest are counted. */
+const MAX_REPORTED_ERRORS = 5;
+
+/** Compare two absolute paths the way the host filesystem does. */
+function pathKey(absolute: string): string {
+  const normalized = absolute.split(sep).join("/");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+/**
+ * Run every declared `semgrepRule` across the whole scan in ONE
+ * `semgrep-core` process.
  *
- * agentgg owns file selection: `semgrep-core` scans exactly the file it is
- * given and applies no ignore rules of its own, so the hits key to the
- * same list the agent will review. Failures degrade to "no hits from that
- * rule" instead of aborting the scan, matching how a bad preFilter regex
- * is treated.
+ * This is what semgrep's own wrapper does: merge the rules, name the targets
+ * in a `-targets` file, invoke once. It matters because the engine parses each
+ * file a single time and matches every rule against that one parse tree, and
+ * because its per-rule string pre-filter only pays off when rules share a
+ * process. Running per (rule, file) threw both away and cost `rules x files`
+ * spawns.
+ *
+ * agentgg still owns file selection: every target is named explicitly. A rule
+ * carrying its own `paths:` narrows that set further, which the caller is told
+ * about — coverage narrower than the file list is what `degraded` exists for.
+ */
+export async function runSemgrepProject(
+  root: string,
+  inputs: ReadonlyArray<ProjectAgentInput>,
+  rulesDirs: ReadonlyArray<string>,
+  concurrency: number,
+  onWarn?: (message: string) => void,
+  env: NodeJS.ProcessEnv = process.env,
+  deps: PreFilterDeps = {},
+): Promise<ProjectOutcome> {
+  const byAgent = new Map<string, SemgrepHits>();
+  const degradedByAgent = new Map<string, SemgrepFailure>();
+
+  // ---- resolve and vet each distinct rule file once ----
+  const usages: RuleUsage[] = [];
+  const inspected = new Map<string, RuleInspection>();
+  for (const { agent } of inputs) {
+    for (const entry of agent.where.preFilter.filter(isSemgrepPreFilter)) {
+      const rulePath = resolveSemgrepRule(rulesDirs, entry.semgrepRule);
+      if (!rulePath) {
+        onWarn?.(
+          `${agent.slug}: semgrep rule '${entry.semgrepRule}' not found in ${rulesDirs.join(", ")}`,
+        );
+        continue;
+      }
+      if (!inspected.has(rulePath)) {
+        let report: RuleInspection;
+        try {
+          report = inspectSemgrepRule(readFileSync(rulePath, "utf8"));
+        } catch {
+          report = { unsupported: null, langs: null, pathScoped: [], rules: null };
+        }
+        inspected.set(rulePath, report);
+        if (report.unsupported) {
+          onWarn?.(`semgrep rule '${entry.semgrepRule}' cannot run — ${report.unsupported}`);
+        } else if (report.rules === null) {
+          onWarn?.(`semgrep rule '${entry.semgrepRule}' did not parse; skipping it`);
+        } else if (report.pathScoped.length > 0) {
+          // Not an error. Said out loud because the engine honours `paths:`
+          // and so scans fewer files than agentgg selected.
+          onWarn?.(
+            `semgrep rule '${entry.semgrepRule}': ${report.pathScoped.join(", ")} carry their own paths: filter, so they see fewer files than the agent's scope`,
+          );
+        }
+      }
+      const report = inspected.get(rulePath);
+      if (!report) continue;
+      if (report.unsupported) {
+        degradedByAgent.set(agent.slug, "unsupported rule");
+        continue;
+      }
+      if (report.rules === null) continue;
+      usages.push({ slug: agent.slug, rulePath, label: entry.label });
+    }
+  }
+  if (usages.length === 0) return { byAgent, degradedByAgent };
+
+  // ---- merge every rule into one file, ids rewritten so `check_id` is unique ----
+  // Two rule files may legitimately define the same id; without the rewrite a
+  // result could not be attributed back to the file the agent named.
+  const merged: Array<Record<string, unknown>> = [];
+  const ruleOfCheckId = new Map<string, string>();
+  const rulePaths = [...new Set(usages.map((u) => u.rulePath))];
+  for (const [index, rulePath] of rulePaths.entries()) {
+    const report = inspected.get(rulePath);
+    for (const [n, rule] of (report?.rules ?? []).entries()) {
+      const checkId = `agentgg-${index}-${n}-${typeof rule.id === "string" ? rule.id : "rule"}`;
+      merged.push({ ...rule, id: checkId });
+      ruleOfCheckId.set(checkId, rulePath);
+    }
+  }
+  if (merged.length === 0) return { byAgent, degradedByAgent };
+
+  // Languages the merged rules could match. A rule that declares none is
+  // unknown, and one unknown rule opens the targets back up to every file —
+  // a missed language costs time, never coverage.
+  let ruleLangs: Set<string> | null = new Set<string>();
+  for (const rulePath of rulePaths) {
+    const langs = inspected.get(rulePath)?.langs;
+    if (!langs) {
+      ruleLangs = null;
+      break;
+    }
+    for (const l of langs) ruleLangs.add(l);
+  }
+
+  // ---- targets: the union across agents that actually declare a rule ----
+  const filesBySlug = new Map<string, ReadonlySet<string>>();
+  const targets: CodeTarget[] = [];
+  const relOfAbs = new Map<string, string>();
+  const slugsWithRules = new Set(usages.map((u) => u.slug));
+  for (const { agent, files } of inputs) {
+    if (!slugsWithRules.has(agent.slug)) continue;
+    filesBySlug.set(agent.slug, new Set(files));
+    for (const relPath of files) {
+      const analyzer = semgrepLangFor(relPath);
+      if (!analyzer) continue;
+      if (ruleLangs && !ruleLangs.has(analyzer)) continue;
+      const fpath = resolve(root, relPath);
+      const key = pathKey(fpath);
+      if (relOfAbs.has(key)) continue;
+      relOfAbs.set(key, relPath);
+      targets.push([
+        "CodeTarget",
+        { products: ["sast"], analyzer, path: { fpath, ppath: `/${relPath}` } },
+      ]);
+    }
+  }
+  // Resolve the binary only once there is real work, so a scan whose rules
+  // match no file's language never triggers a 60 MB download.
+  if (targets.length === 0) return { byAgent, degradedByAgent };
+
+  const ensure = deps.ensure ?? ((e: NodeJS.ProcessEnv) => ensureSemgrepCore(e));
+  const resolved = await ensure(env);
+  if (!resolved.ok) {
+    onWarn?.(`semgrep unavailable (${resolved.reason}) — regex preFilters only`);
+    for (const slug of slugsWithRules) degradedByAgent.set(slug, resolved.reason);
+    return { byAgent, degradedByAgent };
+  }
+  deps.onInfo?.(`semgrep-core: ${resolved.bin} (${resolved.source})`);
+  // Printed before the run, so `--verbose` shows the planned work even when
+  // the invocation then fails. The result line below reports what came back.
+  deps.onInfo?.(`semgrep: ${merged.length} rule(s) over ${targets.length} file(s)`);
+
+  // ---- one invocation ----
+  const work = mkdtempSync(join(tmpdir(), "agentgg-semgrep-"));
+  let stdout: string;
+  try {
+    const rulesFile = join(work, "rules.json");
+    const targetsFile = join(work, "targets.json");
+    writeFileSync(rulesFile, JSON.stringify({ rules: merged }));
+    writeFileSync(targetsFile, JSON.stringify(["Targets", targets]));
+    const args = [
+      "-rules",
+      rulesFile,
+      "-targets",
+      targetsFile,
+      "-json",
+      "-j",
+      String(Math.max(1, concurrency)),
+      "-timeout",
+      String(RULE_TIMEOUT_SECONDS),
+      "-timeout_threshold",
+      String(TIMEOUT_THRESHOLD),
+    ];
+    const run =
+      deps.run ??
+      (async (bin: string, a: ReadonlyArray<string>) =>
+        (await execFileAsync(bin, [...a], { maxBuffer: MAX_BUFFER, timeout: RUN_TIMEOUT_MS }))
+          .stdout);
+    try {
+      stdout = await run(resolved.bin, args);
+    } catch (err) {
+      const e = err as ExecFailure;
+      // A run that printed no JSON never started. One that timed out did
+      // start, so the two are told apart and recorded differently. Either
+      // way this warns: a silent zero here reads as "semgrep found nothing".
+      if (e.killed || e.code === "ETIMEDOUT") {
+        onWarn?.(`semgrep-core timed out after ${RUN_TIMEOUT_MS / 1000}s`);
+        for (const slug of slugsWithRules) degradedByAgent.set(slug, "run timed out");
+        return { byAgent, degradedByAgent };
+      }
+      onWarn?.(`semgrep-core would not start (${resolved.bin}): ${describeExecError(e)}`);
+      for (const slug of slugsWithRules) degradedByAgent.set(slug, "binary failed to start");
+      return { byAgent, degradedByAgent };
+    }
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+
+  // ---- distribute results back to the agents that asked for each rule ----
+  let parsed: CoreOutput;
+  try {
+    parsed = parseCoreJson(stdout);
+  } catch {
+    onWarn?.("semgrep-core returned output this build could not parse");
+    for (const slug of slugsWithRules) degradedByAgent.set(slug, "binary failed to start");
+    return { byAgent, degradedByAgent };
+  }
+  // Per-file engine trouble. One file is affected, not the run, which is why
+  // this warns rather than degrading the agent. Capped because a repo with a
+  // vendored bundle can produce one of these per file, and a wall of them
+  // buries the warnings that matter.
+  const errors = parsed.errors ?? [];
+  for (const e of errors.slice(0, MAX_REPORTED_ERRORS)) {
+    const where = relOfAbs.get(pathKey(e.location?.path ?? ""));
+    const at = where ? `${where}:${e.location?.start?.line ?? "?"}: ` : "";
+    const severity = e.severity === "warn" ? "partial parse" : "error";
+    onWarn?.(`semgrep-core ${at}${oneLine(e.message ?? "unknown error")} (${severity})`);
+  }
+  if (errors.length > MAX_REPORTED_ERRORS) {
+    onWarn?.(`semgrep-core: ${errors.length - MAX_REPORTED_ERRORS} more file-level message(s)`);
+  }
+
+  // rule file → its results, keyed by repo-relative path. Built once; each
+  // usage then takes a labelled copy of the slice its agent's scope covers.
+  const byRule = new Map<string, Map<string, RawResult[]>>();
+  for (const r of parsed.results ?? []) {
+    const rulePath = r.check_id ? ruleOfCheckId.get(r.check_id) : undefined;
+    const relPath = relOfAbs.get(pathKey(r.path ?? ""));
+    if (!rulePath || !relPath || typeof r.start?.line !== "number") continue;
+    const perFile = byRule.get(rulePath) ?? new Map<string, RawResult[]>();
+    const bucket = perFile.get(relPath) ?? [];
+    bucket.push(r);
+    perFile.set(relPath, bucket);
+    byRule.set(rulePath, perFile);
+  }
+
+  for (const usage of usages) {
+    const perFile = byRule.get(usage.rulePath);
+    if (!perFile) continue;
+    const scope = filesBySlug.get(usage.slug);
+    const hits = byAgent.get(usage.slug) ?? new Map<string, SemgrepHit[]>();
+    for (const [relPath, results] of perFile) {
+      if (scope && !scope.has(relPath)) continue;
+      const bucket = hits.get(relPath) ?? [];
+      for (const r of results) {
+        const line = r.start?.line;
+        if (typeof line !== "number") continue;
+        bucket.push(toSemgrepHit(r, line, usage.label));
+      }
+      if (bucket.length > 0) hits.set(relPath, bucket);
+    }
+    if (hits.size > 0) byAgent.set(usage.slug, hits);
+  }
+
+  let anchors = 0;
+  for (const hits of byAgent.values()) {
+    for (const bucket of hits.values()) anchors += bucket.length;
+  }
+  deps.onInfo?.(`semgrep produced ${anchors} anchor(s) for ${byAgent.size} agent(s)`);
+
+  return { byAgent, degradedByAgent };
+}
+
+/**
+ * Single-agent view of `runSemgrepProject`, for a caller that holds one
+ * agent. A scan should use the project run instead: it shares one parse of
+ * each file across every agent, which this cannot.
  */
 export async function runSemgrepPreFilter(
   root: string,
@@ -467,104 +728,17 @@ export async function runSemgrepPreFilter(
   env: NodeJS.ProcessEnv = process.env,
   deps: PreFilterDeps = {},
 ): Promise<PreFilterOutcome> {
-  const hits: SemgrepHits = new Map();
-  const entries = agent.where.preFilter.filter(isSemgrepPreFilter);
-  if (entries.length === 0 || files.length === 0) return { hits, degraded: null };
-
-  const rules: Array<{ path: string; label?: string; langs: Set<string> | null }> = [];
-  for (const entry of entries) {
-    const path = resolveSemgrepRule(rulesDirs, entry.semgrepRule);
-    if (!path) {
-      onWarn?.(
-        `${agent.slug}: semgrep rule '${entry.semgrepRule}' not found in ${rulesDirs.join(", ")}`,
-      );
-      continue;
-    }
-    let langs: Set<string> | null = null;
-    try {
-      langs = semgrepRuleLanguages(readFileSync(path, "utf8"));
-    } catch {
-      // Unreadable rule file — treat as "languages unknown" and let the
-      // binary decide, same as an unparseable `languages:` block.
-    }
-    rules.push({ path, label: entry.label, langs });
-  }
-  if (rules.length === 0) return { hits, degraded: null };
-
-  const jobs: Array<{ rule: (typeof rules)[number]; relPath: string; lang: string }> = [];
-  for (const relPath of files) {
-    const lang = semgrepLangFor(relPath);
-    if (!lang) continue;
-    for (const rule of rules) {
-      if (rule.langs && !rule.langs.has(lang)) continue;
-      jobs.push({ rule, relPath, lang });
-    }
-  }
-
-  // Resolve the binary only once there is real work, so an agent whose rules
-  // match no file's language never triggers a 60 MB download.
-  if (jobs.length === 0) return { hits, degraded: null };
-
-  const ensure = deps.ensure ?? ((e: NodeJS.ProcessEnv) => ensureSemgrepCore(e));
-  const resolved = await ensure(env);
-  if (!resolved.ok) {
-    onWarn?.(`${agent.slug}: semgrep unavailable (${resolved.reason}) — regex preFilters only`);
-    return { hits, degraded: resolved.reason };
-  }
-  const bin = resolved.bin;
-  deps.onInfo?.(`semgrep-core: ${bin} (${resolved.source})`);
-
-  let startFailure: SemgrepFailure | null = null;
-  await runConcurrent(jobs, Math.max(1, concurrency), async (job) => {
-    if (startFailure) return;
-    let stdout: string;
-    try {
-      const out = await execFileAsync(
-        bin,
-        ["-rules", job.rule.path, "-lang", job.lang, "-json", resolve(root, job.relPath)],
-        { maxBuffer: 32 * 1024 * 1024, timeout: 60_000 },
-      );
-      stdout = out.stdout;
-    } catch (err) {
-      const e = err as ExecFailure;
-      // A binary that will not start (missing, not executable, wrong glibc, or
-      // unable to load its shared libraries) fails the same way for every job
-      // and prints no JSON. Record it once and stop the rest. Anything that did
-      // print JSON started fine, so only that one file is skipped. Either way
-      // this warns: a silent zero here reads as "semgrep found nothing".
-      if (e.killed || e.code === "ETIMEDOUT") {
-        onWarn?.(`${agent.slug}: semgrep-core timed out on ${job.relPath}`);
-        return;
-      }
-      if (!e.stdout?.includes("{")) {
-        startFailure = "binary failed to start";
-        onWarn?.(`${agent.slug}: semgrep-core would not start (${bin}): ${describeExecError(e)}`);
-      } else {
-        onWarn?.(`${agent.slug}: semgrep-core failed on ${job.relPath}: ${describeExecError(e)}`);
-      }
-      return;
-    }
-    let results: RawResult[];
-    try {
-      results = parseCoreJson(stdout).results ?? [];
-    } catch {
-      return;
-    }
-    if (results.length === 0) return;
-    const bucket = hits.get(job.relPath) ?? [];
-    for (const r of results) {
-      const line = r.start?.line;
-      if (typeof line !== "number") continue;
-      bucket.push(toSemgrepHit(r, line, job.rule.label));
-    }
-    if (bucket.length > 0) hits.set(job.relPath, bucket);
-  });
-
-  let anchors = 0;
-  for (const bucket of hits.values()) anchors += bucket.length;
-  deps.onInfo?.(
-    `${agent.slug}: semgrep ran ${rules.length} rule(s) over ${jobs.length} file-job(s) → ${anchors} anchor(s) in ${hits.size} file(s)`,
+  const out = await runSemgrepProject(
+    root,
+    [{ agent, files }],
+    rulesDirs,
+    concurrency,
+    onWarn ? (m) => onWarn(m.startsWith(`${agent.slug}:`) ? m : `${agent.slug}: ${m}`) : undefined,
+    env,
+    deps,
   );
-
-  return { hits, degraded: startFailure };
+  return {
+    hits: out.byAgent.get(agent.slug) ?? new Map(),
+    degraded: out.degradedByAgent.get(agent.slug) ?? null,
+  };
 }

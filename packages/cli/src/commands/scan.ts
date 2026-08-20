@@ -42,7 +42,7 @@ import { selectAgents } from "../precondition.js";
 import { buildCredentialsFromOpts, validateProviderFlags } from "../providers/index.js";
 import { renderReconForPrompt, runRecon } from "../recon.js";
 import { findingFilenameSlug, writeMarkdownReport } from "../reporters/md.js";
-import { getSemgrepRulesDir, isSemgrepSuppressed, runSemgrepPreFilter } from "../semgrep.js";
+import { getSemgrepRulesDir, isSemgrepSuppressed, runSemgrepProject } from "../semgrep.js";
 import { runSmartExclude } from "../smart-exclude.js";
 import { resolveTemplates } from "../template.js";
 import { createUsageMeter, type UsageMeter } from "../usage-meter.js";
@@ -938,6 +938,10 @@ export async function runScan(
         `\n[3/3] Agents — ${queuedAgents.length} queued (completed agents are reused from prior runs; only new/changed work calls the LLM)…`,
       );
     }
+    // Pass 1: resolve each agent to the file set it will review. Cheap —
+    // resume check + walk, no LLM and no engine — and it has to finish before
+    // semgrep runs, because the project pass needs every agent's files at once.
+    const prepared: { agent: Agent; agentExcludes: string[]; scopedFiles: string[] }[] = [];
     for (const agent of queuedAgents) {
       if (!opts.rescan) {
         const prior = readAgentRun(outDir, agent.slug);
@@ -983,22 +987,31 @@ export async function runScan(
       // Under --diff, the list is intersected with the changed-file set.
       // There is no "roam" mode: an agent always reviews a concrete file set
       // in batches, and uses its tools to read beyond it when needed.
-      const candidates: AgentCandidate[] = [];
       const [work] = walkForAgents(root, [agent], agentWalkCfg);
       const files = work ? work.files : [];
       const scopedFiles = diffFiles ? files.filter((f) => diffFiles.has(f)) : files;
-      // `semgrepRule` preFilters need the whole file set, so they run here
-      // in one pass; the per-line regex entries stay in the loop below.
-      const { hits: semgrepHits, degraded: semgrepDegraded } = await runSemgrepPreFilter(
-        root,
-        agent,
-        scopedFiles,
-        semgrepRuleDirs,
-        concurrency,
-        (m) => console.warn(`warning: ${m}`),
-        env,
-        { onInfo: opts.verbose ? (m) => console.log(`  ${m}`) : undefined },
-      );
+      prepared.push({ agent, agentExcludes, scopedFiles });
+    }
+
+    // `semgrepRule` preFilters run ONCE for the whole scan, over the union of
+    // every agent's files. The engine then parses each file a single time and
+    // matches every rule against that one tree, instead of re-parsing it per
+    // rule and per agent. Per-line regex entries stay in the loop below.
+    const semgrepProject = await runSemgrepProject(
+      root,
+      prepared.map(({ agent, scopedFiles }) => ({ agent, files: scopedFiles })),
+      semgrepRuleDirs,
+      concurrency,
+      (m) => console.warn(`warning: ${m}`),
+      env,
+      { onInfo: opts.verbose ? (m) => console.log(`  ${m}`) : undefined },
+    );
+
+    // Pass 2: build each agent's candidates and enqueue its batches.
+    for (const { agent, agentExcludes, scopedFiles } of prepared) {
+      const candidates: AgentCandidate[] = [];
+      const semgrepHits = semgrepProject.byAgent.get(agent.slug) ?? new Map();
+      const semgrepDegraded = semgrepProject.degradedByAgent.get(agent.slug) ?? null;
       // Recorded on the sidecar so the report cannot imply coverage this
       // agent did not have.
       const degraded = semgrepDegraded
