@@ -10,6 +10,8 @@
 
 **[agentgg.dev](https://agentgg.dev)** · [Platform](https://app.agentgg.dev) · [Agents catalog](https://github.com/agentgg-dev/agentgg-agents) · [Report a bug](https://github.com/agentgg-dev/agentgg/issues/new/choose) · [Report a security issue](https://github.com/agentgg-dev/agentgg/security)
 
+Help us grow and [star us on GitHub](https://github.com/agentgg-dev/agentgg)! ⭐️
+
 > **agentgg is in beta.** Things will move and edges will be rough. Bug reports and feedback are very welcome. [Open an issue](https://github.com/agentgg-dev/agentgg/issues/new/choose).
 
 <p align="center">
