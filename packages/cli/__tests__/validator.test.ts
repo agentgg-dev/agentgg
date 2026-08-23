@@ -130,6 +130,17 @@ describe("LlmValidation schema", () => {
     expect(parsed.verdict).toBe("confirmed");
   });
 
+  it("defaults confidence when the model omits it", () => {
+    // A model that closes the object early (unescaped quote in `reasoning`)
+    // still yields a usable verdict instead of failing the whole finding.
+    const parsed = LlmValidation.parse({
+      verdict: "confirmed",
+      reasoning: "The handler interpolates `id` straight into the query.",
+    });
+    expect(parsed.confidence).toBe(0.5);
+    expect(parsed.verdict).toBe("confirmed");
+  });
+
   it("rejects an unknown verdict", () => {
     expect(() =>
       LlmValidation.parse({

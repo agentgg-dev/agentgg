@@ -27,8 +27,12 @@ export const LlmValidation = z.object({
     .describe(
       "Short prose (max 4 sentences) explaining your verdict. Cite the specific code element that made you decide.",
     ),
+  // Optional: `asValidationField` drops it, so a missing value costs nothing —
+  // but a required field threw away whole verdicts when the model closed the
+  // object early (unescaped quote inside `reasoning`).
   confidence: z
     .preprocess((v) => (typeof v === "number" && v > 1 ? v / 100 : v), z.number().min(0).max(1))
+    .default(0.5)
     .describe(
       "Decimal 0.0–1.0. NOT a percentage. Write 0.3 not 30. 0.0 = guess, 1.0 = certain. Uncertain verdicts should have low confidence.",
     ),
