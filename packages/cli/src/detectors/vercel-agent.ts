@@ -1251,9 +1251,11 @@ function jsonOutputInstruction(multiAgent: boolean): string {
 
 After your investigation, output ALL findings as a single JSON object matching EXACTLY this shape — no prose, no markdown fences, no trailing text:
 
-{"findings":[{"title":"Short title","vulnSlug":"vuln-class","agentSlug":null,"lineRange":[1,10],"filePath":"src/routes/users.ts","summary":"One sentence.","details":"Markdown analysis with file paths and line numbers.","poc":"Reproduction steps.","impact":"Who is affected and what they get.","references":[],"confidence":0.9}]}
+{"findings":[{"title":"Short title","vulnSlug":"vuln-class","agentSlug":null,"lineRange":[1,10],"filePath":"src/routes/users.ts","summary":"One sentence.","details":"Markdown analysis with file paths and line numbers.","poc":"Reproduction steps.","impact":"Who is affected and what they get.","references":["CWE-89","OWASP A03:2021 Injection"],"confidence":0.9}]}
 
 IMPORTANT: Every \`filePath\` must be a real file path you actually read or located with tools during this session. Do NOT copy the example path above — replace it with the actual path from your investigation. If no findings, output exactly: {"findings":[]}
+
+IMPORTANT: \`references\` MUST carry at least one CWE ID for every finding, written as \`CWE-<number>\`. Add the matching OWASP Top 10 category when one applies, and any documentation URL you relied on. The example values above are placeholders — replace them with the identifiers for YOUR finding. Leave the array empty only when no CWE describes the issue.
 
 ${agentSlugNote}`;
 }
