@@ -968,6 +968,9 @@ export const ScanUsage = z.object({
   model: z.string().optional(),
   /** Flat token totals for this CLI invocation. */
   totals: LlmUsage,
+  /** What the provider charged for this invocation, USD. OpenRouter reports
+   *  it per call; every other provider omits it and consumers price tokens. */
+  costUsd: z.number().optional(),
   /** ISO timestamp of the most recent checkpoint. */
   updatedAt: z.string(),
 });

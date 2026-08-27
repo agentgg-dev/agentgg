@@ -128,21 +128,56 @@ export function parseRoutingOverride(json: string): Record<string, unknown> {
 }
 
 /**
+ * Running total of what OpenRouter charged, in USD.
+ *
+ * OpenRouter reports a per-call charge in `usage.cost`, but the AI SDK's
+ * OpenAI-compatible client parses the OpenAI response shape and drops the
+ * field. The fetch wrapper reads it off the raw response instead and folds it
+ * in here. The meter is a plain running total, not a per-call value: nothing
+ * has to match a cost to the call that produced it, so concurrent requests
+ * cannot misattribute spend.
+ */
+export interface CostMeter {
+  /** Fold one response's reported charge in. Anything else is ignored. */
+  add(usd: unknown): void;
+  /** USD charged for every call made through this fetch, this process. */
+  totalUsd(): number;
+}
+
+export function createCostMeter(): CostMeter {
+  let total = 0;
+  return {
+    add(usd: unknown): void {
+      if (typeof usd === "number" && Number.isFinite(usd) && usd > 0) total += usd;
+    },
+    totalUsd: (): number => total,
+  };
+}
+
+/**
  * Wrap fetch to merge the routing block into chat-completions bodies and
  * add OpenRouter's attribution headers. Mirrors vertex.ts's fetch
  * injection so we stay free of an extra SDK dependency.
+ *
+ * With a `cost` meter attached it also turns on OpenRouter's usage accounting
+ * and records what each call was charged.
  */
 export function createRoutingFetch(
   routing: Record<string, unknown>,
   inner: typeof fetch = fetch,
+  cost?: CostMeter,
 ): typeof fetch {
   return async (url, init) => {
     const href = typeof url === "string" ? url : url.toString();
+    const isCompletion = href.includes("/chat/completions");
     let nextInit = init;
-    if (href.includes("/chat/completions") && init?.body && typeof init.body === "string") {
+    if (isCompletion && init?.body && typeof init.body === "string") {
       try {
         const body = JSON.parse(init.body) as Record<string, unknown>;
         if (body.provider == null) body.provider = routing;
+        // Opt in to usage accounting so the response carries `usage.cost`.
+        // Only when someone is listening: it changes the request we send.
+        if (cost && body.usage == null) body.usage = { include: true };
         nextInit = { ...init, body: JSON.stringify(body) };
       } catch {
         // Non-JSON body should never reach chat/completions; pass through.
@@ -151,8 +186,28 @@ export function createRoutingFetch(
     const headers = new Headers(nextInit?.headers);
     headers.set("HTTP-Referer", process.env.OPENROUTER_REFERER ?? "https://agentgg.dev");
     headers.set("X-Title", "AgentGG");
-    return inner(url, { ...nextInit, headers });
+    const res = await inner(url, { ...nextInit, headers });
+    if (cost && isCompletion) await recordResponseCost(cost, res);
+    return res;
   };
+}
+
+/**
+ * Read `usage.cost` off a completion response without consuming it — the SDK
+ * parses the same body afterwards, so this reads a clone. Best-effort by
+ * design: an error page, a streamed body, or a provider that reports no cost
+ * simply leaves the total where it was.
+ */
+async function recordResponseCost(cost: CostMeter, res: Response): Promise<void> {
+  // Never touch a streamed body: cloning and parsing it drains the stream, so
+  // the caller would not see the response until the stream ended.
+  if (res.headers.get("content-type")?.includes("event-stream")) return;
+  try {
+    const body = (await res.clone().json()) as { usage?: { cost?: unknown } };
+    cost.add(body?.usage?.cost);
+  } catch {
+    // No parsable body: nothing to record.
+  }
 }
 
 function buildDetector(config: UserConfig, options: ResolveOptions): Detector {
@@ -181,9 +236,13 @@ function buildDetector(config: UserConfig, options: ResolveOptions): Detector {
     announceThrottle(orLabels, tpmLimit);
     innerFetch = createThrottledFetch(new TpmBucket(tpmLimit), orLabels);
   }
+  // One counter per detector: the fetch wrapper folds each response's charge
+  // in, and the usage meter reads the running total at every checkpoint.
+  const cost = createCostMeter();
   const routingFetch = createRoutingFetch(
     buildProviderRouting(options.openrouterRouting),
     innerFetch,
+    cost,
   );
 
   const openrouter = createOpenAI({ apiKey, baseURL, fetch: routingFetch });
@@ -193,6 +252,7 @@ function buildDetector(config: UserConfig, options: ResolveOptions): Detector {
     thinking: options.thinking,
     verbose: options.verbose,
     validateMaxTurns: options.validateMaxTurns,
+    costSource: () => cost.totalUsd(),
   });
 }
 

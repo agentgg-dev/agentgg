@@ -36,6 +36,10 @@ export class UsageMeter {
   private model: string | undefined;
   private dirty = false;
   private timer: NodeJS.Timeout | undefined;
+  /** USD already in the ledger this meter was seeded from (prior invocations). */
+  private seedCostUsd = 0;
+  /** This process's running USD total, read at checkpoint time. */
+  private costSource: (() => number) | undefined;
 
   /**
    * @param outDir   scan output dir (usage.json lives under its `state/`).
@@ -51,6 +55,7 @@ export class UsageMeter {
     if (seed) {
       addUsage(this.totals, seed.totals);
       this.model = seed.model;
+      this.seedCostUsd = seed.costUsd ?? 0;
     }
   }
 
@@ -63,6 +68,17 @@ export class UsageMeter {
     this.totals.calls += 1;
     this.dirty = true;
     this.scheduleFlush();
+  }
+
+  /**
+   * Register the running USD total for this process. The provider layer owns
+   * the counter (only OpenRouter reports a charge, and it arrives on the HTTP
+   * response rather than the SDK result), so the meter reads an absolute total
+   * at checkpoint time instead of a per-call figure. That is what keeps
+   * concurrent calls from misattributing cost.
+   */
+  trackCost(source: () => number): void {
+    this.costSource = source;
   }
 
   /**
@@ -91,11 +107,25 @@ export class UsageMeter {
     return { ...this.totals };
   }
 
+  /**
+   * Cost to write into the ledger: what earlier invocations already recorded
+   * plus what this process has spent. Undefined when nothing reports a cost,
+   * so providers other than OpenRouter leave the field off entirely rather
+   * than claiming a charge of zero.
+   */
+  private currentCostUsd(): number | undefined {
+    if (this.costSource === undefined) {
+      return this.seedCostUsd > 0 ? this.seedCostUsd : undefined;
+    }
+    return this.seedCostUsd + this.costSource();
+  }
+
   private snapshot(): ScanUsage {
     return {
       provider: this.provider,
       model: this.model,
       totals: { ...this.totals },
+      costUsd: this.currentCostUsd(),
       updatedAt: new Date().toISOString(),
     };
   }

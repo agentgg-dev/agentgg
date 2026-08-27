@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { readUsage } from "@agentgg/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { extractClaudeUsage } from "../src/detectors/claude-agent.js";
-import { extractCallUsage } from "../src/detectors/vercel-agent.js";
+import { extractCallUsage, VercelAgentDetector } from "../src/detectors/vercel-agent.js";
 import { UsageMeter } from "../src/usage-meter.js";
 
 describe("extractCallUsage", () => {
@@ -211,5 +211,103 @@ describe("UsageMeter", () => {
   it("flush is a no-op when nothing was recorded", () => {
     new UsageMeter(outDir, "vertex").flush();
     expect(readUsage(outDir)).toBeNull();
+  });
+});
+
+/**
+ * Provider cost tracking. Only OpenRouter reports a per-call charge, and it
+ * arrives through the provider's fetch wrapper rather than the SDK result —
+ * so the meter reads a running total from a source instead of a per-call value.
+ */
+describe("UsageMeter cost tracking", () => {
+  let outDir: string;
+
+  beforeEach(() => {
+    outDir = mkdtempSync(join(tmpdir(), "agentgg-cost-"));
+  });
+  afterEach(() => {
+    rmSync(outDir, { recursive: true, force: true });
+  });
+
+  const call = (input: number, output: number) => ({
+    inputTokens: input,
+    outputTokens: output,
+    cachedInputTokens: 0,
+  });
+
+  it("writes the tracked provider cost into the ledger", () => {
+    const meter = new UsageMeter(outDir, "openrouter");
+    meter.trackCost(() => 0.25);
+    meter.record(call(100, 40), "z-ai/glm-5.2");
+    meter.flush();
+
+    expect(readUsage(outDir)?.costUsd).toBe(0.25);
+  });
+
+  it("omits costUsd for providers that report no cost", () => {
+    const meter = new UsageMeter(outDir, "vertex");
+    meter.record(call(100, 40));
+    meter.flush();
+
+    expect(readUsage(outDir)?.costUsd).toBeUndefined();
+  });
+
+  // The accumulator lives in the fetch wrapper, in process memory, so it
+  // restarts at 0. Without the seed a retry would overwrite the earlier spend
+  // while the token totals stayed cumulative — a fake margin in the report.
+  it("adds this run's cost to the seeded ledger so a resumed run keeps earlier spend", () => {
+    const first = new UsageMeter(outDir, "openrouter");
+    first.trackCost(() => 0.4);
+    first.record(call(100, 40), "z-ai/glm-5.2");
+    first.flush();
+    expect(readUsage(outDir)?.costUsd).toBe(0.4);
+
+    const resumed = new UsageMeter(outDir, "openrouter", readUsage(outDir));
+    resumed.trackCost(() => 0.25);
+    resumed.record(call(10, 5));
+    resumed.flush();
+
+    expect(readUsage(outDir)?.costUsd).toBeCloseTo(0.65, 10);
+  });
+});
+
+/**
+ * The detector is the seam between the provider's cost counter and the meter:
+ * the provider builds the counter inside its fetch wrapper, and the commands
+ * hand the meter to the detector. Without this forwarding the counter would
+ * tick with nothing reading it.
+ */
+describe("VercelAgentDetector cost wiring", () => {
+  let outDir: string;
+
+  beforeEach(() => {
+    outDir = mkdtempSync(join(tmpdir(), "agentgg-wiring-"));
+  });
+  afterEach(() => {
+    rmSync(outDir, { recursive: true, force: true });
+  });
+
+  const stubModel = { modelId: "z-ai/glm-5.2" } as never;
+
+  it("forwards its cost source to the meter it is given", () => {
+    const detector = new VercelAgentDetector("openrouter", stubModel, {
+      costSource: () => 0.5,
+    });
+    const meter = new UsageMeter(outDir, "openrouter");
+    detector.attachUsageMeter(meter);
+    meter.record({ inputTokens: 10, outputTokens: 4, cachedInputTokens: 0 });
+    meter.flush();
+
+    expect(readUsage(outDir)?.costUsd).toBe(0.5);
+  });
+
+  it("leaves the ledger cost-free for a provider with no cost source", () => {
+    const detector = new VercelAgentDetector("vertex", stubModel);
+    const meter = new UsageMeter(outDir, "vertex");
+    detector.attachUsageMeter(meter);
+    meter.record({ inputTokens: 10, outputTokens: 4, cachedInputTokens: 0 });
+    meter.flush();
+
+    expect(readUsage(outDir)?.costUsd).toBeUndefined();
   });
 });

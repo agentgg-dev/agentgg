@@ -314,6 +314,9 @@ export interface VercelAgentDetectorOpts {
    *  instead of dropping the whole batch. Ollama overrides it with its
    *  `structuredOutputs: true` config, which the tool-calling model can't use. */
   structuredModel?: LanguageModelV1;
+  /** Running USD total for this process, owned by the provider layer. Only
+   *  OpenRouter supplies one; it is forwarded to the usage meter on attach. */
+  costSource?: () => number;
 }
 
 // Directories skipped during recursive traversal
@@ -394,6 +397,7 @@ export class VercelAgentDetector implements Detector {
   /** Object-generation mode for `generateObject`. Bedrock's SDK only supports
    *  tool-mode; every other provider we drive supports json mode. */
   private readonly objectMode: "json" | "tool";
+  private readonly costSource?: () => number;
   private meter?: UsageMeter;
 
   constructor(name: string, model: LanguageModelV1, opts: VercelAgentDetectorOpts = {}) {
@@ -412,10 +416,12 @@ export class VercelAgentDetector implements Detector {
     this.thinking = opts.thinking;
     this.verbose = opts.verbose ?? false;
     this.validateMaxTurns = opts.validateMaxTurns ?? 50;
+    this.costSource = opts.costSource;
   }
 
   attachUsageMeter(meter: UsageMeter): void {
     this.meter = meter;
+    if (this.costSource) meter.trackCost(this.costSource);
   }
 
   /**
