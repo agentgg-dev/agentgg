@@ -80,3 +80,14 @@ export function validateProviderFlags(providerName: Provider, opts: ScanFlagOpts
         : ""),
   );
 }
+
+/**
+ * Help text for `--region`. Shared so the five commands that register the
+ * flag cannot drift apart. `--region` is provider-scoped like every other
+ * credential flag: Bedrock and Vertex both declare it in `acceptedFlags`,
+ * and `buildCredentialsFromOpts` feeds it to both.
+ */
+export const REGION_FLAG_HELP =
+  "Region for the active provider. Bedrock: an AWS region such as us-east-1, " +
+  "falling back to $AWS_REGION / $AWS_DEFAULT_REGION. " +
+  "Vertex AI: the publisher region pool, such as global or us-central1.";

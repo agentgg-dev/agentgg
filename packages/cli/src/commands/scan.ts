@@ -39,7 +39,11 @@ import { listChangedFiles, loadCommitPatch } from "../diff.js";
 import { loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
 import { evaluatePreFilter } from "../pre-filter.js";
 import { selectAgents } from "../precondition.js";
-import { buildCredentialsFromOpts, validateProviderFlags } from "../providers/index.js";
+import {
+  buildCredentialsFromOpts,
+  REGION_FLAG_HELP,
+  validateProviderFlags,
+} from "../providers/index.js";
 import { renderReconForPrompt, runRecon } from "../recon.js";
 import { findingFilenameSlug, writeMarkdownReport } from "../reporters/md.js";
 import { getSemgrepRulesDir, isSemgrepSuppressed, runSemgrepProject } from "../semgrep.js";
@@ -1993,10 +1997,7 @@ export function registerScanCommand(program: Command): void {
       "One-shot Anthropic OAuth token (sk-ant-oat…). Not persisted. Anthropic only.",
     )
     .option("--base-url <url>", "One-shot Ollama base URL (not persisted). Ollama only.")
-    .option(
-      "--region <name>",
-      "AWS region for Bedrock (e.g. us-east-1). Falls back to $AWS_REGION / $AWS_DEFAULT_REGION. Bedrock only.",
-    )
+    .option("--region <name>", REGION_FLAG_HELP)
     .option(
       "--project <id>",
       "GCP project ID for Vertex AI. Falls back to $GOOGLE_CLOUD_PROJECT / $GCLOUD_PROJECT. Vertex only.",
@@ -2020,7 +2021,7 @@ export function registerScanCommand(program: Command): void {
     )
     .option(
       "--diff <commit>",
-      "Restrict the scan to a single commit's own changes (parent → commit), independent of the working tree. Each agent's candidate files are intersected with the files touched in <commit>, and the commit patch is injected into the agent's prompt as a focus hint (tools stay unrestricted so it can chase context outward).",
+      "Restrict the scan to what a commit or range touched, independent of the working tree. A bare ref reviews that commit's own changes (parent → commit). `a..b` is the tip-to-tip diff; `a...b` is merge-base(a,b) → b, which matches a PR review. Each agent's candidate files are intersected with the touched files, and the patch is injected into the agent's prompt as a focus hint (tools stay unrestricted so it can chase context outward).",
     )
     .option(
       "--concurrency <n>",

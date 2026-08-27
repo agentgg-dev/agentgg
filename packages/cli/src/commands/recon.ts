@@ -15,7 +15,11 @@ import { defaultAgentDirs, loadAllAgents } from "../agent-catalog.js";
 import { installOfficialAgents } from "../agents-install.js";
 import { loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
 import { selectAgents } from "../precondition.js";
-import { buildCredentialsFromOpts, validateProviderFlags } from "../providers/index.js";
+import {
+  buildCredentialsFromOpts,
+  REGION_FLAG_HELP,
+  validateProviderFlags,
+} from "../providers/index.js";
 import { runRecon } from "../recon.js";
 import { runSmartExclude } from "../smart-exclude.js";
 import { resolveTemplates } from "../template.js";
@@ -352,10 +356,7 @@ export function registerReconCommand(program: Command): void {
       "One-shot Anthropic OAuth token (sk-ant-oat…). Not persisted. Anthropic only.",
     )
     .option("--base-url <url>", "One-shot Ollama base URL (not persisted). Ollama only.")
-    .option(
-      "--region <name>",
-      "AWS region for Bedrock (e.g. us-east-1). Falls back to $AWS_REGION / $AWS_DEFAULT_REGION. Bedrock only.",
-    )
+    .option("--region <name>", REGION_FLAG_HELP)
     .option(
       "--project <id>",
       "GCP project ID for Vertex AI. Falls back to $GOOGLE_CLOUD_PROJECT / $GCLOUD_PROJECT. Vertex only.",

@@ -9,6 +9,7 @@ import { vertexModule } from "./vertex.js";
 
 export {
   buildCredentialsFromOpts,
+  REGION_FLAG_HELP,
   type ScanFlagOpts,
   validateProviderFlags,
 } from "./cli-flags.js";
