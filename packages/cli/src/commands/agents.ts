@@ -1,12 +1,17 @@
 import { existsSync, statSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
-import { type Agent, getOfficialAgentsDir, loadAgentsFromDir } from "@agentgg/core";
+import { type Agent, getOfficialAgentsDir, loadAgentsFromDir, NoiseTier } from "@agentgg/core";
 import type { Command } from "commander";
 import { lintOfficialAgents, loadAllAgents } from "../agent-catalog.js";
 import { addAgents, getCustomAgentsDir, removeAgent } from "../agents-fs.js";
 import { getInstalledVersion, installOfficialAgents } from "../agents-install.js";
 
 const SUMMARY_THRESHOLD = 30;
+
+// Derived from the schema so the --noise help text cannot drift from the
+// tiers agents may actually declare.
+const NOISE_TIERS: ReadonlyArray<string> = NoiseTier.options;
+const SCOPES: ReadonlyArray<string> = ["all", "scoped"];
 
 export function getCategory(agent: Agent, env: NodeJS.ProcessEnv = process.env): string {
   const fullPath = agent.source?.path;
@@ -112,6 +117,20 @@ function matches(values: string[] | null, target: string): boolean {
   return values === null || values.includes(target);
 }
 
+// Commander takes any string for these filters, so a typo silently matches
+// nothing and reads as an empty catalog. Name the bad value and the valid set.
+function rejectUnknown(
+  values: string[] | null,
+  valid: ReadonlyArray<string>,
+  flag: string,
+): string | null {
+  if (values === null) return null;
+  const bad = values.filter((v) => !valid.includes(v));
+  if (bad.length === 0) return null;
+  const plural = bad.length === 1 ? "" : "s";
+  return `Unknown ${flag} value${plural}: ${bad.join(", ")}. Valid: ${valid.join(", ")}.`;
+}
+
 function pad(s: string, width: number): string {
   return s.length >= width ? s : s + " ".repeat(width - s.length);
 }
@@ -129,8 +148,8 @@ export function registerAgentsCommand(program: Command): void {
     .option("--json", "emit raw JSON instead of a table")
     .option("--all", "show full table even when no filters are applied")
     .option("--category <names>", "filter by category, comma-separated (e.g. auth,injection)")
-    .option("--mode <scopes>", "filter by scope, comma-separated (all, scoped)")
-    .option("--noise <tiers>", "filter by noise tier, comma-separated (precise, normal, loud)")
+    .option("--mode <scopes>", `filter by scope, comma-separated (${SCOPES.join(", ")})`)
+    .option("--noise <tiers>", `filter by noise tier, comma-separated (${NOISE_TIERS.join(", ")})`)
     .action(
       (opts: {
         json?: boolean;
@@ -148,6 +167,17 @@ export function registerAgentsCommand(program: Command): void {
         const modes = parseList(opts.mode);
         const noises = parseList(opts.noise);
         const hasFilters = categories !== null || modes !== null || noises !== null;
+
+        const knownCategories = [...new Set(all.map((a) => getCategory(a)))].sort();
+        const rejects = [
+          rejectUnknown(categories, knownCategories, "--category"),
+          rejectUnknown(modes, SCOPES, "--mode"),
+          rejectUnknown(noises, NOISE_TIERS, "--noise"),
+        ].filter((m): m is string => m !== null);
+        if (rejects.length > 0) {
+          for (const m of rejects) console.error(m);
+          process.exit(1);
+        }
 
         const filtered = all.filter(
           (a) =>
@@ -168,6 +198,11 @@ export function registerAgentsCommand(program: Command): void {
 
         if (!hasFilters && !opts.all && filtered.length > SUMMARY_THRESHOLD) {
           console.log(formatCategorySummary(filtered));
+          return;
+        }
+
+        if (filtered.length === 0 && hasFilters) {
+          console.log(`No agents match those filters (${all.length} installed).`);
           return;
         }
 
