@@ -6,6 +6,8 @@ import { lintOfficialAgents, loadAllAgents } from "../agent-catalog.js";
 import { addAgents, getCustomAgentsDir, removeAgent } from "../agents-fs.js";
 import { getInstalledVersion, installOfficialAgents } from "../agents-install.js";
 
+import { logError, logInfo, logWarn } from "../log.js";
+
 const SUMMARY_THRESHOLD = 30;
 
 // Derived from the schema so the --noise help text cannot drift from the
@@ -160,7 +162,7 @@ export function registerAgentsCommand(program: Command): void {
       }) => {
         const { agents: all, errors } = loadAllAgents();
         for (const err of errors) {
-          console.warn(`warning: ${err}`);
+          logWarn(String(err));
         }
 
         const categories = parseList(opts.category);
@@ -175,7 +177,7 @@ export function registerAgentsCommand(program: Command): void {
           rejectUnknown(noises, NOISE_TIERS, "--noise"),
         ].filter((m): m is string => m !== null);
         if (rejects.length > 0) {
-          for (const m of rejects) console.error(m);
+          for (const m of rejects) logError(m);
           process.exit(1);
         }
 
@@ -217,7 +219,7 @@ export function registerAgentsCommand(program: Command): void {
       const { agents: all } = loadAllAgents();
       const match = all.find((a) => a.slug === slug);
       if (!match) {
-        console.error(`No agent with slug '${slug}'.`);
+        logError(`No agent with slug '${slug}'.`);
         process.exit(1);
       }
       console.log(JSON.stringify(match, null, 2));
@@ -241,7 +243,7 @@ export function registerAgentsCommand(program: Command): void {
           process.exit(1);
         }
       } catch (err) {
-        console.error(`add failed: ${(err as Error).message}`);
+        logError(`add failed: ${(err as Error).message}`);
         process.exit(1);
       }
     });
@@ -254,7 +256,7 @@ export function registerAgentsCommand(program: Command): void {
         const path = removeAgent(slug);
         console.log(`✓ removed ${slug}  (${path})`);
       } catch (err) {
-        console.error(`remove failed: ${(err as Error).message}`);
+        logError(`remove failed: ${(err as Error).message}`);
         process.exit(1);
       }
     });
@@ -268,11 +270,11 @@ export function registerAgentsCommand(program: Command): void {
       const env = process.env;
       const target = path ? resolve(path) : getOfficialAgentsDir(env);
       if (!existsSync(target)) {
-        console.error(`No such file or directory: ${target}`);
+        logError(`No such file or directory: ${target}`);
         process.exit(1);
       }
       if (!statSync(target).isDirectory()) {
-        console.error(`Not a directory: ${target}`);
+        logError(`Not a directory: ${target}`);
         process.exit(1);
       }
       const { agents: loaded, errors } = loadAgentsFromDir(target, {
@@ -286,8 +288,9 @@ export function registerAgentsCommand(program: Command): void {
         console.log(`✓ ${loaded.length} agents lint clean (${target})`);
         return;
       }
-      for (const v of all) console.error(v);
-      console.error(`\n${all.length} problem${all.length === 1 ? "" : "s"} in ${target}`);
+      for (const v of all) logError(v);
+      console.error("");
+      logError(`${all.length} problem${all.length === 1 ? "" : "s"} in ${target}`);
       process.exit(1);
     });
 
@@ -298,20 +301,18 @@ export function registerAgentsCommand(program: Command): void {
     .action(async (opts: { force?: boolean }) => {
       const installed = getInstalledVersion();
       if (installed) {
-        process.stdout.write(
-          `[INF] Current version: ${installed.version} (installed ${installed.installedAt})\n`,
-        );
+        logInfo(`Current version: ${installed.version} (installed ${installed.installedAt})`);
       }
-      process.stdout.write("[INF] Checking for updates...\n");
+      logInfo("Checking for updates...");
       try {
         const { version, count } = await installOfficialAgents(process.env, {
           force: opts.force,
         });
-        process.stdout.write(
-          `[INF] Successfully installed agentgg-agents at ~/.agentgg/agentgg-agents (${count} agents, ${version})\n`,
+        logInfo(
+          `Successfully installed agentgg-agents at ~/.agentgg/agentgg-agents (${count} agents, ${version})`,
         );
       } catch (err) {
-        console.error(`[ERR] Update failed: ${(err as Error).message}`);
+        logError(`Update failed: ${(err as Error).message}`);
         process.exit(1);
       }
     });

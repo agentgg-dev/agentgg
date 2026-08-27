@@ -14,6 +14,7 @@ import { runConcurrent } from "../concurrent.js";
 import { resolveDedup } from "../deduper.js";
 import { handleDetectorError } from "../diagnostics.js";
 import { loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
+import { logError } from "../log.js";
 import {
   buildCredentialsFromOpts,
   REGION_FLAG_HELP,
@@ -194,7 +195,8 @@ export async function runDedup(
       } catch {
         // best-effort
       }
-      console.error(`\nInterrupted (${signal}). Partial dedup state persisted; re-run to resume.`);
+      console.error("");
+      logError(`Interrupted (${signal}). Partial dedup state persisted; re-run to resume.`);
     }
     process.exit(signal === "SIGTERM" ? 143 : 130);
   };
@@ -224,9 +226,7 @@ export async function runDedup(
     try {
       writeFileRecord(outputDir, record);
     } catch (err) {
-      console.error(
-        `  persist (force-clear) failed for ${record.filePath}: ${(err as Error).message}`,
-      );
+      logError(`persist (force-clear) failed for ${record.filePath}: ${(err as Error).message}`);
     }
   }
 
@@ -302,7 +302,7 @@ export async function runDedup(
         try {
           writeFileRecord(outputDir, record);
         } catch (writeErr) {
-          console.error(`  persist failed for ${record.filePath}: ${(writeErr as Error).message}`);
+          logError(`persist failed for ${record.filePath}: ${(writeErr as Error).message}`);
         }
       }
     } catch (err) {
@@ -411,7 +411,7 @@ export function registerDedupCommand(program: Command): void {
       try {
         await runDedup(outputDir, opts);
       } catch (err) {
-        console.error(`dedup failed: ${err instanceof Error ? err.message : String(err)}`);
+        logError(`dedup failed: ${err instanceof Error ? err.message : String(err)}`);
         process.exitCode = 1;
       }
     });

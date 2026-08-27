@@ -7,6 +7,7 @@ import {
   writeRunMeta,
 } from "@agentgg/core";
 import type { Command } from "commander";
+import { logError } from "../log.js";
 import { writeMarkdownReport } from "../reporters/md.js";
 import { buildInvocation } from "./invocation.js";
 
@@ -115,7 +116,7 @@ export function registerSummaryCommand(program: Command): void {
       try {
         await runSummary(outputDir, opts);
       } catch (err) {
-        console.error(`summary failed: ${err instanceof Error ? err.message : String(err)}`);
+        logError(`summary failed: ${err instanceof Error ? err.message : String(err)}`);
         process.exitCode = 1;
       }
     });

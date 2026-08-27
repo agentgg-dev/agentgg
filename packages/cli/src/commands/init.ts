@@ -1,6 +1,7 @@
 import { loadUserConfig, type Provider, saveUserConfig, type UserConfig } from "@agentgg/core";
 import { input, select } from "@inquirer/prompts";
 import type { Command } from "commander";
+import { logError } from "../log.js";
 import { isAnthropicOauthToken } from "../providers/anthropic.js";
 import {
   allProviderModules,
@@ -8,7 +9,6 @@ import {
   type InitInputs,
   listConfiguredProviders,
 } from "../providers/index.js";
-
 // Re-exported for back-compat with the old test surface. New code should
 // reach for `getProviderModule(...).defaultModel` instead.
 export const DEFAULT_MODELS = Object.fromEntries(
@@ -425,7 +425,7 @@ export function registerInitCommand(program: Command): void {
           console.log("\nInit cancelled.");
           process.exit(130);
         }
-        console.error(`init failed: ${msg}`);
+        logError(`init failed: ${msg}`);
         process.exit(1);
       }
     });

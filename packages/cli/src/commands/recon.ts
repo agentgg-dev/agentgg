@@ -14,6 +14,7 @@ import type { Command } from "commander";
 import { defaultAgentDirs, loadAllAgents } from "../agent-catalog.js";
 import { installOfficialAgents } from "../agents-install.js";
 import { loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
+import { logError, logInfo, logWarn } from "../log.js";
 import { selectAgents } from "../precondition.js";
 import {
   buildCredentialsFromOpts,
@@ -120,7 +121,8 @@ export async function runReconCommand(
       } catch {
         // best-effort
       }
-      console.error(`\nInterrupted (${signal}). Partial state persisted; re-run to resume.`);
+      console.error("");
+      logError(`Interrupted (${signal}). Partial state persisted; re-run to resume.`);
     }
     process.exit(signal === "SIGTERM" ? 143 : 130);
   };
@@ -148,19 +150,19 @@ export async function runReconCommand(
 
     // Mirror `scan`: auto-install the official agent library on first use.
     if (!existsSync(getOfficialAgentsDir(env))) {
-      process.stdout.write("[INF] agentgg-agents are not installed, installing...\n");
+      logInfo("agentgg-agents are not installed, installing...");
       try {
         const { version, count } = await installOfficialAgents(env);
-        process.stdout.write(
-          `[INF] Successfully installed agentgg-agents at ~/.agentgg/agentgg-agents (${count} agents, ${version})\n`,
+        logInfo(
+          `Successfully installed agentgg-agents at ~/.agentgg/agentgg-agents (${count} agents, ${version})`,
         );
       } catch (err) {
-        process.stderr.write(`[WRN] Could not auto-install agents: ${(err as Error).message}\n`);
+        logWarn(`Could not auto-install agents: ${(err as Error).message}`);
       }
     }
 
     const catalog = loadAllAgents(env);
-    for (const e of catalog.errors) console.warn(`warning: ${e}`);
+    for (const e of catalog.errors) logWarn(e);
 
     const officialAgentsDir = getOfficialAgentsDir(env);
     const templateInputs = opts.template ?? [];
@@ -214,7 +216,7 @@ export async function runReconCommand(
           console.log("Auto-exclude: nothing to drop; planning the whole tree.");
         }
       } catch (err) {
-        console.warn(`Auto-exclude pass failed (continuing without it): ${(err as Error).message}`);
+        logWarn(`Auto-exclude pass failed (continuing without it): ${(err as Error).message}`);
       }
     }
 
@@ -288,7 +290,7 @@ export async function runReconCommand(
         autoExcludes: opts.autoExclude ? smartExcludes : undefined,
       });
     } catch (err) {
-      if (opts.verbose) console.error(`  plan: failed to write: ${(err as Error).message}`);
+      if (opts.verbose) logError(`plan: failed to write: ${(err as Error).message}`);
     }
     console.log(
       `Preconditions: ${queuedAgents.length} queued, ${skippedCount} skipped → ${outDir}\\state\\plan.json`,
@@ -416,7 +418,7 @@ export function registerReconCommand(program: Command): void {
       try {
         await runReconCommand(path, opts);
       } catch (err) {
-        console.error(`recon failed: ${err instanceof Error ? err.message : String(err)}`);
+        logError(`recon failed: ${err instanceof Error ? err.message : String(err)}`);
         process.exitCode = 1;
       }
     });

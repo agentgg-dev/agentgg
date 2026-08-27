@@ -19,11 +19,11 @@ import {
   type SuggestExcludesArgs,
   SuggestExcludesResult,
 } from "../detect.js";
+import { logError } from "../log.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import type { UsageMeter } from "../usage-meter.js";
 import { asValidationField, buildScopeValidatePrompt, LlmValidation } from "../validator.js";
 import { extractCallUsage } from "./vercel-agent.js";
-
 /**
  * Multi-provider detector. Backed by the Vercel AI SDK's `generateObject`
  * — works against any provider for which we have a `LanguageModelV1`:
@@ -147,7 +147,7 @@ export class MultiProviderDetector {
     } catch (err) {
       if (process.env.AGENTGG_DEBUG) {
         const util = await import("node:util");
-        console.error("---- MultiProviderDetector recon error ----");
+        logError("---- MultiProviderDetector recon error ----");
         console.error(util.inspect(err, { depth: 5, colors: false }));
         console.error("-------------------------------------------");
       }
@@ -175,7 +175,7 @@ export class MultiProviderDetector {
     } catch (err) {
       if (process.env.AGENTGG_DEBUG) {
         const util = await import("node:util");
-        console.error("---- MultiProviderDetector suggestExcludes error ----");
+        logError("---- MultiProviderDetector suggestExcludes error ----");
         console.error(util.inspect(err, { depth: 5, colors: false }));
         console.error("-------------------------------------------");
       }
@@ -209,7 +209,7 @@ export class MultiProviderDetector {
     } catch (err) {
       if (process.env.AGENTGG_DEBUG) {
         const util = await import("node:util");
-        console.error("---- MultiProviderDetector createAgent error ----");
+        logError("---- MultiProviderDetector createAgent error ----");
         console.error(util.inspect(err, { depth: 5, colors: false }));
         console.error("-------------------------------------------------");
       }
@@ -238,7 +238,7 @@ export class MultiProviderDetector {
     } catch (err) {
       if (process.env.AGENTGG_DEBUG) {
         const util = await import("node:util");
-        console.error("---- MultiProviderDetector runAgent error ----");
+        logError("---- MultiProviderDetector runAgent error ----");
         console.error(util.inspect(err, { depth: 5, colors: false }));
         console.error("----------------------------------------------");
       }
@@ -264,7 +264,7 @@ export class MultiProviderDetector {
     } catch (err) {
       if (process.env.AGENTGG_DEBUG) {
         const util = await import("node:util");
-        console.error("---- MultiProviderDetector checkPrecondition error ----");
+        logError("---- MultiProviderDetector checkPrecondition error ----");
         console.error(util.inspect(err, { depth: 5, colors: false }));
         console.error("-------------------------------------------------------");
       }
@@ -288,7 +288,7 @@ export class MultiProviderDetector {
     } catch (err) {
       if (process.env.AGENTGG_DEBUG) {
         const util = await import("node:util");
-        console.error("---- MultiProviderDetector scope-validate error ----");
+        logError("---- MultiProviderDetector scope-validate error ----");
         console.error(util.inspect(err, { depth: 5, colors: false }));
         console.error("-----------------------------------------------------");
       }
@@ -317,7 +317,7 @@ export class MultiProviderDetector {
     } catch (err) {
       if (process.env.AGENTGG_DEBUG) {
         const util = await import("node:util");
-        console.error("---- MultiProviderDetector score error ----");
+        logError("---- MultiProviderDetector score error ----");
         console.error(util.inspect(err, { depth: 5, colors: false }));
         console.error("-------------------------------------------");
       }
@@ -346,7 +346,7 @@ export class MultiProviderDetector {
     } catch (err) {
       if (process.env.AGENTGG_DEBUG) {
         const util = await import("node:util");
-        console.error("---- MultiProviderDetector dedupe error ----");
+        logError("---- MultiProviderDetector dedupe error ----");
         console.error(util.inspect(err, { depth: 5, colors: false }));
         console.error("--------------------------------------------");
       }

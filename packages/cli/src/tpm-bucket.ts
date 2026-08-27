@@ -10,6 +10,7 @@
  * call, every validation) is throttled automatically, without having
  * to thread state through the SDK.
  */
+import { logInfo, logWarn } from "./log.js";
 export class TpmBucket {
   private readonly windowMs = 60_000;
   private history: { t: number; tokens: number }[] = [];
@@ -101,8 +102,8 @@ export function resolveTpmLimit(
   const trimmed = raw?.trim();
   if (!trimmed) return { limit: fallback, pinned: false };
   if (!/^\d+$/.test(trimmed)) {
-    console.warn(
-      `[${opts.label}] warning: ${opts.envVar}="${trimmed}" is not a whole number of tokens. ` +
+    logWarn(
+      `[${opts.label}] ${opts.envVar}="${trimmed}" is not a whole number of tokens. ` +
         `Using ${fallback} TPM instead. Set a number, or 0 to disable throttling.`,
     );
     return { limit: fallback, pinned: false };
@@ -114,13 +115,13 @@ export function resolveTpmLimit(
  *  is self-diagnosing instead of looking like a hung process. */
 export function announceThrottle(opts: ThrottleLabels, limit: number): void {
   if (limit <= 0) {
-    console.warn(`[${opts.label}] token throttling is off (${opts.envVar}=0)`);
+    logInfo(`[${opts.label}] token throttling is off (${opts.envVar}=0)`, "err");
     return;
   }
   const source = opts.pinned
     ? `set by ${opts.envVar}`
     : `starting value, ${opts.envVar} overrides; 0 disables`;
-  console.warn(`[${opts.label}] throttling to ${limit} TPM (${source})`);
+  logInfo(`[${opts.label}] throttling to ${limit} TPM (${source})`, "err");
 }
 
 /**
@@ -141,8 +142,8 @@ function adoptObservedLimit(bucket: TpmBucket, response: Response, opts: Throttl
 
   if (opts.pinned) {
     if (observed > bucket.limit * 4) {
-      console.warn(
-        `[${opts.label}] warning: ${opts.envVar} throttles to ${bucket.limit} TPM, but this account allows ${observed} TPM. ` +
+      logWarn(
+        `[${opts.label}] ${opts.envVar} throttles to ${bucket.limit} TPM, but this account allows ${observed} TPM. ` +
           `Scans will be much slower than they need to be. Unset ${opts.envVar} to use the account limit.`,
       );
     }
@@ -151,7 +152,7 @@ function adoptObservedLimit(bucket: TpmBucket, response: Response, opts: Throttl
   if (observed === bucket.limit) return;
   const verb = observed > bucket.limit ? "raising" : "lowering";
   bucket.limit = observed;
-  console.warn(`[${opts.label}] account limit is ${observed} TPM; ${verb} the throttle to match`);
+  logInfo(`[${opts.label}] account limit is ${observed} TPM; ${verb} the throttle to match`, "err");
 }
 
 export interface ThrottleLabels {

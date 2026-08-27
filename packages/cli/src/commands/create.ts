@@ -3,6 +3,7 @@ import type { Provider } from "@agentgg/core";
 import type { Command } from "commander";
 import { runCreate } from "../create.js";
 import { loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
+import { logError } from "../log.js";
 import {
   buildCredentialsFromOpts,
   REGION_FLAG_HELP,
@@ -146,7 +147,7 @@ export function registerCreateCommand(program: Command): void {
       try {
         await runCreateCommand(opts);
       } catch (err) {
-        console.error(`create failed: ${err instanceof Error ? err.message : String(err)}`);
+        logError(`create failed: ${err instanceof Error ? err.message : String(err)}`);
         process.exitCode = 1;
       }
     });

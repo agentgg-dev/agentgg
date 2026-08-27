@@ -14,6 +14,7 @@ import { runConcurrent } from "../concurrent.js";
 import { loadDefaultScope } from "../default-scope.js";
 import { handleDetectorError } from "../diagnostics.js";
 import { loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
+import { logError } from "../log.js";
 import {
   buildCredentialsFromOpts,
   REGION_FLAG_HELP,
@@ -293,7 +294,7 @@ export async function runRevalidate(
     try {
       writeFileRecord(outputDir, record);
     } catch (err) {
-      console.error(`  persist failed for ${record.filePath}: ${(err as Error).message}`);
+      logError(`persist failed for ${record.filePath}: ${(err as Error).message}`);
     }
   }
 
@@ -402,7 +403,7 @@ export function registerRevalidateCommand(program: Command): void {
       try {
         await runRevalidate(outputDir, opts);
       } catch (err) {
-        console.error(`revalidate failed: ${err instanceof Error ? err.message : String(err)}`);
+        logError(`revalidate failed: ${err instanceof Error ? err.message : String(err)}`);
         // See scan.ts comment — let the event loop drain so libuv can
         // close in-flight subprocess handles cleanly on Windows.
         process.exitCode = 1;

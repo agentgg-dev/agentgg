@@ -14,6 +14,7 @@ import { registerScoreCommand } from "./commands/score.js";
 import { registerStatusCommand } from "./commands/status.js";
 import { registerSummaryCommand } from "./commands/summary.js";
 import { registerViewCommand } from "./commands/view.js";
+import { logError } from "./log.js";
 import { checkAndReportUpdates } from "./update-check.js";
 import { VERSION } from "./version.js";
 
@@ -41,6 +42,6 @@ registerConfigCommand(program);
 checkAndReportUpdates(process.argv);
 
 program.parseAsync(process.argv).catch((err: unknown) => {
-  console.error(err instanceof Error ? err.message : String(err));
+  logError(err instanceof Error ? err.message : String(err));
   process.exit(1);
 });

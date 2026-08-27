@@ -6,8 +6,8 @@ import {
   type UserConfig,
 } from "@agentgg/core";
 import type { Command } from "commander";
+import { logError } from "../log.js";
 import { allProviderModules, listConfiguredProviders } from "../providers/index.js";
-
 /**
  * Format the saved config for stdout. Returns a string so the same
  * helper drives both `--json` mode and the friendly text view, and so
@@ -87,7 +87,7 @@ export function registerConfigCommand(program: Command): void {
 
       if (opts.provider || opts.model) {
         if (opts.model && !opts.provider) {
-          console.error(
+          logError(
             "--model requires --provider. Example: agentgg config --provider ollama --model llama3.1:8b",
           );
           process.exit(1);
@@ -95,13 +95,13 @@ export function registerConfigCommand(program: Command): void {
 
         let cfg = loadUserConfig(env);
         if (!cfg) {
-          console.error("No config found. Run `agentgg init` first.");
+          logError("No config found. Run `agentgg init` first.");
           process.exit(1);
         }
 
         if (opts.provider) {
           if (!VALID_PROVIDERS.has(opts.provider)) {
-            console.error(
+            logError(
               `Unknown provider "${opts.provider}". Must be one of: ${[...VALID_PROVIDERS].join(", ")}`,
             );
             process.exit(1);
@@ -109,7 +109,7 @@ export function registerConfigCommand(program: Command): void {
           const p = opts.provider as Provider;
           const key = p as keyof UserConfig;
           if (!(cfg as Record<string, unknown>)[key]) {
-            console.error(`${p} is not configured — run \`agentgg init --provider ${p}\` first.`);
+            logError(`${p} is not configured — run \`agentgg init --provider ${p}\` first.`);
             process.exit(1);
           }
           cfg = { ...cfg, provider: p };
@@ -119,7 +119,7 @@ export function registerConfigCommand(program: Command): void {
           try {
             cfg = applyModelUpdate(cfg, cfg.provider, opts.model);
           } catch (err) {
-            console.error((err as Error).message);
+            logError((err as Error).message);
             process.exit(1);
           }
         }

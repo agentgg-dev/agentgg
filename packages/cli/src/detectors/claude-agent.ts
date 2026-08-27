@@ -22,6 +22,7 @@ import {
   type SuggestExcludesArgs,
   SuggestExcludesResult,
 } from "../detect.js";
+import { logError, logWarn } from "../log.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import type { CallUsage, UsageMeter } from "../usage-meter.js";
 import {
@@ -204,7 +205,7 @@ export class ClaudeAgentDetector implements Detector {
       // still completes and the refusal doesn't count against the scan's
       // failure ratio. Any other error still propagates.
       if (err instanceof RefusalError) {
-        console.warn(
+        logWarn(
           `[runAgent:${args.agent.slug}] model refused to analyze this batch; recording 0 findings`,
         );
         return [];
@@ -249,7 +250,7 @@ export class ClaudeAgentDetector implements Detector {
       // stays unvalidated and survives into the report. Mirrors the Vercel
       // detector's parseValidation.
       if (err instanceof RefusalError) {
-        console.warn(
+        logWarn(
           `[validate:${args.finding.id}] model refused to validate; recording uncertain+refused`,
         );
         return {
@@ -412,7 +413,7 @@ export class ClaudeAgentDetector implements Detector {
     } catch (err) {
       if (process.env.AGENTGG_DEBUG) {
         const util = await import("node:util");
-        console.error("---- ClaudeAgentDetector.runStructured raw error ----");
+        logError("---- ClaudeAgentDetector.runStructured raw error ----");
         console.error(util.inspect(err, { depth: 5, colors: false }));
         console.error("------------------------------------------------------");
       }

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { delimiter, extname, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { type Agent, getSemgrepCorePath, isSemgrepPreFilter } from "@agentgg/core";
+import { logWarn } from "./log.js";
 import type { TaintStep } from "./pre-filter.js";
 import {
   type InstallResult,
@@ -403,7 +404,7 @@ export async function ensureSemgrepCore(
     // nothing has been fetched yet.
     const onPath = findOnPath("semgrep-core", env);
     if (onPath) {
-      console.warn(`warning: using semgrep-core from PATH (${onPath}); version is not pinned`);
+      logWarn(`using semgrep-core from PATH (${onPath}); version is not pinned`);
       return { ok: true, bin: onPath, source: "path" };
     }
 

@@ -12,6 +12,7 @@
  * the class to `DIAGNOSTICS`. The caller code never changes.
  */
 
+import { logError } from "./log.js";
 export abstract class ScanDiagnostic {
   abstract format(): string;
   /**
@@ -462,7 +463,7 @@ export function handleDetectorError(
   // fatal diagnostic has already been printed by the worker that hit it.
   if (abortController?.signal.aborted && isAbortError(err)) {
     if (opts.verbose) {
-      console.error(`    ${label}: cancelled (scan aborted)`);
+      logError(`${label}: cancelled (scan aborted)`);
     }
     return;
   }
@@ -479,7 +480,7 @@ export function handleDetectorError(
   const msg = e.message || String(err);
 
   if (diagnostic) {
-    console.error(`    ${label}: ${diagnostic.format()}`);
+    logError(`${label}: ${diagnostic.format()}`);
     if (opts.verbose && e.stack) {
       console.error(
         e.stack
@@ -495,7 +496,7 @@ export function handleDetectorError(
   // The label already names the phase and target (`dedup:src/db.ts`), so a
   // hardcoded "detection failed" is both redundant and wrong for the validate /
   // score / dedup phases that share this path. Matches the diagnostic branch above.
-  console.error(`    ${label}: ${msg}`);
+  logError(`${label}: ${msg}`);
   if (e.statusCode) console.error(`      HTTP ${e.statusCode} ${e.url ?? ""}`);
   if (e.responseBody) {
     console.error(`      Response: ${String(e.responseBody).slice(0, 300)}`);

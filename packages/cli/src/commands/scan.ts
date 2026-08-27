@@ -37,6 +37,7 @@ import type { AgentCandidate } from "../detect.js";
 import { FatalScanError, handleDetectorError } from "../diagnostics.js";
 import { listChangedFiles, loadCommitPatch } from "../diff.js";
 import { loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
+import { logError, logInfo, logWarn } from "../log.js";
 import { evaluatePreFilter } from "../pre-filter.js";
 import { selectAgents } from "../precondition.js";
 import {
@@ -325,7 +326,8 @@ export async function runScan(
       } catch {
         // best-effort; the run file just stays "running"
       }
-      console.error(`\nInterrupted (${signal}). Partial state persisted; re-run to resume.`);
+      console.error("");
+      logError(`Interrupted (${signal}). Partial state persisted; re-run to resume.`);
     }
     process.exit(signal === "SIGTERM" ? 143 : 130);
   };
@@ -381,17 +383,15 @@ export async function runScan(
     // Auto-install official agents on first scan — mirrors how nuclei
     // auto-downloads templates when ~/nuclei-templates/ doesn't exist yet.
     if (!existsSync(getOfficialAgentsDir(env))) {
-      process.stdout.write("[INF] agentgg-agents are not installed, installing...\n");
+      logInfo("agentgg-agents are not installed, installing...");
       try {
         const { version, count } = await installOfficialAgents(env);
-        process.stdout.write(
-          `[INF] Successfully installed agentgg-agents at ~/.agentgg/agentgg-agents (${count} agents, ${version})\n`,
+        logInfo(
+          `Successfully installed agentgg-agents at ~/.agentgg/agentgg-agents (${count} agents, ${version})`,
         );
       } catch (err) {
-        process.stderr.write(`[WRN] Could not auto-install agents: ${(err as Error).message}\n`);
-        process.stderr.write(
-          "[WRN] Run `agentgg agents update` to install, or provide agents via -t flag.\n",
-        );
+        logWarn(`Could not auto-install agents: ${(err as Error).message}`);
+        logWarn("Run `agentgg agents update` to install, or provide agents via -t flag.");
       }
     }
 
@@ -401,7 +401,7 @@ export async function runScan(
     // agentgg-agents repo's pre-commit hook (`agentgg agents lint`), not
     // re-checked here.
     const catalog = loadAllAgents(env);
-    for (const e of catalog.errors) console.warn(`warning: ${e}`);
+    for (const e of catalog.errors) logWarn(e);
 
     const officialAgentsDir = getOfficialAgentsDir(env);
 
@@ -526,8 +526,8 @@ export async function runScan(
             console.log("Auto-exclude: nothing to drop; scanning the whole tree.");
           }
         } catch (err) {
-          console.warn(
-            `  auto-exclude: pass did not complete (${(err as Error).message}); continuing without it.`,
+          logWarn(
+            `auto-exclude: pass did not complete (${(err as Error).message}); continuing without it.`,
           );
         }
       }
@@ -706,7 +706,7 @@ export async function runScan(
         writeFileRecord(outDir, record);
       } catch (err) {
         if (opts.verbose) {
-          console.error(`    persist failed for ${normalized}: ${(err as Error).message}`);
+          logError(`persist failed for ${normalized}: ${(err as Error).message}`);
         }
       }
     }
@@ -853,7 +853,7 @@ export async function runScan(
         autoExcludes: opts.autoExclude ? smartExcludes : undefined,
       });
     } catch (err) {
-      if (opts.verbose) console.error(`  plan: failed to write: ${(err as Error).message}`);
+      if (opts.verbose) logError(`plan: failed to write: ${(err as Error).message}`);
     }
     console.log(
       `Preconditions: ${queuedAgents.length} queued, ${skippedCount} skipped → ${outDir}\\state\\plan.json`,
@@ -1006,7 +1006,7 @@ export async function runScan(
       prepared.map(({ agent, scopedFiles }) => ({ agent, files: scopedFiles })),
       semgrepRuleDirs,
       concurrency,
-      (m) => console.warn(`warning: ${m}`),
+      (m) => logWarn(m),
       env,
       { onInfo: opts.verbose ? (m) => console.log(`  ${m}`) : undefined },
     );
@@ -1249,7 +1249,7 @@ export async function runScan(
           JSON.stringify({ slugs: cappedSlugs }, null, 2),
         );
       } catch (err) {
-        console.error(`  failed to write capped.json: ${(err as Error).message}`);
+        logError(`failed to write capped.json: ${(err as Error).message}`);
       }
     }
 
@@ -1363,9 +1363,7 @@ export async function runScan(
             allRecordsCache = null;
           } catch (err) {
             if (opts.verbose) {
-              console.error(
-                `    ${agent.slug}: failed to write resume sidecar: ${(err as Error).message}`,
-              );
+              logError(`${agent.slug}: failed to write resume sidecar: ${(err as Error).message}`);
             }
           }
         }
@@ -1518,9 +1516,7 @@ export async function runScan(
             writeFileRecord(outDir, record);
           } catch (err) {
             if (opts.verbose) {
-              console.error(
-                `    persist failed for ${agentSlug}/${filePath}: ${(err as Error).message}`,
-              );
+              logError(`persist failed for ${agentSlug}/${filePath}: ${(err as Error).message}`);
             }
           }
         }
@@ -1644,9 +1640,7 @@ export async function runScan(
             writeFileRecord(outDir, record);
           } catch (err) {
             if (opts.verbose) {
-              console.error(
-                `    persist failed for ${agentSlug}/${filePath}: ${(err as Error).message}`,
-              );
+              logError(`persist failed for ${agentSlug}/${filePath}: ${(err as Error).message}`);
             }
           }
         }
@@ -1769,9 +1763,7 @@ export async function runScan(
             writeFileRecord(outDir, record);
           } catch (err) {
             if (opts.verbose) {
-              console.error(
-                `    persist failed for ${agentSlug}/${filePath}: ${(err as Error).message}`,
-              );
+              logError(`persist failed for ${agentSlug}/${filePath}: ${(err as Error).message}`);
             }
           }
         }
@@ -2154,7 +2146,7 @@ export function registerScanCommand(program: Command): void {
       try {
         await runScan(path, opts);
       } catch (err) {
-        console.error(`scan failed: ${err instanceof Error ? err.message : String(err)}`);
+        logError(`scan failed: ${err instanceof Error ? err.message : String(err)}`);
         // Set the code rather than calling process.exit so the event
         // loop drains naturally — pending claude-agent-sdk subprocesses
         // get a clean shutdown instead of the libuv double-close

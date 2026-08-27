@@ -14,6 +14,7 @@ import type { Command } from "commander";
 import { runConcurrent } from "../concurrent.js";
 import { handleDetectorError } from "../diagnostics.js";
 import { type CredentialOverrides, loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
+import { logError } from "../log.js";
 import { findingFilenameSlug, writeMarkdownReport } from "../reporters/md.js";
 import { createUsageMeter } from "../usage-meter.js";
 import { buildInvocation } from "./invocation.js";
@@ -222,7 +223,7 @@ export async function runScore(
     try {
       writeFileRecord(outputDir, record);
     } catch (err) {
-      console.error(`  persist failed for ${record.filePath}: ${(err as Error).message}`);
+      logError(`persist failed for ${record.filePath}: ${(err as Error).message}`);
     }
   }
 
@@ -313,7 +314,7 @@ export function registerScoreCommand(program: Command): void {
       try {
         await runScore(outputDir, opts);
       } catch (err) {
-        console.error(`score failed: ${err instanceof Error ? err.message : String(err)}`);
+        logError(`score failed: ${err instanceof Error ? err.message : String(err)}`);
         // See scan.ts comment — let the event loop drain so libuv can
         // close in-flight subprocess handles cleanly on Windows.
         process.exitCode = 1;

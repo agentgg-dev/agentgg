@@ -33,6 +33,7 @@ import {
   type SuggestExcludesArgs,
   SuggestExcludesResult,
 } from "../detect.js";
+import { logError, logWarn } from "../log.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import type { CallUsage, UsageMeter } from "../usage-meter.js";
 import {
@@ -42,7 +43,6 @@ import {
   LlmValidation,
 } from "../validator.js";
 import { looksLikeRefusal } from "./refusal.js";
-
 export type Effort = "low" | "medium" | "high" | "max";
 export type Thinking = "off" | "adaptive" | "enabled";
 
@@ -249,14 +249,14 @@ async function withTpmRetry<T>(
         // Honor a server-supplied delay precisely. Only jitter the blind default.
         const parsed = parseRetryAfterMs(hay);
         waitMs = parsed ?? jitter(DEFAULT_BACKOFF_MS);
-        console.warn(
+        logWarn(
           `[withTpmRetry] rate-limit on attempt ${attempt}/${maxAttempts}, sleeping ${waitMs}ms (retryAfterParsed=${parsed != null})`,
         );
       } else {
         // Transient upstream/transport flake: short exponential backoff.
         const base = Math.min(TRANSIENT_BACKOFF_MS * 2 ** (attempt - 1), TRANSIENT_BACKOFF_MAX_MS);
         waitMs = jitter(base);
-        console.warn(
+        logWarn(
           `[withTpmRetry] transient upstream error on attempt ${attempt}/${maxAttempts}, sleeping ${waitMs}ms: ${firstErrorLine(hay)}`,
         );
       }
@@ -460,7 +460,7 @@ export class VercelAgentDetector implements Detector {
         : toolCall.toolName;
       if (toolName === null || !names.includes(toolName)) return null;
       if (repairs >= MAX_TOOL_CALL_REPAIRS) {
-        console.warn(`    ${label}: tool-call repair budget spent, leaving the call broken`);
+        logWarn(`${label}: tool-call repair budget spent, leaving the call broken`);
         return null;
       }
       repairs++;
@@ -477,7 +477,7 @@ export class VercelAgentDetector implements Detector {
             `What you sent as the arguments:\n${toolCall.args}\n\n` +
             `Schema error:\n${error.message}`,
         });
-        console.warn(`    ${label}: repaired a malformed ${toolName} call`);
+        logWarn(`${label}: repaired a malformed ${toolName} call`);
         return { ...toolCall, toolName, args: JSON.stringify(object) };
       } catch {
         // The repair call itself failed. Fall through to the original error
@@ -620,8 +620,8 @@ export class VercelAgentDetector implements Detector {
         // halve each. Once only: a second overflow means the batch itself is too
         // big for this model, and that is a planning problem, not a retry one.
         if (!isContextLengthError(errorHaystack(err)) || args.signal?.aborted === true) throw err;
-        console.warn(
-          `    ${label}: context overflow; retrying this batch at half the read budget and turn cap`,
+        logWarn(
+          `${label}: context overflow; retrying this batch at half the read budget and turn cap`,
         );
         effectiveTurns = Math.floor(args.maxTurns / 2);
         gen = await hunt(Math.floor(TOOL_OUTPUT_BUDGET_BYTES / 2), effectiveTurns);
@@ -648,7 +648,7 @@ export class VercelAgentDetector implements Detector {
         // the agent or count against the scan's failure ratio. A non-refusal
         // parse failure (empty completion, length cutoff, garbage) still throws.
         if (looksLikeRefusal(gen.text)) {
-          console.warn(
+          logWarn(
             `[runAgent:${args.agent.slug}] model refused to analyze this batch; recording 0 findings`,
           );
           return [];
@@ -862,9 +862,7 @@ export class VercelAgentDetector implements Detector {
       return asValidationField(LlmValidation.parse(extractJSON(text)));
     } catch (extractErr) {
       if (looksLikeRefusal(text)) {
-        console.warn(
-          `[validate:${findingId}] model refused to validate; recording uncertain+refused`,
-        );
+        logWarn(`[validate:${findingId}] model refused to validate; recording uncertain+refused`);
         return {
           verdict: "uncertain",
           reasoning: "Model declined to validate this finding (refusal).",
@@ -1318,7 +1316,7 @@ function extractJSON(text: string): unknown {
 async function debugLog(label: string, err: unknown): Promise<void> {
   if (!process.env.AGENTGG_DEBUG) return;
   const util = await import("node:util");
-  console.error(`---- ${label} error ----`);
+  logError(`---- ${label} error ----`);
   console.error(util.inspect(err, { depth: 5, colors: false }));
   console.error("------------------------");
 }
@@ -1389,7 +1387,7 @@ export function warnIfTurnCapped(slug: string, result: unknown, maxTurns: number
   if (!Array.isArray(steps) || steps.length < maxTurns + 1) return;
   const last = steps[steps.length - 1] as { toolCalls?: unknown[] } | undefined;
   const stillCalling = Array.isArray(last?.toolCalls) && last.toolCalls.length > 0;
-  console.warn(
+  logWarn(
     `[runAgent:${slug}] hit the ${maxTurns}-turn cap (${steps.length} steps` +
       `${stillCalling ? ", still mid tool-call" : ""}): analysis was cut short, ` +
       `findings for this batch may be incomplete. Raise maxTurnsPerBatch or pass --max-turns.`,
@@ -1434,7 +1432,7 @@ function logUnparseableGeneration(label: string, result: unknown): void {
   const lastFinish = last && typeof last.finishReason === "string" ? last.finishReason : "n/a";
   const lastToolCalls = last && Array.isArray(last.toolCalls) ? last.toolCalls.length : 0;
   const lastTextChars = last && typeof last.text === "string" ? last.text.length : 0;
-  console.warn(
+  logWarn(
     `[${label}] unparseable model response: finishReason=${finishReason} ` +
       `textChars=${textChars} reasoningChars=${reasoningChars} ` +
       `promptTokens=${promptTokens} completionTokens=${completionTokens} ` +

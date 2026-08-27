@@ -5,8 +5,8 @@ import { parseAgentMarkdown } from "@agentgg/core";
 import { renderAgentSpecMd } from "./agent-spec.js";
 import { loadCreateInstructions } from "./create-agent.js";
 import type { Detector } from "./detect.js";
+import { logError } from "./log.js";
 import type { LoadedReport } from "./report-loader.js";
-
 /**
  * Orchestration for `agentgg create`. One distillation session per report
  * file: the detector reads the report + explores the code root with its
@@ -110,7 +110,7 @@ export async function runCreate(opts: CreateOptions): Promise<CreateOutcome[]> {
       });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      console.error(`  FAILED: ${msg}`);
+      logError(msg);
       outcomes.push({
         reportPath: report.path,
         status: "failed",

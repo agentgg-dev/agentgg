@@ -2,6 +2,8 @@ import { resolve } from "node:path";
 import { listRuns, loadAllFileRecords, readScanMeta } from "@agentgg/core";
 import type { Command } from "commander";
 
+import { logError } from "../log.js";
+
 interface StatusOpts {
   json?: boolean;
 }
@@ -138,7 +140,7 @@ export function registerStatusCommand(program: Command): void {
       try {
         await runStatus(outputDir, opts);
       } catch (err) {
-        console.error(`status failed: ${err instanceof Error ? err.message : String(err)}`);
+        logError(`status failed: ${err instanceof Error ? err.message : String(err)}`);
         process.exit(1);
       }
     });

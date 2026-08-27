@@ -2,8 +2,8 @@ import { resolve } from "node:path";
 import type { ReconReport } from "@agentgg/core";
 import { hashContent, readReconReport, writeReconReport } from "@agentgg/core";
 import type { Detector, ReconResult } from "./detect.js";
+import { logWarn } from "./log.js";
 import { loadReconInstructions } from "./recon-agent.js";
-
 /**
  * Recon orchestration. Runs once at the start of a scan, before
  * precondition evaluation and agent dispatch. The resulting brief is
@@ -86,8 +86,8 @@ export async function runRecon(opts: RunReconOptions): Promise<ReconReport> {
     // do NOT persist this stand-in, so the next run re-attempts a full survey
     // instead of caching a truncated one. Raise --max-turns or pass --re-recon
     // to refresh.
-    console.warn(
-      `  recon: survey did not complete (${(err as Error).message}); ` +
+    logWarn(
+      `recon: survey did not complete (${(err as Error).message}); ` +
         `continuing with a minimal brief. Raise --max-turns or re-run with --re-recon to refresh.`,
     );
     return {

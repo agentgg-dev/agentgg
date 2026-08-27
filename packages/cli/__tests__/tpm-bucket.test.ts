@@ -80,6 +80,7 @@ describe("createThrottledFetch", () => {
    *  `header` as x-ratelimit-limit-tokens. Returns the stderr lines. */
   async function run(bucket: TpmBucket, pinned: boolean, header: string, calls = 2) {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const err = vi.spyOn(console, "error").mockImplementation(() => {});
     const original = globalThis.fetch;
     globalThis.fetch = (async () =>
       new Response("{}", {
@@ -102,8 +103,10 @@ describe("createThrottledFetch", () => {
       globalThis.fetch = original;
     }
     // Read the calls before restore: mockRestore also clears the history.
-    const messages = warn.mock.calls.map((c) => String(c[0]));
+    // [WARN] and [INFO]-on-stderr both land here; warn first keeps ordering stable.
+    const messages = [...warn.mock.calls, ...err.mock.calls].map((c) => String(c[0]));
     warn.mockRestore();
+    err.mockRestore();
     return messages;
   }
 

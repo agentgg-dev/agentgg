@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { readScanMeta } from "@agentgg/core";
 import type { Command } from "commander";
+import { logError } from "../log.js";
 import { DEFAULT_VIEWER_PORT, openBrowser, startViewer } from "../viewer-server.js";
 
 interface ViewOpts {
@@ -109,7 +110,7 @@ export function registerViewCommand(program: Command): void {
       try {
         await runView(outputDir, port, opts);
       } catch (err) {
-        console.error(`view failed: ${err instanceof Error ? err.message : String(err)}`);
+        logError(`view failed: ${err instanceof Error ? err.message : String(err)}`);
         process.exit(1);
       }
     });
