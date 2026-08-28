@@ -136,6 +136,41 @@ describe("formatErrorIds", () => {
     });
   });
 
+  // Shapes below were measured against each live API on 2026-08-28.
+  describe("the other providers that reach this code", () => {
+    it("takes OpenAI's x-request-id, the id its dashboard indexes", () => {
+      const out = formatErrorIds(
+        apiCallError({
+          "x-request-id": "req_c7e80b8e674349b1a71774b127f04d93",
+          "CF-Ray": "a3226840ecfa6de2-SEA",
+        }),
+      );
+      expect(out).toBe(" reqId=req_c7e80b8e674349b1a71774b127f04d93 (x-request-id)");
+    });
+
+    it("reads Bedrock's id from $metadata, where the AWS SDK puts it", () => {
+      // @ai-sdk/amazon-bedrock never populates responseHeaders; the AWS SDK
+      // error carries $metadata.requestId instead.
+      const err = Object.assign(new Error("ValidationException"), {
+        $metadata: { httpStatusCode: 400, requestId: "163a8eb7-6723-40d3-942e-53942a97ed6c" },
+      });
+      expect(formatErrorIds(err)).toBe(
+        " reqId=163a8eb7-6723-40d3-942e-53942a97ed6c ($metadata.requestId)",
+      );
+    });
+
+    it("reports nothing for Vertex, which exposes no id header at all", () => {
+      const out = formatErrorIds(
+        apiCallError({
+          "x-xss-protection": "0",
+          "x-frame-options": "SAMEORIGIN",
+          "x-content-type-options": "nosniff",
+        }),
+      );
+      expect(out).toBe("");
+    });
+  });
+
   it("says nothing when the provider exposed no ids", () => {
     expect(formatErrorIds(apiCallError({ "content-type": "application/json" }))).toBe("");
   });

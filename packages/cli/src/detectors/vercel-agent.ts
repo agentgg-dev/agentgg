@@ -1608,11 +1608,10 @@ function formatIdRange(name: string, plural: string, ids: string[], unit: string
  * gave us nothing better.
  */
 const ERROR_ID_HEADERS = [
-  "x-request-id", // OpenAI
-  "request-id", // Anthropic, and OpenRouter advertises it
-  "x-amzn-requestid", // Bedrock
-  "x-goog-request-id", // Vertex
-  "cf-ray", // Cloudflare edge, last resort
+  "x-request-id", // OpenAI: `req_...`, the id its dashboard indexes. Measured.
+  "request-id", // OpenRouter advertises it in expose-headers but never sent one.
+  "x-amzn-requestid", // Bedrock sends it over HTTP; see $metadata below. Measured.
+  "cf-ray", // Cloudflare edge trace. Last resort: it finds nothing in a dashboard.
 ] as const;
 
 /**
@@ -1620,8 +1619,18 @@ const ERROR_ID_HEADERS = [
  * `X-Generation-Id` (same value as the body's `id`) on every call it actually
  * generated, which makes it the one id worth having on a failure: it resolves
  * in the provider dashboard, where a request id or a `cf-ray` does not.
- * Measured 2026-08-28 against the live API. Checked before the request-id
- * headers so the better id wins when both are present.
+ * Checked before the request-id headers so the better id wins when both exist.
+ *
+ * What each provider actually exposes, measured against the live APIs on
+ * 2026-08-28 rather than assumed. Only these five reach this code; `anthropic`
+ * routes to ClaudeAgentDetector and never calls `metered`.
+ *
+ *   openrouter  X-Generation-Id header + body `id`. No x-request-id, ever.
+ *   openai      x-request-id (`req_...`). No generation id.
+ *   bedrock     x-amzn-RequestId over HTTP, but the SDK surfaces it at
+ *               `$metadata.requestId`, not in responseHeaders (see below).
+ *   vertex      nothing at all. Its request ids live in Cloud Logging.
+ *   ollama      local; there is no remote dashboard to look anything up in.
  */
 const GENERATION_ID_HEADERS = ["x-generation-id"] as const;
 
@@ -1681,6 +1690,18 @@ function collectErrorIds(
       if (typeof value !== "string" || value.length === 0) continue;
       if (!acc.reqIds.some((r) => r.value === value)) acc.reqIds.push({ header, value });
       break;
+    }
+  }
+  // AWS SDK v3 (Bedrock) never populates `responseHeaders`. It puts the id on
+  // `$metadata.requestId` instead, so without this branch every Bedrock
+  // failure reports no id at all.
+  const meta = e.$metadata;
+  if (meta != null && typeof meta === "object") {
+    const reqId = (meta as { requestId?: unknown }).requestId;
+    if (typeof reqId === "string" && reqId.length > 0) {
+      if (!acc.reqIds.some((r) => r.value === reqId)) {
+        acc.reqIds.push({ header: "$metadata.requestId", value: reqId });
+      }
     }
   }
   const bodyId = generationIdFromBody(e.responseBody);
