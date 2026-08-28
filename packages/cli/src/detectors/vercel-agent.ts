@@ -34,7 +34,7 @@ import {
   type SuggestExcludesArgs,
   SuggestExcludesResult,
 } from "../detect.js";
-import { logError, logWarn } from "../log.js";
+import { logError, logInfo, logWarn } from "../log.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import type { CallUsage, UsageMeter } from "../usage-meter.js";
 import {
@@ -681,7 +681,7 @@ export class VercelAgentDetector implements Detector {
       warnIfTurnCapped(label, gen, effectiveTurns);
       let result: DetectionResultType;
       try {
-        result = await this.parseOrReformat(gen.text, false, args.signal);
+        result = await this.parseOrReformat(gen.text, false, label, args.signal);
       } catch (parseErr) {
         // Empty / unparseable final message. Emit a one-line diagnostic
         // (always, not gated on AGENTGG_DEBUG) so the logs show WHY: an empty
@@ -872,6 +872,7 @@ export class VercelAgentDetector implements Detector {
   private async parseOrReformat(
     text: string,
     multiAgent: boolean,
+    label: string,
     signal?: AbortSignal,
   ): Promise<DetectionResultType> {
     try {
@@ -887,10 +888,12 @@ export class VercelAgentDetector implements Detector {
           abortSignal: signal,
         });
         this.meter?.record(extractCallUsage(reformat), this.structuredModel.modelId);
+        logGenerationIds(`${label}:reformat`, reformat);
         return reformat.object;
       } catch (reformatErr) {
         if (signal?.aborted) throw reformatErr;
         this.meter?.record(extractCallUsage(reformatErr), this.structuredModel.modelId);
+        logFailedCallIds(`${label}:reformat`, reformatErr, signal);
         const recovered = recoverFromError(DetectionResult, reformatErr);
         if (!recovered) throw reformatErr;
         logWarn(
@@ -937,10 +940,12 @@ export class VercelAgentDetector implements Detector {
           abortSignal: signal,
         });
         this.meter?.record(extractCallUsage(reformat), this.structuredModel.modelId);
+        logGenerationIds(`validate:${findingId}:reformat`, reformat);
         return asValidationField(reformat.object);
       } catch (reformatErr) {
         if (signal?.aborted) throw reformatErr;
         this.meter?.record(extractCallUsage(reformatErr), this.structuredModel.modelId);
+        logFailedCallIds(`validate:${findingId}:reformat`, reformatErr, signal);
         // Try the whole object first: it keeps the reasoning prose, which the
         // verdict-only salvage below cannot.
         const recovered = recoverFromError(LlmValidation, reformatErr);
@@ -979,10 +984,12 @@ export class VercelAgentDetector implements Detector {
           abortSignal: signal,
         });
         this.meter?.record(extractCallUsage(reformat), this.structuredModel.modelId);
+        logGenerationIds("create-agent:reformat", reformat);
         return reformat.object;
       } catch (reformatErr) {
         if (signal?.aborted) throw reformatErr;
         this.meter?.record(extractCallUsage(reformatErr), this.structuredModel.modelId);
+        logFailedCallIds("create-agent:reformat", reformatErr, signal);
         const recovered = recoverFromError(AgentSpec, reformatErr);
         if (!recovered) throw reformatErr;
         logWarn("reformat failed; recovered the agent spec from its raw text");
@@ -1007,10 +1014,12 @@ export class VercelAgentDetector implements Detector {
           abortSignal: signal,
         });
         this.meter?.record(extractCallUsage(reformat), this.structuredModel.modelId);
+        logGenerationIds("recon:reformat", reformat);
         return reformat.object;
       } catch (reformatErr) {
         if (signal?.aborted) throw reformatErr;
         this.meter?.record(extractCallUsage(reformatErr), this.structuredModel.modelId);
+        logFailedCallIds("recon:reformat", reformatErr, signal);
         const recovered = recoverFromError(ReconResult, reformatErr);
         if (!recovered) throw reformatErr;
         logWarn("reformat failed; recovered the recon brief from its raw text");
@@ -1757,6 +1766,11 @@ function isAbortLikeError(err: unknown): boolean {
  * each would drown the log. Turn on with `AGENTGG_LOG_GENERATION_IDS=1` to
  * follow every call into the provider's dashboard, which is what you want when
  * reconciling our token accounting against a provider bill.
+ *
+ * INFO, not WARN: this reports a call that WORKED. Every other diagnostic in
+ * this file marks something wrong, and emitting tens of `[WARN]` lines for
+ * healthy calls would make the level meaningless exactly when someone is
+ * reading the log closely. Stays on stderr so it cannot corrupt `--json`.
  */
 export function logGenerationIds(
   label: string,
@@ -1767,7 +1781,7 @@ export function logGenerationIds(
   if (!flag || flag === "0" || flag.toLowerCase() === "false") return;
   const ids = formatGenerationIds(result);
   if (!ids) return;
-  logWarn(`[${label}] call complete:${ids}`);
+  logInfo(`[${label}] call complete:${ids}`, "err");
 }
 
 export function warnIfTurnCapped(label: string, result: unknown, maxTurns: number): void {

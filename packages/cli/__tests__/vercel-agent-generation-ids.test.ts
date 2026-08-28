@@ -238,14 +238,25 @@ describe("logFailedCallIds", () => {
 });
 
 describe("logGenerationIds", () => {
+  // Asserts on console.error, not console.warn: a successful call is INFO on
+  // stderr. A `[WARN]` per healthy call would devalue the level, and stdout
+  // would corrupt `--json`.
   let warn: ReturnType<typeof vi.spyOn>;
   const result = { response: { id: "gen-42" } };
 
   beforeEach(() => {
-    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    warn = vi.spyOn(console, "error").mockImplementation(() => {});
   });
   afterEach(() => {
     warn.mockRestore();
+  });
+
+  it("reports a working call at INFO, never WARN", () => {
+    const realWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    logGenerationIds("recon", result, { AGENTGG_LOG_GENERATION_IDS: "1" });
+    expect(realWarn).not.toHaveBeenCalled();
+    expect(String(warn.mock.calls[0]?.[0])).toContain("[INFO]");
+    realWarn.mockRestore();
   });
 
   it("stays silent by default, so a normal scan log is unchanged", () => {
