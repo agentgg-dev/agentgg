@@ -5,6 +5,7 @@ import {
   generateObject,
   generateText,
   type LanguageModelV1,
+  NoObjectGeneratedError,
   NoSuchToolError,
   type ToolCallRepairFunction,
   type ToolSet,
@@ -431,7 +432,22 @@ export class VercelAgentDetector implements Detector {
    * capture lives in exactly one place.
    */
   private async metered<T>(run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    const result = await withTpmRetry(run, signal);
+    let result: T;
+    try {
+      result = await withTpmRetry(run, signal);
+    } catch (err) {
+      // One re-sample on an unparseable structured response. No temperature is
+      // pinned anywhere, so this draws a fresh completion instead of replaying
+      // the broken one. It exists for the direct `generateObject` callers
+      // (precondition, score, dedupe): they have no reformat fallback, so a
+      // retry is their only recovery. Tool-loop `generateText` calls never
+      // raise this error, so they are untouched.
+      if (signal?.aborted || !NoObjectGeneratedError.isInstance(err)) throw err;
+      // The failed attempt still burned tokens; bill them before retrying.
+      this.meter?.record(extractCallUsage(err), this.model.modelId);
+      logWarn("unparseable structured response; re-sampling once");
+      result = await withTpmRetry(run, signal);
+    }
     this.meter?.record(extractCallUsage(result), this.model.modelId);
     return result;
   }
@@ -837,15 +853,26 @@ export class VercelAgentDetector implements Detector {
       return DetectionResult.parse(extractJSON(text));
     } catch (extractErr) {
       if (!this.structuredModel) throw extractErr;
-      const reformat = await generateObject({
-        model: this.structuredModel,
-        schema: DetectionResult,
-        mode: this.objectMode,
-        prompt: `The following is a completed security analysis. Extract all confirmed findings into structured JSON.\n\n${text}\n\n${jsonOutputInstruction(multiAgent)}`,
-        abortSignal: signal,
-      });
-      this.meter?.record(extractCallUsage(reformat), this.structuredModel.modelId);
-      return reformat.object;
+      try {
+        const reformat = await generateObject({
+          model: this.structuredModel,
+          schema: DetectionResult,
+          mode: this.objectMode,
+          prompt: `The following is a completed security analysis. Extract all confirmed findings into structured JSON.\n\n${forReformat(text)}\n\n${jsonOutputInstruction(multiAgent)}`,
+          abortSignal: signal,
+        });
+        this.meter?.record(extractCallUsage(reformat), this.structuredModel.modelId);
+        return reformat.object;
+      } catch (reformatErr) {
+        if (signal?.aborted) throw reformatErr;
+        this.meter?.record(extractCallUsage(reformatErr), this.structuredModel.modelId);
+        const recovered = recoverFromError(DetectionResult, reformatErr);
+        if (!recovered) throw reformatErr;
+        logWarn(
+          `reformat failed; recovered ${recovered.findings.length} finding(s) from its raw text`,
+        );
+        return recovered;
+      }
     }
   }
 
@@ -876,15 +903,38 @@ export class VercelAgentDetector implements Detector {
         };
       }
       if (!this.structuredModel) throw extractErr;
-      const reformat = await generateObject({
-        model: this.structuredModel,
-        schema: LlmValidation,
-        mode: this.objectMode,
-        prompt: `The following is a completed validation of a security finding. Extract the verdict into structured JSON.\n\n${text}\n\n${validationJsonInstruction()}`,
-        abortSignal: signal,
-      });
-      this.meter?.record(extractCallUsage(reformat), this.structuredModel.modelId);
-      return asValidationField(reformat.object);
+      try {
+        const reformat = await generateObject({
+          model: this.structuredModel,
+          schema: LlmValidation,
+          mode: this.objectMode,
+          prompt: `The following is a completed validation of a security finding. Extract the verdict into structured JSON.\n\n${forReformat(text)}\n\n${validationJsonInstruction()}`,
+          abortSignal: signal,
+        });
+        this.meter?.record(extractCallUsage(reformat), this.structuredModel.modelId);
+        return asValidationField(reformat.object);
+      } catch (reformatErr) {
+        if (signal?.aborted) throw reformatErr;
+        this.meter?.record(extractCallUsage(reformatErr), this.structuredModel.modelId);
+        // Try the whole object first: it keeps the reasoning prose, which the
+        // verdict-only salvage below cannot.
+        const recovered = recoverFromError(LlmValidation, reformatErr);
+        if (recovered) {
+          logWarn(`[validate:${findingId}] reformat failed; recovered the verdict from its text`);
+          return asValidationField(recovered);
+        }
+        // Last resort: the model reached a verdict and only broke the JSON
+        // delimiters around it. Reading the verdict back beats dropping the
+        // finding, but the reasoning prose is unrecoverable.
+        const salvaged =
+          salvageVerdict(text) ?? salvageVerdict((reformatErr as { text?: string })?.text ?? "");
+        if (!salvaged) throw reformatErr;
+        logWarn(`[validate:${findingId}] reformat failed; salvaged "${salvaged}" from raw text`);
+        return {
+          verdict: salvaged,
+          reasoning: "Recovered from an unparseable model response; the reasoning text was lost.",
+        };
+      }
     }
   }
 
@@ -895,15 +945,24 @@ export class VercelAgentDetector implements Detector {
       return AgentSpec.parse(extractJSON(text));
     } catch (extractErr) {
       if (!this.structuredModel) throw extractErr;
-      const reformat = await generateObject({
-        model: this.structuredModel,
-        schema: AgentSpec,
-        mode: this.objectMode,
-        prompt: `The following is a completed analysis distilling a past security incident into an agentgg agent spec. Extract it into the AgentSpec JSON shape.\n\n${text}\n\n${createAgentJsonInstruction()}`,
-        abortSignal: signal,
-      });
-      this.meter?.record(extractCallUsage(reformat), this.structuredModel.modelId);
-      return reformat.object;
+      try {
+        const reformat = await generateObject({
+          model: this.structuredModel,
+          schema: AgentSpec,
+          mode: this.objectMode,
+          prompt: `The following is a completed analysis distilling a past security incident into an agentgg agent spec. Extract it into the AgentSpec JSON shape.\n\n${forReformat(text)}\n\n${createAgentJsonInstruction()}`,
+          abortSignal: signal,
+        });
+        this.meter?.record(extractCallUsage(reformat), this.structuredModel.modelId);
+        return reformat.object;
+      } catch (reformatErr) {
+        if (signal?.aborted) throw reformatErr;
+        this.meter?.record(extractCallUsage(reformatErr), this.structuredModel.modelId);
+        const recovered = recoverFromError(AgentSpec, reformatErr);
+        if (!recovered) throw reformatErr;
+        logWarn("reformat failed; recovered the agent spec from its raw text");
+        return recovered;
+      }
     }
   }
 
@@ -914,15 +973,24 @@ export class VercelAgentDetector implements Detector {
       return ReconResult.parse(extractJSON(text));
     } catch (extractErr) {
       if (!this.structuredModel) throw extractErr;
-      const reformat = await generateObject({
-        model: this.structuredModel,
-        schema: ReconResult,
-        mode: this.objectMode,
-        prompt: `The following is a completed recon survey of a codebase. Extract it into structured JSON.\n\n${text}\n\n${reconJsonInstruction()}`,
-        abortSignal: signal,
-      });
-      this.meter?.record(extractCallUsage(reformat), this.structuredModel.modelId);
-      return reformat.object;
+      try {
+        const reformat = await generateObject({
+          model: this.structuredModel,
+          schema: ReconResult,
+          mode: this.objectMode,
+          prompt: `The following is a completed recon survey of a codebase. Extract it into structured JSON.\n\n${forReformat(text)}\n\n${reconJsonInstruction()}`,
+          abortSignal: signal,
+        });
+        this.meter?.record(extractCallUsage(reformat), this.structuredModel.modelId);
+        return reformat.object;
+      } catch (reformatErr) {
+        if (signal?.aborted) throw reformatErr;
+        this.meter?.record(extractCallUsage(reformatErr), this.structuredModel.modelId);
+        const recovered = recoverFromError(ReconResult, reformatErr);
+        if (!recovered) throw reformatErr;
+        logWarn("reformat failed; recovered the recon brief from its raw text");
+        return recovered;
+      }
     }
   }
 
@@ -1282,6 +1350,76 @@ After your survey, output the brief as a single JSON object matching EXACTLY thi
 {"purpose":"What this project is and does, 1-3 sentences.","languages":["typescript"],"frameworks":["next.js"],"authModel":"How auth works, or null.","integrations":["postgres","stripe"],"notableDirs":["src/api"],"summary":"A few short paragraphs orienting a security reviewer."}
 
 Keep every field short. Use [] for empty lists and null for an unknown authModel. Do NOT report vulnerabilities — this is orientation only.`;
+}
+
+/**
+ * Last-chance recovery from a reformat call that threw.
+ *
+ * WHY: `generateObject` parses the response itself and throws on failure, so
+ * its raw text never reaches `extractJSON` — even though that function already
+ * handles every corruption we have observed (a stray `{"` prefix, the object
+ * emitted twice, a delimiter dropped between fields). The tokens are already
+ * paid for, so this recovers whole findings with their reasoning intact at no
+ * extra cost. Returns null when nothing valid is in there, and the caller
+ * rethrows.
+ */
+export function recoverFromError<S extends z.ZodTypeAny>(
+  schema: S,
+  err: unknown,
+): z.output<S> | null {
+  const text = (err as { text?: unknown })?.text;
+  if (typeof text !== "string" || text.length === 0) return null;
+  try {
+    return schema.parse(extractJSON(text));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read a verdict out of text no JSON parser accepts.
+ *
+ * Matches `"verdict":"confirmed"` and the comma-for-colon variant a degenerate
+ * model emits. Takes the LAST match on purpose: `validationJsonInstruction`
+ * shows `{"verdict":"confirmed",…}` as its example, so a model that echoes the
+ * output format would hand a first-match reader that example instead of its
+ * answer, and the example is the worst-case wrong value. Returns null when no
+ * verdict appears, which leaves the caller to rethrow.
+ */
+export function salvageVerdict(
+  text: string,
+): "confirmed" | "false-positive" | "out-of-scope" | "uncertain" | null {
+  const pattern = /"verdict"\s*[:,]\s*"(confirmed|false-positive|out-of-scope|uncertain)"/g;
+  let last: string | null = null;
+  for (const m of text.matchAll(pattern)) last = m[1];
+  return last as "confirmed" | "false-positive" | "out-of-scope" | "uncertain" | null;
+}
+
+/** Max raw model text embedded in a reformat prompt. */
+const REFORMAT_TEXT_LIMIT = 4000;
+
+/**
+ * Trim the raw text a reformat prompt re-sends to the model.
+ *
+ * WHY: the reformat call asks the SAME model to repair its own broken output,
+ * so a degenerate repetition loop is fed straight back in and repeats. One
+ * clean copy of the answer reformats fine; forty broken ones do not. Cuts the
+ * cycle at its second copy, then caps length. The head is kept because the
+ * first copy is the model's real answer.
+ */
+export function forReformat(text: string): string {
+  const collapsed = collapseRepeats(text);
+  if (collapsed.length <= REFORMAT_TEXT_LIMIT) return collapsed;
+  return `${collapsed.slice(0, REFORMAT_TEXT_LIMIT)}\n[truncated]`;
+}
+
+/** Cut at the second occurrence of the opening probe, so a repeated block
+ *  survives exactly once. Returns the text unchanged when nothing repeats. */
+function collapseRepeats(text: string): string {
+  const probeLen = 120;
+  if (text.length <= probeLen * 2) return text;
+  const next = text.indexOf(text.slice(0, probeLen), probeLen);
+  return next === -1 ? text : text.slice(0, next);
 }
 
 function extractJSON(text: string): unknown {

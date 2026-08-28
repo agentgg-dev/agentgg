@@ -468,6 +468,11 @@ export function handleDetectorError(
     return;
   }
 
+  // Provider-side call id, when the SDK carried one (NoObjectGeneratedError
+  // and friends). Without it a failed call is unopenable in the provider
+  // dashboard, which is the only place the raw request survives.
+  const genId = generationIdOf(err);
+
   const diagnostic = diagnoseScanError(err);
   if (diagnostic?.fatal) {
     // Cancel in-flight sibling requests before throwing so they unwind
@@ -481,6 +486,7 @@ export function handleDetectorError(
 
   if (diagnostic) {
     logError(`${label}: ${diagnostic.format()}`);
+    if (genId) console.error(`      Generation: ${genId}`);
     if (opts.verbose && e.stack) {
       console.error(
         e.stack
@@ -497,6 +503,7 @@ export function handleDetectorError(
   // hardcoded "detection failed" is both redundant and wrong for the validate /
   // score / dedup phases that share this path. Matches the diagnostic branch above.
   logError(`${label}: ${msg}`);
+  if (genId) console.error(`      Generation: ${genId}`);
   if (e.statusCode) console.error(`      HTTP ${e.statusCode} ${e.url ?? ""}`);
   if (e.responseBody) {
     console.error(`      Response: ${String(e.responseBody).slice(0, 300)}`);
@@ -518,6 +525,22 @@ export function handleDetectorError(
         .join("\n"),
     );
   }
+}
+
+/**
+ * Provider call id off an SDK error, or null. `NoObjectGeneratedError` and the
+ * other AI SDK errors carry `response.id`; for OpenRouter that is the argument
+ * to `GET /api/v1/generation?id=`, the only way to reopen a failed call. Walks
+ * one level of `cause` because the SDK nests the parse failure. Defensive: any
+ * missing field degrades to null rather than throwing inside an error handler.
+ */
+function generationIdOf(err: unknown): string | null {
+  const seen = [err, (err as { cause?: unknown } | null)?.cause];
+  for (const node of seen) {
+    const id = (node as { response?: { id?: unknown } } | null | undefined)?.response?.id;
+    if (typeof id === "string" && id.length > 0) return id;
+  }
+  return null;
 }
 
 function collectResponseBodies(err: Error): string[] {
