@@ -100,6 +100,7 @@ vi.mock("../src/diff.js", () => ({
 }));
 
 import { runScan } from "../src/commands/scan.js";
+import { VALIDATION_CUT_SHORT } from "../src/validator.js";
 
 let agentggHome: string;
 let projectRoot: string;
@@ -351,6 +352,69 @@ describe("scan resume — validation phase", () => {
 
     const record = readFileRecord(outputDir, "test-detector-a", "server.js");
     expect(record?.findings[0]?.validation?.verdict).toBe("false-positive");
+  });
+
+  // A validator that burns every turn on tool calls returns no text at all.
+  // That used to be laundered through the reformat fallback into a confident
+  // `uncertain` ("No validation content or finding was provided to analyze"),
+  // indistinguishable from a real judgement. Validation DID run, so the verdict
+  // stays `uncertain`, but the reasoning now says the run was cut short.
+  describe("validator produced nothing", () => {
+    const cutShort = async () => ({
+      verdict: "uncertain" as const,
+      reasoning: VALIDATION_CUT_SHORT,
+    });
+
+    it("records uncertain with cut-short reasoning, not an invented analysis", async () => {
+      suppressLogs();
+      detectorMock.validateFinding.mockImplementation(cutShort);
+      await runScan(projectRoot, { template: [agentA], output: outputDir, validate: true }, env);
+
+      const validation = readFileRecord(outputDir, "test-detector-a", "server.js")?.findings[0]
+        ?.validation;
+      expect(validation?.verdict).toBe("uncertain");
+      expect(validation?.reasoning).toBe(VALIDATION_CUT_SHORT);
+    });
+
+    it("is distinguishable from a real uncertain by its reasoning", async () => {
+      suppressLogs();
+      detectorMock.validateFinding.mockImplementation(async () => ({
+        verdict: "uncertain" as const,
+        reasoning: "Traced the sink but could not confirm reachability.",
+      }));
+      await runScan(projectRoot, { template: [agentA], output: outputDir, validate: true }, env);
+
+      const validation = readFileRecord(outputDir, "test-detector-a", "server.js")?.findings[0]
+        ?.validation;
+      expect(validation?.verdict).toBe("uncertain");
+      expect(validation?.reasoning).not.toBe(VALIDATION_CUT_SHORT);
+    });
+
+    // Consequence of recording a verdict rather than leaving it unset: the
+    // resume skip treats it like any other verdict. Recovering it takes an
+    // explicit --revalidate-all, same as re-examining a real one.
+    it("is skipped on a plain resume, and retried under --revalidate-all", async () => {
+      suppressLogs();
+      detectorMock.validateFinding.mockImplementation(cutShort);
+      await runScan(projectRoot, { template: [agentA], output: outputDir, validate: true }, env);
+
+      detectorMock.validateFinding.mockClear();
+      await runScan(projectRoot, { template: [agentA], output: outputDir, validate: true }, env);
+      expect(detectorMock.validateFinding).not.toHaveBeenCalled();
+
+      detectorMock.validateFinding.mockImplementation(async () => ({
+        verdict: "confirmed" as const,
+        reasoning: "recovered on retry",
+      }));
+      await runScan(
+        projectRoot,
+        { template: [agentA], output: outputDir, validate: true, revalidateAll: true },
+        env,
+      );
+
+      const record = readFileRecord(outputDir, "test-detector-a", "server.js");
+      expect(record?.findings[0]?.validation?.verdict).toBe("confirmed");
+    });
   });
 });
 

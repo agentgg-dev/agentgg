@@ -42,6 +42,7 @@ import {
   buildScopeValidatePrompt,
   buildValidatePrompt,
   LlmValidation,
+  VALIDATION_CUT_SHORT,
 } from "../validator.js";
 import { looksLikeRefusal } from "./refusal.js";
 export type Effort = "low" | "medium" | "high" | "max";
@@ -679,6 +680,25 @@ export class VercelAgentDetector implements Detector {
       // Warn only: a capped batch still records 0 findings and the agent still
       // completes, so one bad batch never fails the scan.
       warnIfTurnCapped(label, gen, effectiveTurns);
+      // An empty completion is a FAILED batch, not a clean one. Left to
+      // parseOrReformat below it becomes an empty findings list: the reformat
+      // prompt carries only this text, so from a blank page the model dutifully
+      // answers "no findings", and that all-clear is indistinguishable from
+      // real code review. Seen 2026-08-11: the xss agent hit its turn cap,
+      // wrote nothing, and the two real findings it had reported on the
+      // previous run silently disappeared.
+      //
+      // Throwing is the documented contract for a non-refusal parse failure. It
+      // sets `rt.failed` in scan.ts, which suppresses the agent sidecar so the
+      // agent re-runs instead of recording a clean pass. Not scan-fatal: an
+      // unrecognized Error is logged and the batch pool continues.
+      if (!gen.text.trim()) {
+        logUnparseableGeneration(label, gen);
+        throw new Error(
+          `${label}: the model ended its tool loop without writing an answer, so this batch produced no analysis. ` +
+            `Failing the batch rather than recording 0 findings; raise --max-turns if it repeats.`,
+        );
+      }
       let result: DetectionResultType;
       try {
         result = await this.parseOrReformat(gen.text, false, label, args.signal);
@@ -765,6 +785,7 @@ export class VercelAgentDetector implements Detector {
       // fallback), because this SDK can't combine tools with generateObject.
       // Same exclude / size knobs as the hunt so validation and detection
       // see the same file set.
+      const label = `validate:${args.finding.id}`;
       const prompt = `${buildValidatePrompt(args)}\n\n${validationJsonInstruction()}`;
       const gen = await this.metered(
         () =>
@@ -776,15 +797,22 @@ export class VercelAgentDetector implements Detector {
               maxFileSizeKb: args.maxFileSizeKb,
               verbose: this.verbose,
               exclude: args.excludePatterns ?? [],
-              label: `validate:${args.finding.id}`,
+              label,
             }),
             maxSteps: this.validateMaxTurns + 1,
-            experimental_repairToolCall: this.toolCallRepair(`validate:${args.finding.id}`),
+            experimental_repairToolCall: this.toolCallRepair(label),
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
           }),
-        { label: `validate:${args.finding.id}`, signal: args.signal },
+        { label, signal: args.signal },
       );
+      // Same failure shape as runAgent: a validator that spends every step on
+      // tool calls leaves no step to answer in, so `gen.text` is empty and
+      // parseValidation's reformat would invent a verdict from nothing. Without
+      // these two lines that is completely silent: the finding shows a
+      // confident-looking `uncertain` and no log says the loop was cut short.
+      warnIfTurnCapped(label, gen, this.validateMaxTurns);
+      if (!gen.text.trim()) logUnparseableGeneration(label, gen);
       return await this.parseValidation(gen.text, args.finding.id, args.signal);
     } catch (err) {
       debugLog("VercelAgentDetector.validateFinding", err);
@@ -919,6 +947,21 @@ export class VercelAgentDetector implements Detector {
     reasoning: string;
     refused?: boolean;
   }> {
+    // Nothing to parse and nothing to reformat. The reformat prompt below
+    // carries ONLY this text, never the finding, so on an empty string the
+    // model is asked to extract a verdict from a blank page. It complies:
+    // picks `uncertain`, writes "No validation content or finding was provided
+    // to analyze", and that lands on the finding as a real-looking judgement.
+    // `uncertain` is still the right verdict (we genuinely do not know), but
+    // the reasoning has to say the validator was cut short instead of
+    // impersonating an analysis that never happened.
+    if (!text.trim()) {
+      logWarn(
+        `[validate:${findingId}] model returned no text; recording uncertain ` +
+          `+ cut-short reasoning (was fabricating a verdict from an empty reformat prompt)`,
+      );
+      return { verdict: "uncertain", reasoning: VALIDATION_CUT_SHORT };
+    }
     try {
       return asValidationField(LlmValidation.parse(extractJSON(text)));
     } catch (extractErr) {

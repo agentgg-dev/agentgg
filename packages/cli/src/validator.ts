@@ -12,6 +12,25 @@ import { languageFromPath } from "./detect.js";
  * (Vercel SDK uses `generateObject`; Claude Agent SDK relies on a
  * JSON-only prompt and defensive parsing).
  */
+/**
+ * Reasoning recorded when the validator returns nothing at all: it spent its
+ * whole turn budget on tool calls, or the completion came back empty. The
+ * verdict stays `uncertain` because that is the truth (we do not know), but the
+ * prose has to say the run was cut short.
+ *
+ * Previously an empty response went through the structured reformat, whose
+ * prompt carries only the model's own output and never the finding. Asked to
+ * extract a verdict from a blank page, the model complied: it picked
+ * `uncertain` and wrote "No validation content or finding was provided to
+ * analyze", which landed on the finding looking like a real judgement.
+ *
+ * Exported so both detectors emit the same string, tests assert on it, and a
+ * cleanup pass can find affected findings. User-facing: the dashboard renders
+ * it verbatim.
+ */
+export const VALIDATION_CUT_SHORT =
+  "Validation was cut short. The model stopped before it returned a verdict, so this finding was not assessed.";
+
 export const LlmValidation = z.object({
   verdict: z
     .enum(["confirmed", "false-positive", "out-of-scope", "uncertain"])
