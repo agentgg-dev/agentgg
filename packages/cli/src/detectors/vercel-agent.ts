@@ -428,10 +428,17 @@ export class VercelAgentDetector implements Detector {
   /**
    * Run one LLM call through the TPM-retry wrapper, then record its token
    * usage into the attached meter (a no-op when no meter is attached). Every
-   * `generateObject` / `generateText` call funnels through here so usage
-   * capture lives in exactly one place.
+   * `generateObject` / `generateText` call funnels through here, so this is
+   * also the one place that sees a call's provider ids on both outcomes: the
+   * generation ids of a result, and the request ids a failure left in its
+   * error headers. `label` is required for the same reason `buildTools` needs
+   * one: ten concurrent validators share one stdout.
    */
-  private async metered<T>(run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  private async metered<T>(
+    run: () => Promise<T>,
+    opts: { label: string; signal?: AbortSignal },
+  ): Promise<T> {
+    const { label, signal } = opts;
     let result: T;
     try {
       result = await withTpmRetry(run, signal);
@@ -442,13 +449,27 @@ export class VercelAgentDetector implements Detector {
       // (precondition, score, dedupe): they have no reformat fallback, so a
       // retry is their only recovery. Tool-loop `generateText` calls never
       // raise this error, so they are untouched.
-      if (signal?.aborted || !NoObjectGeneratedError.isInstance(err)) throw err;
+      // Every other failure (credits exhausted, a 400, ECONNRESET) leaves here.
+      // Log its provider ids first: a throw carries no `response.id`, so this
+      // is the only chance to record what to search for in the provider's
+      // dashboard afterwards.
+      if (signal?.aborted || !NoObjectGeneratedError.isInstance(err)) {
+        logFailedCallIds(label, err, signal);
+        throw err;
+      }
       // The failed attempt still burned tokens; bill them before retrying.
       this.meter?.record(extractCallUsage(err), this.model.modelId);
-      logWarn("unparseable structured response; re-sampling once");
-      result = await withTpmRetry(run, signal);
+      logWarn(`[${label}] unparseable structured response; re-sampling once`);
+      logFailedCallIds(label, err, signal);
+      try {
+        result = await withTpmRetry(run, signal);
+      } catch (retryErr) {
+        logFailedCallIds(label, retryErr, signal);
+        throw retryErr;
+      }
     }
     this.meter?.record(extractCallUsage(result), this.model.modelId);
+    logGenerationIds(label, result);
     return result;
   }
 
@@ -524,18 +545,19 @@ export class VercelAgentDetector implements Detector {
           generateText({
             model: this.model,
             prompt,
-            tools: buildTools(
-              resolve(args.rootDir),
-              args.maxFileSizeKb,
-              this.verbose,
-              args.excludePatterns,
-            ),
+            tools: buildTools({
+              cwd: resolve(args.rootDir),
+              maxFileSizeKb: args.maxFileSizeKb,
+              verbose: this.verbose,
+              exclude: args.excludePatterns,
+              label: "recon",
+            }),
             maxSteps: args.maxTurns + 1,
             experimental_repairToolCall: this.toolCallRepair("recon"),
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
           }),
-        args.signal,
+        { label: "recon", signal: args.signal },
       );
       return await this.parseRecon(text, args.signal);
     } catch (err) {
@@ -560,7 +582,7 @@ export class VercelAgentDetector implements Detector {
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
           }),
-        args.signal,
+        { label: "suggest-excludes", signal: args.signal },
       );
       return object;
     } catch (err) {
@@ -585,18 +607,19 @@ export class VercelAgentDetector implements Detector {
           generateText({
             model: this.model,
             prompt,
-            tools: buildTools(
-              resolve(args.rootDir),
-              args.maxFileSizeKb,
-              this.verbose,
-              args.excludePatterns,
-            ),
+            tools: buildTools({
+              cwd: resolve(args.rootDir),
+              maxFileSizeKb: args.maxFileSizeKb,
+              verbose: this.verbose,
+              exclude: args.excludePatterns,
+              label: "create-agent",
+            }),
             maxSteps: args.maxTurns + 1,
-            experimental_repairToolCall: this.toolCallRepair("createAgent"),
+            experimental_repairToolCall: this.toolCallRepair("create-agent"),
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
           }),
-        args.signal,
+        { label: "create-agent", signal: args.signal },
       );
       return await this.parseAgentSpec(text, args.signal);
     } catch (err) {
@@ -615,19 +638,20 @@ export class VercelAgentDetector implements Detector {
           generateText({
             model: this.model,
             prompt,
-            tools: buildTools(
-              resolve(args.rootDir),
-              args.maxFileSizeKb,
-              this.verbose,
-              args.excludePatterns,
+            tools: buildTools({
+              cwd: resolve(args.rootDir),
+              maxFileSizeKb: args.maxFileSizeKb,
+              verbose: this.verbose,
+              exclude: args.excludePatterns,
+              label,
               budgetBytes,
-            ),
+            }),
             maxSteps: maxTurns + 1,
             experimental_repairToolCall: this.toolCallRepair(label),
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
           }),
-        args.signal,
+        { label, signal: args.signal },
       );
     try {
       let gen: Awaited<ReturnType<typeof hunt>>;
@@ -654,7 +678,7 @@ export class VercelAgentDetector implements Detector {
       // without this line a capped batch is indistinguishable from clean code.
       // Warn only: a capped batch still records 0 findings and the agent still
       // completes, so one bad batch never fails the scan.
-      warnIfTurnCapped(args.agent.slug, gen, effectiveTurns);
+      warnIfTurnCapped(label, gen, effectiveTurns);
       let result: DetectionResultType;
       try {
         result = await this.parseOrReformat(gen.text, false, args.signal);
@@ -699,7 +723,7 @@ export class VercelAgentDetector implements Detector {
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
           }),
-        args.signal,
+        { label: `precondition:${args.agentName}`, signal: args.signal },
       );
       return object;
     } catch (err) {
@@ -730,7 +754,7 @@ export class VercelAgentDetector implements Detector {
               providerOptions: this.providerOptionsArg(),
               abortSignal: args.signal,
             }),
-          args.signal,
+          { label: `validate:${args.finding.id}`, signal: args.signal },
         );
         return asValidationField(object);
       }
@@ -747,18 +771,19 @@ export class VercelAgentDetector implements Detector {
           generateText({
             model: this.model,
             prompt,
-            tools: buildTools(
-              resolve(args.root as string),
-              args.maxFileSizeKb,
-              this.verbose,
-              args.excludePatterns ?? [],
-            ),
+            tools: buildTools({
+              cwd: resolve(args.root as string),
+              maxFileSizeKb: args.maxFileSizeKb,
+              verbose: this.verbose,
+              exclude: args.excludePatterns ?? [],
+              label: `validate:${args.finding.id}`,
+            }),
             maxSteps: this.validateMaxTurns + 1,
             experimental_repairToolCall: this.toolCallRepair(`validate:${args.finding.id}`),
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
           }),
-        args.signal,
+        { label: `validate:${args.finding.id}`, signal: args.signal },
       );
       return await this.parseValidation(gen.text, args.finding.id, args.signal);
     } catch (err) {
@@ -779,7 +804,7 @@ export class VercelAgentDetector implements Detector {
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
           }),
-        args.signal,
+        { label: `validate-scope:${args.finding.id}`, signal: args.signal },
       );
       return asValidationField(object);
     } catch (err) {
@@ -805,7 +830,7 @@ export class VercelAgentDetector implements Detector {
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
           }),
-        args.signal,
+        { label: `score:${args.finding.id}`, signal: args.signal },
       );
       return asCvssScore(object);
     } catch (err) {
@@ -831,7 +856,7 @@ export class VercelAgentDetector implements Detector {
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
           }),
-        args.signal,
+        { label: `dedupe:${args.filePath}`, signal: args.signal },
       );
       return object.clusters;
     } catch (err) {
@@ -1053,15 +1078,30 @@ export const GrepParameters = z.preprocess(
   }),
 );
 
-function buildTools(
-  cwd: string,
-  maxFileSizeKb: number | undefined,
-  verbose: boolean,
-  exclude: string[] = [],
-  budgetBytes: number = TOOL_OUTPUT_BUDGET_BYTES,
-) {
+/**
+ * Everything one tool loop needs to build its tools. `label` names the loop
+ * (`recon`, `create-agent`, `runAgent:<slug>`, `validate:<findingId>`) and
+ * prefixes every tool log line, so concurrent loops stay attributable on a
+ * shared stdout. `budgetBytes` overrides the default cap; the context-overflow
+ * retry passes a halved one.
+ */
+interface ToolLoopOpts {
+  cwd: string;
+  maxFileSizeKb: number | undefined;
+  verbose: boolean;
+  exclude?: string[];
+  label: string;
+  budgetBytes?: number;
+}
+
+function buildTools(opts: ToolLoopOpts) {
+  const { cwd, maxFileSizeKb, verbose, label } = opts;
+  const exclude = opts.exclude ?? [];
+  const budgetBytes = opts.budgetBytes ?? TOOL_OUTPUT_BUDGET_BYTES;
+  // Prefix every tool line with the loop that made the call. Ten concurrent
+  // validators share one stdout, so an unlabelled line cannot be attributed.
   const logTool = verbose
-    ? (name: string, arg: string) => console.log(`    ${name} ${arg.slice(0, 100)}`)
+    ? (name: string, arg: string) => console.log(`    [${label}] ${name} ${arg.slice(0, 100)}`)
     : () => undefined;
 
   // Per-session tool-output budget, shared across every tool call in this
@@ -1526,15 +1566,182 @@ function numberish(v: unknown): number {
  * failure. Reads every field defensively so a provider that omits `steps`
  * degrades to no warning rather than breaking the scan.
  */
-export function warnIfTurnCapped(slug: string, result: unknown, maxTurns: number): void {
+/**
+ * Provider-side request ids for one call. A tool loop bills one generation PER
+ * STEP, so a 51-step loop has 51 ids. Report the first and last plus the count
+ * rather than all of them. These are what make a provider dashboard lookup
+ * possible; without them a bad call can only be found by scanning the activity
+ * log by timestamp.
+ *
+ * Returns "" when the provider exposes no ids, so callers can append blind.
+ */
+function formatGenerationIds(result: unknown): string {
+  return formatIdRange("genId", "genIds", collectGenerationIds(result), "calls");
+}
+
+/** The provider ids on a successful result: one per step for a tool loop,
+ *  else the single top-level response id. Empty when none are exposed. */
+function collectGenerationIds(result: unknown): string[] {
+  const r = (result ?? {}) as {
+    response?: { id?: unknown };
+    steps?: Array<{ response?: { id?: unknown } }>;
+  };
+  const stepIds = (Array.isArray(r.steps) ? r.steps : [])
+    .map((step) => step?.response?.id)
+    .filter((id): id is string => typeof id === "string" && id.length > 0);
+  if (stepIds.length > 0) return stepIds;
+  return [r.response?.id].filter((id): id is string => typeof id === "string" && id.length > 0);
+}
+
+/** ` name=only` for one id, ` plural=first..last (N unit)` for many, "" for
+ *  none. Leading space so callers can append to a log line blind. */
+function formatIdRange(name: string, plural: string, ids: string[], unit: string): string {
+  if (ids.length === 0) return "";
+  if (ids.length === 1) return ` ${name}=${ids[0]}`;
+  return ` ${plural}=${ids[0]}..${ids[ids.length - 1]} (${ids.length} ${unit})`;
+}
+
+/**
+ * Response headers that carry a provider-side request id, in the order we
+ * prefer them. `cf-ray` is last: it identifies the Cloudflare edge hop that
+ * fronts OpenRouter, not the generation, so it only helps when the provider
+ * gave us nothing better.
+ */
+const ERROR_ID_HEADERS = [
+  "x-request-id", // OpenAI, OpenRouter
+  "request-id", // Anthropic
+  "x-amzn-requestid", // Bedrock
+  "x-goog-request-id", // Vertex
+  "cf-ray", // Cloudflare edge, last resort
+] as const;
+
+type ErrorIds = { genIds: string[]; reqIds: Array<{ header: string; value: string }> };
+
+/**
+ * Provider-side ids for a call that FAILED. `formatGenerationIds` reads
+ * `response.id`, which only exists on a result. A throw has none, so every
+ * failure (credits exhausted, ECONNRESET, a 400) used to leave no id at all
+ * and the request could not be found in the provider's dashboard afterwards.
+ *
+ * Two salvage routes, both best-effort and neither guaranteed by any provider:
+ * the request id echoed in the error's response headers, and a generation id
+ * in the error body (OpenRouter returns one on some upstream failures). Prints
+ * both when both exist, "" when neither does.
+ */
+export function formatErrorIds(err: unknown): string {
+  const { genIds, reqIds } = collectErrorIds(err);
+  const gen = formatIdRange("genId", "genIds", genIds, "calls");
+  if (reqIds.length === 0) return gen;
+  const first = reqIds[0] as { header: string; value: string };
+  if (reqIds.length === 1) return `${gen} reqId=${first.value} (${first.header})`;
+  const last = reqIds[reqIds.length - 1] as { header: string; value: string };
+  return `${gen} reqIds=${first.value}..${last.value} (${reqIds.length} attempts via ${first.header})`;
+}
+
+/**
+ * Walk an error for ids. The one we want is rarely on the error thrown: the
+ * SDK's `RetryError` holds each attempt in `errors` (and repeats the final one
+ * as `lastError`), and our own context-length rewrite wraps the original as
+ * `cause`. Depth-limited and value-deduped, same defensive shape as
+ * `errorHaystack`.
+ */
+function collectErrorIds(
+  err: unknown,
+  depth = 0,
+  acc: ErrorIds = { genIds: [], reqIds: [] },
+): ErrorIds {
+  if (depth > 3 || err == null || typeof err !== "object") return acc;
+  const e = err as Record<string, unknown>;
+  if (e.responseHeaders != null && typeof e.responseHeaders === "object") {
+    const headers = new Map(
+      Object.entries(e.responseHeaders as Record<string, unknown>).map(([k, v]) => [
+        k.toLowerCase(),
+        v,
+      ]),
+    );
+    for (const header of ERROR_ID_HEADERS) {
+      const value = headers.get(header);
+      if (typeof value !== "string" || value.length === 0) continue;
+      if (!acc.reqIds.some((r) => r.value === value)) acc.reqIds.push({ header, value });
+      break;
+    }
+  }
+  const bodyId = generationIdFromBody(e.responseBody);
+  if (bodyId && !acc.genIds.includes(bodyId)) acc.genIds.push(bodyId);
+  for (const child of [e.cause, e.lastError]) {
+    if (child != null && child !== err) collectErrorIds(child, depth + 1, acc);
+  }
+  if (Array.isArray(e.errors)) {
+    for (const child of e.errors) {
+      if (child !== err) collectErrorIds(child, depth + 1, acc);
+    }
+  }
+  return acc;
+}
+
+/** The `id` field of a JSON error body, when there is one. Providers that
+ *  bill a generation before failing report it here (OpenRouter `gen-...`). */
+function generationIdFromBody(body: unknown): string | null {
+  if (typeof body !== "string" || !body.includes('"id"')) return null;
+  try {
+    const parsed = JSON.parse(body) as { id?: unknown };
+    return typeof parsed.id === "string" && parsed.id.length > 0 ? parsed.id : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Report the ids of a failed call. Always logs (not gated on a flag): a
+ * failure is exactly when someone will go looking for the request in the
+ * provider's dashboard, and the id is the only way to find it. Silent when the
+ * provider exposed no id, and silent on a user cancel. An aborted call is not a
+ * provider failure, and ten concurrent ones would bury the real reason.
+ */
+export function logFailedCallIds(label: string, err: unknown, signal?: AbortSignal): void {
+  if (signal?.aborted || isAbortLikeError(err)) return;
+  const ids = formatErrorIds(err);
+  if (!ids) return;
+  logWarn(`[${label}] call failed:${ids}: ${firstErrorLine(errorHaystack(err))}`);
+}
+
+/** A cancelled call, by SDK convention (`AbortError`) or by message. False
+ *  positives only cost us one diagnostic line, so match loosely. */
+function isAbortLikeError(err: unknown): boolean {
+  const e = err as { name?: unknown; message?: unknown } | null;
+  if (e?.name === "AbortError" || e?.name === "TimeoutError") return true;
+  return typeof e?.message === "string" && /\baborted?\b/i.test(e.message);
+}
+
+/**
+ * Trace the ids of a SUCCESSFUL call. Off by default: a scan makes tens of
+ * calls (49 in the smallest demo run, far more on a real repo) and one line
+ * each would drown the log. Turn on with `AGENTGG_LOG_GENERATION_IDS=1` to
+ * follow every call into the provider's dashboard, which is what you want when
+ * reconciling our token accounting against a provider bill.
+ */
+export function logGenerationIds(
+  label: string,
+  result: unknown,
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  const flag = env.AGENTGG_LOG_GENERATION_IDS;
+  if (!flag || flag === "0" || flag.toLowerCase() === "false") return;
+  const ids = formatGenerationIds(result);
+  if (!ids) return;
+  logWarn(`[${label}] call complete:${ids}`);
+}
+
+export function warnIfTurnCapped(label: string, result: unknown, maxTurns: number): void {
   const steps = (result as { steps?: unknown[] })?.steps;
   if (!Array.isArray(steps) || steps.length < maxTurns + 1) return;
   const last = steps[steps.length - 1] as { toolCalls?: unknown[] } | undefined;
   const stillCalling = Array.isArray(last?.toolCalls) && last.toolCalls.length > 0;
   logWarn(
-    `[runAgent:${slug}] hit the ${maxTurns}-turn cap (${steps.length} steps` +
+    `[${label}] hit the ${maxTurns}-turn cap (${steps.length} steps` +
       `${stillCalling ? ", still mid tool-call" : ""}): analysis was cut short, ` +
-      `findings for this batch may be incomplete. Raise maxTurnsPerBatch or pass --max-turns.`,
+      `results for this tool loop may be incomplete. Raise maxTurnsPerBatch or pass --max-turns.` +
+      `${formatGenerationIds(result)}`,
   );
 }
 
@@ -1580,6 +1787,7 @@ function logUnparseableGeneration(label: string, result: unknown): void {
     `[${label}] unparseable model response: finishReason=${finishReason} ` +
       `textChars=${textChars} reasoningChars=${reasoningChars} ` +
       `promptTokens=${promptTokens} completionTokens=${completionTokens} ` +
-      `steps=${steps.length} lastStep(finish=${lastFinish},toolCalls=${lastToolCalls},textChars=${lastTextChars})`,
+      `steps=${steps.length} lastStep(finish=${lastFinish},toolCalls=${lastToolCalls},textChars=${lastTextChars})` +
+      `${formatGenerationIds(result)}`,
   );
 }
