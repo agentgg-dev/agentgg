@@ -46,24 +46,11 @@ Walkthrough: [Quickstart](https://docs.agentgg.dev/cli/quickstart).
 
 Browse the full documentation at **[docs.agentgg.dev](https://docs.agentgg.dev)**.
 
-| Page | What it covers |
-|---|---|
-| [Install](https://docs.agentgg.dev/cli/install) | Get the CLI onto your machine |
-| [Quickstart](https://docs.agentgg.dev/cli/quickstart) | Your first scan, start to finish |
-| [How a scan runs](https://docs.agentgg.dev/cli/how-a-scan-runs) | The phases in order, and what a bare `scan` does by default |
-| [Output and state](https://docs.agentgg.dev/cli/output-and-state) | What the scan writes, and where |
-| [Resume and reports](https://docs.agentgg.dev/cli/resume-and-reports) | What makes a re-run skip work, and the shape of the report |
-| [Choose agents](https://docs.agentgg.dev/cli/guides/choose-agents) | Pick agents with `-t`, by category or by slug |
-| [Scan a pull request](https://docs.agentgg.dev/cli/guides/scan-a-pull-request) | `--diff` ranges and merge bases |
-| [GitHub Actions](https://docs.agentgg.dev/cli/guides/github-actions) | A workflow that scans every pull request |
-| [Validation and scope](https://docs.agentgg.dev/cli/guides/validation-and-scope) | Cut false positives with trust boundaries |
-| [Limit what gets scanned](https://docs.agentgg.dev/cli/guides/limit-what-gets-scanned) | Excludes, size caps, and batch caps |
-| [Plan and inspect](https://docs.agentgg.dev/cli/guides/plan-and-inspect) | Preview a scan before you pay for it |
-| [Scan flags](https://docs.agentgg.dev/cli/reference/scan-flags) | Every flag `scan` accepts |
-| [Commands](https://docs.agentgg.dev/cli/reference/commands) | Every command |
-| [Configuration](https://docs.agentgg.dev/cli/reference/configuration) | The config file and environment variables |
-| [Providers](https://docs.agentgg.dev/cli/providers) | Set up Anthropic, OpenAI, Bedrock, Vertex, OpenRouter, or Ollama |
-| [Troubleshooting](https://docs.agentgg.dev/cli/troubleshooting) | Common failures and their fixes |
+- [Quickstart](https://docs.agentgg.dev/cli/quickstart): your first scan
+- [How a scan runs](https://docs.agentgg.dev/cli/how-a-scan-runs): the phases, and the defaults
+- [Providers](https://docs.agentgg.dev/cli/providers): set up your model provider
+- [Scan flags](https://docs.agentgg.dev/cli/reference/scan-flags): the full flag reference
+- [Troubleshooting](https://docs.agentgg.dev/cli/troubleshooting): when something goes wrong
 
 ## Agents
 
