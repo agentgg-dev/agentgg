@@ -101,6 +101,41 @@ describe("formatErrorIds", () => {
     expect(out).toContain("reqId=req_both");
   });
 
+  // Header shapes below were measured against the live OpenRouter API on
+  // 2026-08-28, not guessed. OpenRouter sends the GENERATION id as a header
+  // (X-Generation-Id, same value as the body's `id`) and does NOT send
+  // x-request-id at all; the only request-ish header is Cloudflare's CF-RAY.
+  // That inverts the original assumption that headers carry request ids only.
+  describe("OpenRouter, as the live API actually answers", () => {
+    it("prefers the generation id header over the cloudflare edge id", () => {
+      const out = formatErrorIds(
+        apiCallError({
+          "X-Generation-Id": "gen-1787910087-YiDs6QhKhlryJxmeA7cl",
+          "CF-RAY": "a3225c3f7823252d-SEA",
+        }),
+      );
+      expect(out).toContain("genId=gen-1787910087-YiDs6QhKhlryJxmeA7cl");
+      expect(out).toContain("reqId=a3225c3f7823252d-SEA (cf-ray)");
+    });
+
+    it("falls back to CF-RAY when the call failed before any generation", () => {
+      // A 400 for a bad model id: nothing was generated, so there is no
+      // generation id anywhere, and the edge trace is all we can offer.
+      const out = formatErrorIds(
+        apiCallError(
+          { "CF-RAY": "a3225bf43abac96d-SEA" },
+          '{"error":{"message":"x is not a valid model ID","code":400},"user_id":"user_3Hbc"}',
+        ),
+      );
+      expect(out).toBe(" reqId=a3225bf43abac96d-SEA (cf-ray)");
+    });
+
+    it("does not mistake user_id in an error body for a generation id", () => {
+      const out = formatErrorIds(apiCallError({}, '{"error":{"code":402},"user_id":"user_3Hbc"}'));
+      expect(out).toBe("");
+    });
+  });
+
   it("says nothing when the provider exposed no ids", () => {
     expect(formatErrorIds(apiCallError({ "content-type": "application/json" }))).toBe("");
   });

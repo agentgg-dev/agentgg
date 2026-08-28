@@ -1608,12 +1608,22 @@ function formatIdRange(name: string, plural: string, ids: string[], unit: string
  * gave us nothing better.
  */
 const ERROR_ID_HEADERS = [
-  "x-request-id", // OpenAI, OpenRouter
-  "request-id", // Anthropic
+  "x-request-id", // OpenAI
+  "request-id", // Anthropic, and OpenRouter advertises it
   "x-amzn-requestid", // Bedrock
   "x-goog-request-id", // Vertex
   "cf-ray", // Cloudflare edge, last resort
 ] as const;
+
+/**
+ * Headers carrying a GENERATION id rather than a request id. OpenRouter sends
+ * `X-Generation-Id` (same value as the body's `id`) on every call it actually
+ * generated, which makes it the one id worth having on a failure: it resolves
+ * in the provider dashboard, where a request id or a `cf-ray` does not.
+ * Measured 2026-08-28 against the live API. Checked before the request-id
+ * headers so the better id wins when both are present.
+ */
+const GENERATION_ID_HEADERS = ["x-generation-id"] as const;
 
 type ErrorIds = { genIds: string[]; reqIds: Array<{ header: string; value: string }> };
 
@@ -1623,10 +1633,11 @@ type ErrorIds = { genIds: string[]; reqIds: Array<{ header: string; value: strin
  * failure (credits exhausted, ECONNRESET, a 400) used to leave no id at all
  * and the request could not be found in the provider's dashboard afterwards.
  *
- * Two salvage routes, both best-effort and neither guaranteed by any provider:
- * the request id echoed in the error's response headers, and a generation id
- * in the error body (OpenRouter returns one on some upstream failures). Prints
- * both when both exist, "" when neither does.
+ * Three salvage routes, all best-effort and none guaranteed by any provider:
+ * a generation id in a response header (OpenRouter's X-Generation-Id, the one
+ * worth having because it resolves in the dashboard), a generation id in the
+ * error body, and failing both, a request id from the headers. Prints a
+ * generation id and a request id when both exist, "" when nothing does.
  */
 export function formatErrorIds(err: unknown): string {
   const { genIds, reqIds } = collectErrorIds(err);
@@ -1659,6 +1670,12 @@ function collectErrorIds(
         v,
       ]),
     );
+    for (const header of GENERATION_ID_HEADERS) {
+      const value = headers.get(header);
+      if (typeof value !== "string" || value.length === 0) continue;
+      if (!acc.genIds.includes(value)) acc.genIds.push(value);
+      break;
+    }
     for (const header of ERROR_ID_HEADERS) {
       const value = headers.get(header);
       if (typeof value !== "string" || value.length === 0) continue;
