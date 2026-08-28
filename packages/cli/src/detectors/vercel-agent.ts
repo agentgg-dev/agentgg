@@ -345,6 +345,71 @@ const GREP_MAX_MATCHES = 200;
  *  leaving headroom for the prompt, reasoning, and the JSON answer. Past the
  *  cap, further tool calls return a notice telling the model to finalize. */
 const TOOL_OUTPUT_BUDGET_BYTES = 400_000;
+
+/** Which pass owns this tool loop. Selects the artifact the model is told to
+ *  emit when the budget runs out, and when a call repeats. See ARTIFACT. */
+export type ToolLoopPhase = "detect" | "validate" | "recon" | "create-agent";
+
+/**
+ * What each phase must output, worded to match that phase's own `## Output
+ * format` instruction. A `Record` rather than a lookup with a default, so a new
+ * phase fails to compile until someone names its artifact.
+ *
+ * Getting this wrong is not cosmetic: a validator told to emit "findings JSON"
+ * has no such thing to produce, so the notice becomes an instruction it cannot
+ * follow.
+ */
+const ARTIFACT: Record<ToolLoopPhase, string> = {
+  detect: "findings JSON",
+  validate: "verdict JSON",
+  recon: "brief JSON",
+  "create-agent": "agent spec JSON",
+};
+
+/** Env suffix per phase for the budget override below. */
+const BUDGET_ENV_SUFFIX: Record<ToolLoopPhase, string> = {
+  detect: "DETECT",
+  validate: "VALIDATE",
+  recon: "RECON",
+  "create-agent": "CREATE_AGENT",
+};
+
+/**
+ * Tool-output budget for one loop, in bytes.
+ *
+ * The right number differs per phase because what competes for the context
+ * window differs. The BASE prompt is the other half of the equation, and
+ * detection's is the heaviest: it embeds the full content of every candidate
+ * file in the batch (up to `maxFilesPerBatch`, default 5). Validation embeds
+ * one file plus the finding narrative and the scope doc; recon embeds neither.
+ * So detection has the least room left over for tool output, not the most.
+ *
+ * The defaults are nonetheless all equal today, deliberately. Every measured
+ * loop so far finished far under the cap, so there is no evidence about where
+ * the real ceilings are, and guessing one low enough to matter risks
+ * truncating genuine analysis on large repos. What ships here is the knob and
+ * the measurement; the numbers should move once `tool output budget exhausted`
+ * actually shows up in logs.
+ *
+ * Override in KB, per phase or globally, so a stage can be retuned without a
+ * rebuild:
+ *
+ *   AGENTGG_TOOL_BUDGET_KB_VALIDATE=250
+ *   AGENTGG_TOOL_BUDGET_KB=300          # any phase without its own
+ *
+ * An unusable value falls back to the default rather than throwing: the cap
+ * guards against a context-overflow 400, which is a hard failure, so a typo in
+ * an env var must not be able to disable it.
+ */
+export function toolOutputBudgetBytes(
+  phase: ToolLoopPhase,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const raw =
+    env[`AGENTGG_TOOL_BUDGET_KB_${BUDGET_ENV_SUFFIX[phase]}`] ?? env.AGENTGG_TOOL_BUDGET_KB;
+  const kb = raw == null ? Number.NaN : Number(raw);
+  return Number.isFinite(kb) && kb > 0 ? Math.round(kb * 1024) : TOOL_OUTPUT_BUDGET_BYTES;
+}
 /** Per-file cap so a single huge file can't dominate the budget in one Read.
  *  Truncated reads carry a notice pointing the model at Grep for specifics. */
 const READ_FILE_OUTPUT_CAP_BYTES = 80_000;
@@ -552,6 +617,7 @@ export class VercelAgentDetector implements Detector {
               verbose: this.verbose,
               exclude: args.excludePatterns,
               label: "recon",
+              phase: "recon",
             }),
             maxSteps: args.maxTurns + 1,
             experimental_repairToolCall: this.toolCallRepair("recon"),
@@ -614,6 +680,7 @@ export class VercelAgentDetector implements Detector {
               verbose: this.verbose,
               exclude: args.excludePatterns,
               label: "create-agent",
+              phase: "create-agent",
             }),
             maxSteps: args.maxTurns + 1,
             experimental_repairToolCall: this.toolCallRepair("create-agent"),
@@ -645,6 +712,7 @@ export class VercelAgentDetector implements Detector {
               verbose: this.verbose,
               exclude: args.excludePatterns,
               label,
+              phase: "detect",
               budgetBytes,
             }),
             maxSteps: maxTurns + 1,
@@ -658,7 +726,7 @@ export class VercelAgentDetector implements Detector {
       let gen: Awaited<ReturnType<typeof hunt>>;
       let effectiveTurns = args.maxTurns;
       try {
-        gen = await hunt(TOOL_OUTPUT_BUDGET_BYTES, effectiveTurns);
+        gen = await hunt(toolOutputBudgetBytes("detect"), effectiveTurns);
       } catch (err) {
         // Context overflow: the accumulated tool transcript outgrew the window.
         // Re-sending it unchanged can't work, which is why withTpmRetry refuses
@@ -671,7 +739,7 @@ export class VercelAgentDetector implements Detector {
           `${label}: context overflow; retrying this batch at half the read budget and turn cap`,
         );
         effectiveTurns = Math.floor(args.maxTurns / 2);
-        gen = await hunt(Math.floor(TOOL_OUTPUT_BUDGET_BYTES / 2), effectiveTurns);
+        gen = await hunt(Math.floor(toolOutputBudgetBytes("detect") / 2), effectiveTurns);
       }
       // The tool loop can burn its whole budget without ever emitting findings
       // JSON — typically the model degenerates into repeating one tool call.
@@ -798,6 +866,7 @@ export class VercelAgentDetector implements Detector {
               verbose: this.verbose,
               exclude: args.excludePatterns ?? [],
               label,
+              phase: "validate",
             }),
             maxSteps: this.validateMaxTurns + 1,
             experimental_repairToolCall: this.toolCallRepair(label),
@@ -1143,13 +1212,15 @@ interface ToolLoopOpts {
   verbose: boolean;
   exclude?: string[];
   label: string;
+  /** Which pass owns this loop. Drives the wording of every notice below. */
+  phase: ToolLoopPhase;
   budgetBytes?: number;
 }
 
-function buildTools(opts: ToolLoopOpts) {
-  const { cwd, maxFileSizeKb, verbose, label } = opts;
+export function buildTools(opts: ToolLoopOpts) {
+  const { cwd, maxFileSizeKb, verbose, label, phase } = opts;
   const exclude = opts.exclude ?? [];
-  const budgetBytes = opts.budgetBytes ?? TOOL_OUTPUT_BUDGET_BYTES;
+  const budgetBytes = opts.budgetBytes ?? toolOutputBudgetBytes(phase);
   // Prefix every tool line with the loop that made the call. Ten concurrent
   // validators share one stdout, so an unlabelled line cannot be attributed.
   const logTool = verbose
@@ -1161,10 +1232,45 @@ function buildTools(opts: ToolLoopOpts) {
   // running transcript can't outgrow the model's context window. A fresh
   // buildTools — and thus a fresh budget — is created on each retry.
   let bytesReturned = 0;
-  const budgetExhausted = () => bytesReturned >= budgetBytes;
+  // Warn once, on the tick the budget runs out. Until this line existed there
+  // was no way to tell from the outside whether a stalled loop had hit the cap:
+  // the tools just started returning the finalize notice silently, so "the
+  // budget caused it" stayed a hypothesis. Once per loop, not per call, because
+  // past the cap EVERY tool call trips it.
+  let budgetWarned = false;
+  const budgetExhausted = () => {
+    if (bytesReturned < budgetBytes) return false;
+    if (!budgetWarned) {
+      budgetWarned = true;
+      logWarn(
+        `[${label}] tool output budget exhausted (${Math.round(bytesReturned / 1024)} KB returned, ` +
+          `cap ~${Math.round(budgetBytes / 1024)} KB); further tool calls return the finalize notice`,
+      );
+    }
+    return true;
+  };
   const account = (out: string): string => {
     bytesReturned += out.length;
     return out;
+  };
+
+  // Repeated identical tool calls are the signature of a stalled loop: the
+  // model re-issues the same search, gets the same bytes back, and never
+  // advances. Observed 2026-08-10, when one validator ran the same Grep 41
+  // times over nine minutes, spent its whole turn budget, and answered with
+  // nothing. A repeat re-executes nothing and is not charged to the byte
+  // budget, so the loop becomes cheap; the warn makes it visible.
+  //
+  // Keyed on what actually EXECUTES rather than the raw arguments: Grep's
+  // `path` is an alias for `glob` and both resolve to one scope, so two
+  // spellings of the same search collapse to a single signature.
+  const callCounts = new Map<string, number>();
+  const repeated = (toolName: string, signature: string): string | null => {
+    const n = (callCounts.get(signature) ?? 0) + 1;
+    callCounts.set(signature, n);
+    if (n === 1) return null;
+    logWarn(`[${label}] repeated ${toolName} call #${n}: ${signature.slice(0, 120)}`);
+    return repeatNotice(toolName, phase);
   };
 
   return {
@@ -1175,7 +1281,9 @@ function buildTools(opts: ToolLoopOpts) {
       }),
       execute: async ({ path }) => {
         logTool("Read", path);
-        if (budgetExhausted()) return budgetNotice(budgetBytes);
+        if (budgetExhausted()) return budgetNotice(phase, budgetBytes);
+        const dup = repeated("Read", `Read\u0000${path}`);
+        if (dup) return dup;
         return account(await readToolExecute(path, cwd, maxFileSizeKb, exclude));
       },
     }),
@@ -1187,7 +1295,9 @@ function buildTools(opts: ToolLoopOpts) {
       }),
       execute: async ({ pattern }) => {
         logTool("Glob", pattern);
-        if (budgetExhausted()) return budgetNotice(budgetBytes);
+        if (budgetExhausted()) return budgetNotice(phase, budgetBytes);
+        const dup = repeated("Glob", `Glob\u0000${pattern}`);
+        if (dup) return dup;
         return account(await globToolExecute(pattern, cwd, exclude));
       },
     }),
@@ -1197,10 +1307,16 @@ function buildTools(opts: ToolLoopOpts) {
       parameters: GrepParameters,
       execute: async ({ pattern, glob, path }) => {
         logTool("Grep", pattern);
-        if (budgetExhausted()) return budgetNotice(budgetBytes);
+        if (budgetExhausted()) return budgetNotice(phase, budgetBytes);
         // A bare directory path is not a glob — `src/api` matches that one
         // entry, not the files under it — so widen it before handing it over.
         const scope = glob || (path ? toSearchGlob(path) : undefined);
+        // Signed on the RESOLVED scope so `{path: "src"}` and the glob it
+        // widens to count as the same call. NUL separates the fields because
+        // it cannot appear in either, so `Grep "a b"` cannot collide with
+        // `Grep "a"` scoped to `b`.
+        const dup = repeated("Grep", `Grep\u0000${pattern}\u0000${scope ?? ""}`);
+        if (dup) return dup;
         return account(await grepToolExecute(pattern, scope, cwd, exclude));
       },
     }),
@@ -1229,10 +1345,40 @@ export function toSearchGlob(path: string): string {
 /** Returned by every tool once the per-session output budget is spent — an
  *  explicit instruction to stop reading and emit findings now, rather than a
  *  silent empty result the model might keep probing against. */
-function budgetNotice(budgetBytes: number): string {
+/**
+ * Returned instead of re-running a tool call this loop already made with
+ * identical arguments. Says what happened, why repeating is pointless, and
+ * names the two ways forward: a different query, or the answer.
+ */
+export function repeatNotice(toolName: string, phase: ToolLoopPhase): string {
   return (
-    `Error: per-session read budget reached (~${Math.round(budgetBytes / 1024)} KB). ` +
-    `Do not read more files. Output your final findings JSON now, based on what you have already examined.`
+    `You already ran this exact ${toolName} call in this loop, and its result is above. ` +
+    `Repeating it returns nothing new. ` +
+    `Either try a different query, or output your final ${ARTIFACT[phase]} now, ` +
+    `based on what you have already examined.`
+  );
+}
+
+/**
+ * Returned by every tool once the loop's output budget is spent: an explicit
+ * instruction to stop calling tools and answer, rather than a silent empty
+ * result the model might keep probing against.
+ *
+ * Phase-specific because the previous single message told EVERY caller to
+ * "output your final findings JSON", an instruction a validator, recon pass,
+ * or agent-spec author cannot follow. It also said "do not read more files"
+ * while the observed stall was repeated Grep calls, which are not file reads.
+ * And it opened with "Error:", framing a normal budget limit as a fault. All
+ * three are now fixed.
+ */
+export function budgetNotice(
+  phase: ToolLoopPhase,
+  budgetBytes: number = toolOutputBudgetBytes(phase),
+): string {
+  return (
+    `Tool budget reached (~${Math.round(budgetBytes / 1024)} KB of tool output in this loop). ` +
+    `Stop calling Read, Grep, and Glob. ` +
+    `Output your final ${ARTIFACT[phase]} now, based on what you have already examined.`
   );
 }
 
