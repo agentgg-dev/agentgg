@@ -445,6 +445,20 @@ function isAbortError(err: unknown): boolean {
  * response body dump — there's nothing actionable about an abort
  * triggered by an earlier diagnostic.
  */
+/**
+ * A failure the detector raised deliberately, whose message already says
+ * everything a reader needs. `handleDetectorError` prints the message but
+ * skips the stack dump, even under --verbose: every frame is our own plumbing,
+ * so the traceback is noise that buries the genuine crashes around it.
+ */
+export class ExpectedDetectorError extends Error {
+  readonly expected = true;
+  constructor(message: string) {
+    super(message);
+    this.name = "ExpectedDetectorError";
+  }
+}
+
 export function handleDetectorError(
   opts: { verbose?: boolean },
   label: string,
@@ -457,6 +471,10 @@ export function handleDetectorError(
     statusCode?: number;
     url?: string;
   };
+  // A deliberate, self-describing failure needs no traceback (see
+  // ExpectedDetectorError). Checked by property, not instanceof, so an error
+  // that crossed a module boundary still counts.
+  const selfExplanatory = (err as { expected?: unknown })?.expected === true;
 
   // Already-aborted scan: in-flight siblings throw AbortError once the
   // controller fires. Surface them as a one-liner — the originating
@@ -487,7 +505,7 @@ export function handleDetectorError(
   if (diagnostic) {
     logError(`${label}: ${diagnostic.format()}`);
     if (genId) console.error(`      Generation: ${genId}`);
-    if (opts.verbose && e.stack) {
+    if (opts.verbose && !selfExplanatory && e.stack) {
       console.error(
         e.stack
           .split("\n")
@@ -516,7 +534,7 @@ export function handleDetectorError(
       console.error(`      Cause body: ${String(c.responseBody).slice(0, 300)}`);
     }
   }
-  if (opts.verbose && e.stack) {
+  if (opts.verbose && !selfExplanatory && e.stack) {
     console.error(
       e.stack
         .split("\n")

@@ -187,6 +187,60 @@ function ranFiles(): string[] {
   );
 }
 
+// A batch that fails writes no FileRecords, so its candidate files were NOT
+// analyzed. The closing line counts analyzed files, not candidates: while an
+// empty batch was laundered into `{findings: []}` every candidate got a record
+// either way, so counting candidates was harmless. Once an empty batch started
+// failing honestly, that count began overstating the work done. Observed on
+// juice-shop: "3 finding(s) across 13 file(s)" when only 3 files had records.
+describe("a failed batch is not counted as analyzed", () => {
+  it("reports only the files that actually got a record", async () => {
+    suppressLogs();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    // agentA has 2 candidate files; force one batch per file, and fail one.
+    detectorMock.runAgent.mockImplementation(async ({ agent, candidates }) => {
+      if (candidates.some((c) => c.filePath.includes("server.js"))) {
+        throw new Error("the model ended its tool loop without writing an answer");
+      }
+      return candidates.map((c) => mockFinding(agent.slug, c.filePath));
+    });
+
+    await runScan(
+      projectRoot,
+      { template: [agentA], output: outputDir, maxFilesPerBatch: 1 },
+      env,
+    );
+
+    const records = loadAllFileRecords(outputDir).length;
+    const done = log.mock.calls.map((c) => String(c[0])).find((l) => l.includes("Done."));
+    expect(done).toContain(`across ${records} file(s)`);
+    expect(done).not.toContain("across 2 file(s)");
+  });
+
+  it("says how many files were skipped and that they re-run", async () => {
+    suppressLogs();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    detectorMock.runAgent.mockImplementation(async ({ candidates }) => {
+      throw new Error(`no analysis for ${candidates.length} file(s)`);
+    });
+
+    await runScan(projectRoot, { template: [agentA], output: outputDir }, env);
+
+    const lines = log.mock.calls.map((c) => String(c[0]));
+    expect(lines.some((l) => l.includes("batch(es) failed"))).toBe(true);
+    expect(lines.some((l) => l.includes("re-run on the next scan"))).toBe(true);
+  });
+
+  it("stays silent about failures when every batch succeeded", async () => {
+    suppressLogs();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await runScan(projectRoot, { template: [agentA], output: outputDir }, env);
+    expect(log.mock.calls.map((c) => String(c[0])).some((l) => l.includes("batch(es) failed"))).toBe(
+      false,
+    );
+  });
+});
+
 describe("scan resume — agent level", () => {
   it("runs the agent on the first scan; an unchanged re-run reuses it", async () => {
     suppressLogs();

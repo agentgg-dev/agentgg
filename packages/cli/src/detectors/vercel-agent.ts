@@ -34,6 +34,7 @@ import {
   type SuggestExcludesArgs,
   SuggestExcludesResult,
 } from "../detect.js";
+import { ExpectedDetectorError } from "../diagnostics.js";
 import { logError, logInfo, logWarn } from "../log.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import type { CallUsage, UsageMeter } from "../usage-meter.js";
@@ -762,7 +763,7 @@ export class VercelAgentDetector implements Detector {
       // unrecognized Error is logged and the batch pool continues.
       if (!gen.text.trim()) {
         logUnparseableGeneration(label, gen);
-        throw new Error(
+        throw new ExpectedDetectorError(
           `${label}: the model ended its tool loop without writing an answer, so this batch produced no analysis. ` +
             `Failing the batch rather than recording 0 findings; raise --max-turns if it repeats.`,
         );

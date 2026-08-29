@@ -612,6 +612,14 @@ export async function runScan(
     let findings: Finding[] = [];
     const byAgent: Record<string, number> = {};
     const touchedFiles = new Set<string>();
+    // Files a FileRecord was actually written for. `touchedFiles` counts
+    // CANDIDATES, fixed before any LLM call, so on its own it overstates the
+    // work done the moment a batch fails: the batch stamps no records, yet its
+    // files still count as scanned. That gap did not exist while a text-less
+    // batch was laundered into `{findings: []}` (every candidate got a record
+    // either way); it appeared once an empty batch started failing honestly.
+    const analyzedFiles = new Set<string>();
+    let failedBatchCount = 0;
 
     // Detection-phase accumulator, keyed by finding id. A file split across
     // shards can have one shard resumed from disk and another re-run, and the
@@ -647,6 +655,7 @@ export async function runScan(
       shardKey?: string,
     ): void {
       const normalized = relPath.replace(/\\/g, "/");
+      analyzedFiles.add(normalized);
       let record: FileRecord | null;
       try {
         record = readFileRecord(outDir, agent.slug, normalized);
@@ -1334,6 +1343,7 @@ export async function runScan(
         }
       } catch (err) {
         rt.failed = true;
+        failedBatchCount++;
         // Fatal errors (bad creds, quota) throw out of here → runConcurrent
         // stops dispatching, drains in-flight, and rethrows. Recoverable
         // ones are logged and the pool continues.
@@ -1793,13 +1803,13 @@ export async function runScan(
             startedAt,
             completedAt,
             findings,
-            filesScanned: touchedFiles.size,
+            filesScanned: analyzedFiles.size,
             byAgent,
             excludeFalsePositives: opts.excludeFalsePositives,
           });
 
     completeRun(outDir, runMeta.runId, "done", {
-      filesScanned: touchedFiles.size,
+      filesScanned: analyzedFiles.size,
       findingsCount: findings.length,
       totalDurationMs: completedAt.getTime() - startedAt.getTime(),
     });
@@ -1809,7 +1819,16 @@ export async function runScan(
     process.off("SIGINT", shutdownHandler);
     process.off("SIGTERM", shutdownHandler);
 
-    console.log(`\nDone. ${findings.length} finding(s) across ${touchedFiles.size} file(s).`);
+    console.log(`\nDone. ${findings.length} finding(s) across ${analyzedFiles.size} file(s).`);
+    // A failed batch leaves its agent without a sidecar, so the agent re-runs.
+    // Say so: without this the closing line reads like a complete scan.
+    if (failedBatchCount > 0) {
+      const notAnalyzed = touchedFiles.size - analyzedFiles.size;
+      console.log(
+        `  ${failedBatchCount} batch(es) failed; ${notAnalyzed} candidate file(s) were not analyzed ` +
+          `and re-run on the next scan.`,
+      );
+    }
     if (report) {
       console.log(`  Summary: ${report.summaryPath}`);
       console.log(`  Findings dir: ${outDir}\\findings`);
