@@ -1290,16 +1290,22 @@ export async function runScan(
           diff: diffArg,
           signal: scanAbortController.signal,
         });
-        // Drop findings whose filePath doesn't exist on disk (model
-        // invented a path — common with smaller models).
+        // Last-resort guard against a model inventing a file. The detector
+        // has already mapped a mis-spelled path onto its batch candidate (see
+        // repairFindingPath), so anything still unresolvable names no file the
+        // agent was given and no file on disk.
+        //
+        // Warns rather than logging under --verbose: this DISCARDS a finding
+        // the model actually reported, and the file record it leaves behind is
+        // indistinguishable from clean code. Losing analysis silently is the
+        // failure this scan path exists to avoid, so it is never quiet.
         const valid = batchFindings.filter((f) => {
           if (!f.filePath || f.filePath === "(unknown)") return true;
           if (existsSync(resolve(root, f.filePath))) return true;
-          if (opts.verbose) {
-            console.log(
-              `    ${agent.slug}: dropping finding with non-existent path: ${f.filePath}`,
-            );
-          }
+          logWarn(
+            `${agent.slug}: discarded a finding naming "${f.filePath}", which is neither a file ` +
+              `on disk nor one of this batch's files`,
+          );
           return false;
         });
         byAgent[agent.slug] = (byAgent[agent.slug] ?? 0) + addFindings(valid);

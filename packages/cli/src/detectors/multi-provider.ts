@@ -16,6 +16,7 @@ import {
   type ReconArgs,
   ReconResult,
   type RunAgentArgs,
+  repairFindingPath,
   type SuggestExcludesArgs,
   SuggestExcludesResult,
 } from "../detect.js";
@@ -234,7 +235,9 @@ export class MultiProviderDetector {
         }),
       );
       const fallback = args.candidates[0]?.filePath ?? "(unknown)";
-      return object.findings.map((f) => hydrateFinding(f, args.agent, f.filePath ?? fallback));
+      return object.findings.map((f) =>
+        hydrateFinding(repairFindingPath(f, args.rootDir, args.candidates), args.agent, fallback),
+      );
     } catch (err) {
       if (process.env.AGENTGG_DEBUG) {
         const util = await import("node:util");

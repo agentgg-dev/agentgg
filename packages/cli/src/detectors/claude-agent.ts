@@ -19,6 +19,7 @@ import {
   type ReconArgs,
   ReconResult,
   type RunAgentArgs,
+  repairFindingPath,
   type SuggestExcludesArgs,
   SuggestExcludesResult,
 } from "../detect.js";
@@ -213,7 +214,9 @@ export class ClaudeAgentDetector implements Detector {
       throw err;
     }
     const fallback = args.candidates[0]?.filePath ?? "(unknown)";
-    return result.findings.map((f) => hydrateFinding(f, args.agent, f.filePath ?? fallback));
+    return result.findings.map((f) =>
+      hydrateFinding(repairFindingPath(f, args.rootDir, args.candidates), args.agent, fallback),
+    );
   }
 
   async validateFinding(args: {

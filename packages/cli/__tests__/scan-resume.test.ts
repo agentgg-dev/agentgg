@@ -205,11 +205,7 @@ describe("a failed batch is not counted as analyzed", () => {
       return candidates.map((c) => mockFinding(agent.slug, c.filePath));
     });
 
-    await runScan(
-      projectRoot,
-      { template: [agentA], output: outputDir, maxFilesPerBatch: 1 },
-      env,
-    );
+    await runScan(projectRoot, { template: [agentA], output: outputDir, maxFilesPerBatch: 1 }, env);
 
     const records = loadAllFileRecords(outputDir).length;
     const done = log.mock.calls.map((c) => String(c[0])).find((l) => l.includes("Done."));
@@ -245,22 +241,14 @@ describe("a failed batch is not counted as analyzed", () => {
       }
       return candidates.map((c) => mockFinding(agent.slug, c.filePath));
     });
-    await runScan(
-      projectRoot,
-      { template: [agentA], output: outputDir, maxFilesPerBatch: 1 },
-      env,
-    );
+    await runScan(projectRoot, { template: [agentA], output: outputDir, maxFilesPerBatch: 1 }, env);
 
     // Run 2: the previously failed file now succeeds; the other is reused.
     detectorMock.runAgent.mockImplementation(async ({ agent, candidates }) =>
       candidates.map((c) => mockFinding(agent.slug, c.filePath)),
     );
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    await runScan(
-      projectRoot,
-      { template: [agentA], output: outputDir, maxFilesPerBatch: 1 },
-      env,
-    );
+    await runScan(projectRoot, { template: [agentA], output: outputDir, maxFilesPerBatch: 1 }, env);
 
     const records = loadAllFileRecords(outputDir).length;
     const done = log.mock.calls.map((c) => String(c[0])).find((l) => l.includes("Done."));
@@ -272,9 +260,9 @@ describe("a failed batch is not counted as analyzed", () => {
     suppressLogs();
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     await runScan(projectRoot, { template: [agentA], output: outputDir }, env);
-    expect(log.mock.calls.map((c) => String(c[0])).some((l) => l.includes("batch(es) failed"))).toBe(
-      false,
-    );
+    expect(
+      log.mock.calls.map((c) => String(c[0])).some((l) => l.includes("batch(es) failed")),
+    ).toBe(false);
   });
 });
 

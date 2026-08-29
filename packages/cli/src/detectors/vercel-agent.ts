@@ -31,6 +31,7 @@ import {
   type ReconArgs,
   ReconResult,
   type RunAgentArgs,
+  repairFindingPath,
   type SuggestExcludesArgs,
   SuggestExcludesResult,
 } from "../detect.js";
@@ -791,7 +792,9 @@ export class VercelAgentDetector implements Detector {
         throw parseErr;
       }
       const fallback = args.candidates[0]?.filePath ?? "(unknown)";
-      return result.findings.map((f) => hydrateFinding(f, args.agent, f.filePath ?? fallback));
+      return result.findings.map((f) =>
+        hydrateFinding(repairFindingPath(f, args.rootDir, args.candidates), args.agent, fallback),
+      );
     } catch (err) {
       debugLog("VercelAgentDetector.runAgent", err);
       throw err;
@@ -1265,12 +1268,23 @@ export function buildTools(opts: ToolLoopOpts) {
   // Keyed on what actually EXECUTES rather than the raw arguments: Grep's
   // `path` is an alias for `glob` and both resolve to one scope, so two
   // spellings of the same search collapse to a single signature.
+  /** Field separator inside a tool-call signature. A NUL cannot appear in a path,
+   *  a pattern, or a glob, so `Grep "a b"` cannot collide with `Grep "a"` scoped to
+   *  `b`. Never printed raw: a NUL byte makes grep treat a whole log as binary and
+   *  refuse to match it, so the warn below swaps it for a space. */
+  const SIG_SEP = "\u0000";
+
   const callCounts = new Map<string, number>();
   const repeated = (toolName: string, signature: string): string | null => {
     const n = (callCounts.get(signature) ?? 0) + 1;
     callCounts.set(signature, n);
     if (n === 1) return null;
-    logWarn(`[${label}] repeated ${toolName} call #${n}: ${signature.slice(0, 120)}`);
+    // The signature keys on a NUL separator so a pattern containing a space
+    // cannot collide with a scoped search. Never print it raw: a NUL byte makes
+    // grep treat the whole log as binary and refuse to match it.
+    logWarn(
+      `[${label}] repeated ${toolName} call #${n}: ${signature.split(SIG_SEP).join(" ").slice(0, 120)}`,
+    );
     return repeatNotice(toolName, phase);
   };
 
@@ -1283,7 +1297,7 @@ export function buildTools(opts: ToolLoopOpts) {
       execute: async ({ path }) => {
         logTool("Read", path);
         if (budgetExhausted()) return budgetNotice(phase, budgetBytes);
-        const dup = repeated("Read", `Read\u0000${path}`);
+        const dup = repeated("Read", `Read${SIG_SEP}${path}`);
         if (dup) return dup;
         return account(await readToolExecute(path, cwd, maxFileSizeKb, exclude));
       },
@@ -1297,7 +1311,7 @@ export function buildTools(opts: ToolLoopOpts) {
       execute: async ({ pattern }) => {
         logTool("Glob", pattern);
         if (budgetExhausted()) return budgetNotice(phase, budgetBytes);
-        const dup = repeated("Glob", `Glob\u0000${pattern}`);
+        const dup = repeated("Glob", `Glob${SIG_SEP}${pattern}`);
         if (dup) return dup;
         return account(await globToolExecute(pattern, cwd, exclude));
       },
@@ -1316,7 +1330,7 @@ export function buildTools(opts: ToolLoopOpts) {
         // widens to count as the same call. NUL separates the fields because
         // it cannot appear in either, so `Grep "a b"` cannot collide with
         // `Grep "a"` scoped to `b`.
-        const dup = repeated("Grep", `Grep\u0000${pattern}\u0000${scope ?? ""}`);
+        const dup = repeated("Grep", `Grep${SIG_SEP}${pattern}${SIG_SEP}${scope ?? ""}`);
         if (dup) return dup;
         return account(await grepToolExecute(pattern, scope, cwd, exclude));
       },

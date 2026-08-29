@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { extname } from "node:path";
+import { existsSync } from "node:fs";
+import { extname, resolve } from "node:path";
 import type { Agent, CvssScore, Finding, ReconReport } from "@agentgg/core";
 import { z } from "zod";
 import type { AgentSpec } from "./agent-spec.js";
@@ -750,6 +751,68 @@ ${hitsBlock}`;
  * dedupe naturally instead of producing parallel records for the same
  * issue. agentSlug + filePath come from the caller, not the model.
  */
+/**
+ * Map a path the model reported onto the batch candidate it actually means, or
+ * `undefined` when no single candidate matches.
+ *
+ * A tool-loop model that read `data/static/codefixes/loginJim.ts` frequently
+ * reports the finding against the bare basename. That resolves to nothing under
+ * the scan root, so scan.ts's invented-path filter treated a formatting slip as
+ * a hallucination and dropped a real finding. Measured on juice-shop
+ * 2026-08-29: the same five files yielded one finding each on one run and zero
+ * on the next, purely on how the model spelled the path.
+ *
+ * CALLERS MUST TRY THE RAW PATH ON DISK FIRST and only fall back to this. That
+ * ordering is what keeps the repair strictly additive: `hydrateFinding` hashes
+ * the path into the finding id, and that id carries a person's triage status on
+ * the platform, so rewriting a path that already resolves would orphan their
+ * decision. A finding this rescues was going to be discarded, so it has no id
+ * anywhere yet and nothing can be orphaned.
+ *
+ * Matching is on segment boundaries so `login.ts` cannot claim
+ * `prefix-login.ts`, and a tie is refused rather than guessed.
+ */
+export function resolveCandidatePath(
+  raw: string | undefined,
+  candidates: readonly { filePath: string }[],
+): string | undefined {
+  if (raw == null) return undefined;
+  const norm = (p: string) => p.replace(/\\/g, "/").replace(/^\.\//, "").trim();
+  const want = norm(raw);
+  if (want === "" || want === "(unknown)") return undefined;
+  const hits = candidates.filter((c) => {
+    const p = norm(c.filePath);
+    return p === want || p.endsWith(`/${want}`);
+  });
+  return hits.length === 1 ? hits[0]?.filePath : undefined;
+}
+
+/**
+ * Return `raw` with its `filePath` corrected, when the model reported a path
+ * that does not exist but unambiguously names one of the batch candidates.
+ *
+ * The disk check comes FIRST and a path that resolves is returned untouched.
+ * That ordering is the whole safety argument: `hydrateFinding` hashes the path
+ * into the finding id, and that id carries a person's triage status on the
+ * platform, so rewriting a path that already works would orphan their decision.
+ * A finding this rescues was headed for scan.ts's invented-path filter, so it
+ * has no id anywhere yet and nothing can be orphaned. The change is additive.
+ *
+ * A genuinely invented path still matches no candidate, so it passes through
+ * unchanged and the filter drops it exactly as before.
+ */
+export function repairFindingPath(
+  raw: LlmFinding,
+  rootDir: string,
+  candidates: readonly { filePath: string }[],
+): LlmFinding {
+  const reported = raw.filePath;
+  if (reported == null || reported.trim() === "") return raw;
+  if (existsSync(resolve(rootDir, reported))) return raw;
+  const repaired = resolveCandidatePath(reported, candidates);
+  return repaired === undefined || repaired === reported ? raw : { ...raw, filePath: repaired };
+}
+
 export function hydrateFinding(raw: LlmFinding, agent: Agent, fallbackFilePath: string): Finding {
   // In hunt mode the LLM is responsible for `filePath` (it discovered
   // the file itself); in file mode the caller supplies it. Prefer the
