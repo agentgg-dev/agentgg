@@ -1026,8 +1026,8 @@ export class VercelAgentDetector implements Detector {
     // impersonating an analysis that never happened.
     if (!text.trim()) {
       logWarn(
-        `[validate:${findingId}] model returned no text; recording uncertain ` +
-          `+ cut-short reasoning (was fabricating a verdict from an empty reformat prompt)`,
+        `[validate:${findingId}] validation was cut short: the model stopped before it ` +
+          `returned a verdict, so this finding is recorded as uncertain and was not assessed`,
       );
       return { verdict: "uncertain", reasoning: VALIDATION_CUT_SHORT };
     }
