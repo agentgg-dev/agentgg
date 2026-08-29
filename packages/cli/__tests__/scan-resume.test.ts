@@ -231,6 +231,43 @@ describe("a failed batch is not counted as analyzed", () => {
     expect(lines.some((l) => l.includes("re-run on the next scan"))).toBe(true);
   });
 
+  // Regression: a resumed file has a record but persistDetection is never
+  // called for it, so counting only this run's writes undercounts the files
+  // that have records and overcounts the ones said to re-run. Seen on
+  // juice-shop: "across 5 file(s)" with 8 records on disk, and "8 candidate
+  // file(s) were not analyzed" when only 5 were.
+  it("counts files reused from a prior run as analyzed", async () => {
+    suppressLogs();
+    // Run 1: analyze one of the two files, fail the batch holding the other.
+    detectorMock.runAgent.mockImplementation(async ({ agent, candidates }) => {
+      if (candidates.some((c) => c.filePath.includes("server.js"))) {
+        throw new Error("no analysis");
+      }
+      return candidates.map((c) => mockFinding(agent.slug, c.filePath));
+    });
+    await runScan(
+      projectRoot,
+      { template: [agentA], output: outputDir, maxFilesPerBatch: 1 },
+      env,
+    );
+
+    // Run 2: the previously failed file now succeeds; the other is reused.
+    detectorMock.runAgent.mockImplementation(async ({ agent, candidates }) =>
+      candidates.map((c) => mockFinding(agent.slug, c.filePath)),
+    );
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    await runScan(
+      projectRoot,
+      { template: [agentA], output: outputDir, maxFilesPerBatch: 1 },
+      env,
+    );
+
+    const records = loadAllFileRecords(outputDir).length;
+    const done = log.mock.calls.map((c) => String(c[0])).find((l) => l.includes("Done."));
+    // The reported count must equal what is actually on disk, reused included.
+    expect(done).toContain(`across ${records} file(s)`);
+  });
+
   it("stays silent about failures when every batch succeeded", async () => {
     suppressLogs();
     const log = vi.spyOn(console, "log").mockImplementation(() => {});

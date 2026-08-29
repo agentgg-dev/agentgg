@@ -612,7 +612,8 @@ export async function runScan(
     let findings: Finding[] = [];
     const byAgent: Record<string, number> = {};
     const touchedFiles = new Set<string>();
-    // Files a FileRecord was actually written for. `touchedFiles` counts
+    // Files that have a FileRecord once this scan ends: written by this run,
+    // or reused from a prior one. `touchedFiles` counts
     // CANDIDATES, fixed before any LLM call, so on its own it overstates the
     // work done the moment a batch fails: the batch stamps no records, yet its
     // files still count as scanned. That gap did not exist while a text-less
@@ -1158,6 +1159,10 @@ export async function runScan(
             resumedShards++;
             if (!lifted.has(normalized)) {
               lifted.add(normalized);
+              // Reused from a prior run, so persistDetection is never called
+              // for it here. It still has a record on disk, which is what
+              // `analyzedFiles` counts.
+              analyzedFiles.add(normalized);
               byAgent[agent.slug] = (byAgent[agent.slug] ?? 0) + addFindings(rec.findings);
               for (const f of rec.findings) {
                 if (f.filePath && f.filePath !== "(unknown)") touchedFiles.add(f.filePath);
