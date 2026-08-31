@@ -245,11 +245,14 @@ interface ScanOpts {
  * Orchestrate a scan: recon → preconditions → run queued agents → validate
  * → score → report.
  *
- * Every agent is one unified, tool-enabled shape. Its `where` resolves to a
- * concrete file set (`extensions` / `filePatterns` narrowed by `preFilter`;
- * an empty `where` = all files), which is reviewed in batches of
- * `maxFilesPerBatch`. The agent always has Read/Glob/Grep to read beyond its
- * seeded files. Under `--diff <commit>`, each agent's candidate list is
+ * Every agent is one unified, tool-enabled shape. An agent with a file
+ * scope (`extensions` / `filePatterns`) resolves to a concrete file set,
+ * narrowed by `preFilter`, which is reviewed in batches of
+ * `maxFilesPerBatch`. An agent with neither has no file scope: the whole
+ * repository is its scope, the orchestrator seeds it with no candidates,
+ * and it finds its own targets with its tools. See `hasFileScope`. Either
+ * way the agent always has Read/Glob/Grep to read beyond what it was
+ * seeded. Under `--diff <commit>`, each agent's candidate list is
  * intersected with the files touched in that commit (its own patch,
  * parent → commit, independent of the working tree).
  */
@@ -886,11 +889,13 @@ export async function runScan(
       return allRecordsCache;
     };
     // -------- run queued agents --------
-    // One unified path: every agent is a tool-enabled investigation over a
-    // concrete file set. Its `where` resolves to seeded candidate files
-    // (extensions/filePatterns + preFilter, intersected with --diff; empty
-    // `where` = all files), reviewed in batches. The agent has tools to read
-    // beyond its seeds. Findings are stamped with the agent's slug.
+    // One unified path: every agent is a tool-enabled investigation. An
+    // agent with a file scope resolves `where` to seeded candidate files
+    // (extensions/filePatterns + preFilter, intersected with --diff),
+    // reviewed in batches, with tools to read beyond its seeds. An agent
+    // with no file scope gets no candidates: the whole repository is its
+    // scope and it finds its own targets with those same tools. Findings
+    // are stamped with the agent's slug.
     //
     // Resume is per-agent: a completed agent with a matching scope
     // (including reconHash) is skipped and its findings lifted from disk.
@@ -2127,7 +2132,7 @@ export function registerScanCommand(program: Command): void {
     )
     .option(
       "--max-files-per-batch <n>",
-      "Walker mode: candidate files packed into one investigation batch. Overrides the agent's `maxFilesPerBatch`. Default 5. Different from --concurrency: batch size = files per LLM session; --concurrency = sessions in parallel.",
+      "How many candidate files an agent with a file scope packs into one investigation batch (no effect on an agent with no file scope, which runs a single session with no candidates). Overrides the agent's `maxFilesPerBatch`. Default 5. Different from --concurrency: batch size = files per LLM session; --concurrency = sessions in parallel.",
       (v) => parseInt(v, 10),
     )
     .option(

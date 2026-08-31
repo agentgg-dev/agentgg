@@ -33,7 +33,7 @@ export type NoiseTier = z.infer<typeof NoiseTier>;
  */
 
 /**
- * One entry in a walker agent's `preFilter`. Files where any entry
+ * One entry in a scoped agent's `preFilter`. Files where any entry
  * matches at least one line become "candidates" the LLM investigates.
  * The optional `label` is shown to the model alongside the line number
  * so it knows *why* the scanner flagged the line.
@@ -249,7 +249,11 @@ export const Agent = z.object({
   noiseTier: NoiseTier.default("normal"),
   /** Queue/skip gate. Omit entirely = always run. See `Precondition`. */
   precondition: Precondition.optional(),
-  /** File scope fed into the agent. Omit = all files (reviewed in batches). */
+  /**
+   * File scope fed into the agent. Omit both `extensions` and
+   * `filePatterns` for no file scope: the whole repository is its scope
+   * and it gets no candidate files. See `hasFileScope`.
+   */
   where: Where.default({}),
   /**
    * Documentation-only field. CWE / OWASP / GHSA / CVE IDs or URLs this

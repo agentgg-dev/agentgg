@@ -29,18 +29,22 @@ import { extractCallUsage } from "./vercel-agent.js";
  * Multi-provider detector. Backed by the Vercel AI SDK's `generateObject`
  * — works against any provider for which we have a `LanguageModelV1`:
  *
- * - Anthropic (API key, file mode)
- * - OpenAI / Codex (file mode)
- * - Ollama (file mode)
+ * - Anthropic (API key)
+ * - OpenAI / Codex
+ * - Ollama
  *
  * Strict structured output is enforced at the schema level — the model
  * is forced to produce a `DetectionResult` object that we then hydrate
  * into full `Finding`s.
  *
- * **Hunt mode is not supported through this detector.** Tool-call
- * orchestration with structured output is finicky across providers, so
- * the resolver routes hunt-mode invocations through `ClaudeAgentDetector`
- * (which uses the Claude Agent SDK regardless of credential type).
+ * **`runAgent` has no tools here**, so it only works from seeded
+ * candidate file contents embedded in the prompt: fine for an agent with
+ * a file scope, but an agent with no file scope needs to search the repo
+ * for its own targets, which this detector can't do. Tool-call
+ * orchestration with structured output is also finicky across providers,
+ * so no current provider routes `runAgent` through this detector alone —
+ * Ollama's composite (see `providers/ollama.ts`) sends `runAgent` to a
+ * tool-enabled detector instead, alongside every other provider.
  *
  * The constructor accepts `effort` and `thinking` knobs that map to
  * provider-native options where the provider supports them:
@@ -220,9 +224,10 @@ export class MultiProviderDetector {
 
   async runAgent(args: RunAgentArgs & { signal?: AbortSignal }): Promise<Finding[]> {
     // Best-effort, no tools: the model can't browse the repo, so it works
-    // from the seeded candidate file contents embedded in the prompt.
-    // Roam-mode agents (no candidates) will find little here — tool-capable
-    // providers are routed to a detector that can actually read files.
+    // from the seeded candidate file contents embedded in the prompt. An
+    // agent with no file scope (no candidates) will find little here —
+    // tool-capable providers are routed to a detector that can actually
+    // read files.
     try {
       const { object } = await this.metered(() =>
         generateObject({

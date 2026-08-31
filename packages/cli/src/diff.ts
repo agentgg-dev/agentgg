@@ -70,8 +70,8 @@ function gitDiffTreeNameOnly(commit: string, cwd: string): string {
 
 /**
  * Load the full `git show <commit>` output — commit metadata, message,
- * and the commit's patch. Used to inject context into hunt-mode prompts
- * so the hunter sees both *what* changed (the diff) and *why* (the
+ * and the commit's patch. Used to inject context into the detection
+ * prompt so the agent sees both *what* changed (the diff) and *why* (the
  * commit message).
  *
  * Bounded by the commit itself, not by how far the working tree has
@@ -89,7 +89,7 @@ export function loadCommitPatch(
 }
 
 function gitShow(commit: string, cwd: string): string {
-  // Range syntax (`a..b`) means "diff between two refs" — for hunt mode
+  // Range syntax (`a..b`) means "diff between two refs" — for this
   // context we want the cumulative patch in that case. `git show` only
   // accepts single commits; `git diff <range>` is the right call.
   if (commit.includes("..")) {

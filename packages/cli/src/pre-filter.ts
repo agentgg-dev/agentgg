@@ -1,7 +1,7 @@
 import { type AgentPreFilterPattern, isRegexPreFilter } from "@agentgg/core";
 
 /**
- * One line where a walker-mode agent's preFilter regex matched. The
+ * One line where an agent's preFilter regex matched. The
  * line number is 1-indexed (LLM-friendly) and the snippet is the
  * matched line itself, trimmed and truncated for prompt brevity.
  *
@@ -45,7 +45,7 @@ export interface TaintStep {
  * that narrows `filePatterns`-matched files down to candidates.
  *
  * Empty `preFilter` is treated as "no filtering" — every line passes
- * with a synthetic single hit on line 1, so a walker agent without
+ * with a synthetic single hit on line 1, so a scoped agent without
  * preFilter still gets to investigate every file (the batch-investigate
  * fallback for direct-invocation flows).
  */

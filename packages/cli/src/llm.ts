@@ -60,8 +60,8 @@ export function loadOrSynthesizeConfig(
  *     2. The corresponding block in `config`
  *     3. Provider-specific env vars / cloud default credential chain
  *
- * The same Detector handles file / walker / hunt agents — the dispatch
- * happens inside the agent's execution path, not here.
+ * The same Detector handles every agent regardless of file scope — the
+ * dispatch happens inside the agent's execution path, not here.
  */
 export function resolveDetector(config: UserConfig, options: ResolveOptions = {}): Detector {
   const providerName = (options.provider ?? config.provider) as Provider;

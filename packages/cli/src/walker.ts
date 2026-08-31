@@ -238,12 +238,16 @@ export function matchesExtension(filePath: string, extensions: string[]): boolea
 
 /**
  * Which files a `where` includes (before exclusion). A file is included when:
- *   - BOTH `extensions` and `filePatterns` are empty → every file (the agent
- *     roams the whole repo), OR
  *   - its extension is one of `extensions` (the simple, nuclei-style knob), OR
  *   - it matches one of `filePatterns` (glob / directory / file — the complex
  *     escape hatch).
  * `excludePatterns` is applied separately by the caller.
+ *
+ * BOTH empty returns true (matches everything), but a real scan never hits
+ * that branch: `hasFileScope` returns false first, and the orchestrator
+ * skips the walk for that agent entirely so it finds its own targets with
+ * its tools instead of being seeded with every file. Use `hasFileScope`,
+ * not this function, to detect "no scope".
  */
 export function includedByWhere(
   filePath: string,

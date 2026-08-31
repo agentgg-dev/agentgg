@@ -30,8 +30,10 @@ The generated agents land in `--output` only. Installing them (so `scan` picks t
 There is one agent shape — no `mode`. Every agent declares a `precondition`, a `where`, and a prompt body (the instructions), and is always tool-enabled (Read/Glob/Grep). At runtime:
 
 - **Precondition** ([`precondition.ts`](packages/cli/src/precondition.ts)) — a `regex` block (file `extensions` / `files` / `directories` / content `patterns`) is pure filesystem work; a `prompt` is one cheap LLM call that sees the recon brief; both present = AND; neither = always run. Regex short-circuits before the LLM.
-- **Where** ([`walker.ts`](packages/cli/src/walker.ts)) — the walker enumerates files by `extensions` + `filePatterns` (a bare directory/path matches everything under it) minus `excludePatterns`, then `preFilter` regexes narrow to files with a line hit (and surface those lines as anchors). Empty `where` = all files.
-- **Run** — candidates are chunked into batches of `where.maxFilesPerBatch` (default 5); each batch is one tool-enabled session (`detector.runAgent`). Batches from every queued agent are flattened into a single scan-wide pool capped by `--concurrency`, so different agents' batches interleave (safe because per-file writes are namespaced by `agent.slug`). A session can read beyond its seeded files to confirm a finding. One agent per session; findings are stamped with the agent's slug.
+- **Where** ([`walker.ts`](packages/cli/src/walker.ts)) — when the agent declares `extensions` and/or `filePatterns`, the walker enumerates matching files (a bare directory/path matches everything under it) minus `excludePatterns`, then `preFilter` regexes narrow to files with a line hit (and surface those lines as anchors). An agent that declares neither has no file scope (`hasFileScope` returns false): the walker is skipped entirely, the whole repository is its scope, and it finds its own targets with Read/Glob/Grep at a higher turn budget (150 vs 50; see the CLI flags table below).
+- **Run** — a scoped agent's candidates are chunked into batches of `where.maxFilesPerBatch` (default 5); each batch is one tool-enabled session (`detector.runAgent`). An agent with no file scope runs as a single session with no seeded files. Batches from every queued agent are flattened into a single scan-wide pool capped by `--concurrency`, so different agents' batches interleave (safe because per-file writes are namespaced by `agent.slug`). A session can read beyond its seeded files to confirm a finding. One agent per session; findings are stamped with the agent's slug.
+
+Declare a scope whenever you can: a scoped agent reports how many candidate files it reviewed against a known total, while an agent with no file scope can't say what fraction of the repository it covered. No file scope is for a question with no syntax to anchor on, such as whether a control is missing everywhere rather than misused somewhere.
 
 ## Detector contract
 
@@ -106,7 +108,7 @@ Three Detector methods, so any provider participates without bespoke wiring:
 
 | Flag | Applies to | Notes |
 |---|---|---|
-| `--max-turns <n>` | recon, agent runs, validator | When set, a uniform cap. Unset: agent batches use `where.maxTurnsPerBatch` (default 50), recon 50, validator 50. |
+| `--max-turns <n>` | recon, agent runs, validator | When set, a uniform cap. Unset: agent batches use `where.maxTurnsPerBatch`, defaulting to 50 for a scoped agent and 150 for one with no file scope; recon 50, validator 50. |
 | `--max-files-per-batch <n>` | agent runs | Candidate files per batch. Overrides `where.maxFilesPerBatch` (default 5). |
 | `--concurrency <n>` | precondition gates, agent runs, validation, scoring | One scan-wide cap on in-flight LLM sessions. Phase 3 flattens every `(agent, batch)` pair into a single pool; validation and scoring fan out one finding per session through the same `runConcurrent` worker pool. Default 5. |
 | `--re-recon` | recon + plan | Re-run recon **and** re-evaluate the precondition plan instead of reusing the cached brief/plan. |
@@ -127,7 +129,7 @@ Three Detector methods, so any provider participates without bespoke wiring:
 
 ```
 batchSize        = opts.maxFilesPerBatch ?? agent.where.maxFilesPerBatch (default 5)
-maxTurnsPerBatch = opts.maxTurns         ?? agent.where.maxTurnsPerBatch (default 50)
+maxTurnsPerBatch = opts.maxTurns         ?? agent.where.maxTurnsPerBatch ?? (50 scoped / 150 no file scope)
 ```
 
 ## Tool restriction

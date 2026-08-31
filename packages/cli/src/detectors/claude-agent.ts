@@ -66,14 +66,16 @@ const ENV_ALLOWLIST = new Set<string>([
 
 /**
  * Detector backed by `@anthropic-ai/claude-agent-sdk`. Spawns the
- * `claude` CLI as a child process. Handles every Detector method
- * (file, hunt, walker, validate) for both Anthropic auth types
- * (`apiKey` and `oauthToken`).
+ * `claude` CLI as a child process. Implements every `Detector` method for
+ * both Anthropic auth types (`apiKey` and `oauthToken`).
  *
- * File mode is a one-turn agent with no tools — the prompt already
- * contains the full file content. Hunt and walker modes open
- * Read/Glob/Grep and let the agent decide which files to read, up to
- * a caller-supplied `maxTurns` cap.
+ * `recon`, `runAgent`, and `createAgent` are tool-enabled (Read/Glob/Grep);
+ * the classification-only methods (`checkPrecondition`,
+ * `validateFindingByScope`, `scoreFinding`, `dedupeFindings`) run
+ * single-turn with no tools. Within `runAgent`, a scoped agent
+ * investigates its seeded candidate files; one with no file scope finds
+ * its own targets with the same tools, up to a caller-supplied
+ * `maxTurns` cap.
  */
 export class ClaudeAgentDetector implements Detector {
   readonly name: string;

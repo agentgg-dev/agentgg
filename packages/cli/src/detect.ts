@@ -26,7 +26,7 @@ export const LlmFinding = z.object({
     .string()
     .nullable()
     .describe(
-      "Slug of the walker agent whose detection brief surfaced this finding. Required when the investigation pooled multiple agents into one session (so we can attribute findings back). Null in single-agent investigations — the runtime stamps the calling agent's slug.",
+      "Slug of the agent whose detection brief surfaced this finding. Required when the investigation pooled multiple agents into one session (so we can attribute findings back). Null in single-agent investigations — the runtime stamps the calling agent's slug.",
     ),
   lineRange: z
     .array(z.number().int().min(1))
@@ -37,7 +37,7 @@ export const LlmFinding = z.object({
     .string()
     .nullable()
     .describe(
-      "Path of the file the finding lives in, relative to the repo root. Required only in hunt mode where the agent picks files itself; ignored in file mode where the caller already knows the path.",
+      "Path of the file the finding lives in, relative to the repo root. Required when the agent has no file scope and finds its own targets; ignored when the caller already knows the path because the agent was seeded with it.",
     ),
   summary: z
     .string()
@@ -612,9 +612,9 @@ project doesn't use), answer false. When genuinely unsure, answer true
  * output shape is NOT included here — the Claude backend enforces it via
  * schema, and the Vercel backend appends `jsonOutputInstruction` itself.
  *
- * `candidates` is always non-empty (the orchestrator skips agents with no
- * matching files) — every agent reviews a concrete file set and uses its
- * tools to read beyond it. There is no file-less "roam" mode.
+ * `candidates` is empty when the agent declares no file scope: the whole
+ * repository is its scope, and it uses its tools to find its own targets
+ * rather than read beyond a seeded set. See `hasFileScope`.
  */
 export function buildAgentPrompt(
   args: Pick<RunAgentArgs, "agent" | "recon" | "candidates" | "diff">,
@@ -849,9 +849,10 @@ export function repairFindingPath(
 }
 
 export function hydrateFinding(raw: LlmFinding, agent: Agent, fallbackFilePath: string): Finding {
-  // In hunt mode the LLM is responsible for `filePath` (it discovered
-  // the file itself); in file mode the caller supplies it. Prefer the
-  // LLM's value when present so the id stays stable across runs.
+  // When the agent has no file scope, the LLM is responsible for
+  // `filePath` (it discovered the file itself); when the agent was seeded,
+  // the caller already supplies it. Prefer the LLM's value when present so
+  // the id stays stable across runs.
   const filePath =
     raw.filePath != null && raw.filePath.trim() !== "" ? raw.filePath : fallbackFilePath;
   const lineKey = raw.lineRange != null ? `${raw.lineRange[0]}-${raw.lineRange[1]}` : "0";
