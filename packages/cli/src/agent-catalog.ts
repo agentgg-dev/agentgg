@@ -203,17 +203,6 @@ export function warnOfficialAgents(agents: ReadonlyArray<Agent>): string[] {
         `the whole repository and it will receive no candidate files. Add ` +
         `extensions or filePatterns if that was not intended.\n    ${path}`,
     );
-    // The 150-turn default applies only when the key is absent, so an author
-    // who deletes `extensions` and `filePatterns` from an existing agent keeps
-    // its old batch-sized budget with no signal. Mechanically detectable, and
-    // it has already happened once.
-    if (a.where.maxTurnsPerBatch !== undefined) {
-      warnings.push(
-        `${a.slug} has no file scope, so it must find its own targets, but it declares ` +
-          `where.maxTurnsPerBatch: ${a.where.maxTurnsPerBatch}. A declared budget still wins ` +
-          `over the 150-turn default. Remove the key, or raise it deliberately.\n    ${path}`,
-      );
-    }
   }
 
   return warnings;

@@ -186,18 +186,16 @@ describe("warnOfficialAgents", () => {
     expect(warnings[0]).toContain("whole repository");
   });
 
-  it("warns when an agent with no file scope declares its own turn budget", () => {
-    // The 150 default applies only when the key is absent, so a declared 30
-    // silently survives deleting `extensions`.
+  it("says nothing extra when an agent with no file scope declares a turn budget", () => {
+    // Declaring a budget is how any agent sets one, and it beats the default
+    // whether that default is 50 or 150. Scoped agents do it routinely, so it
+    // is not a defect and gets no warning of its own.
     const warnings = warnOfficialAgents([agentWith("no-scope", { maxTurnsPerBatch: 30 })]);
-    expect(warnings).toHaveLength(2);
-    const budget = warnings.find((w) => w.includes("maxTurnsPerBatch"));
-    expect(budget).toContain("no-scope");
-    expect(budget).toContain("30");
-    expect(budget).toContain("150");
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("whole repository");
   });
 
-  it("is silent about the turn budget when the agent declares a file scope", () => {
+  it("is silent for a scoped agent that declares a turn budget", () => {
     const warnings = warnOfficialAgents([
       agentWith("scoped", { extensions: ["ts"], maxTurnsPerBatch: 30 }),
     ]);
