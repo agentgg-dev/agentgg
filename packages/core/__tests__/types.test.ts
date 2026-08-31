@@ -5,6 +5,7 @@ import {
   CvssScore,
   FileRecord,
   Finding,
+  hasFileScope,
   ScopeConfig,
   UserConfig,
 } from "../src/types.js";
@@ -315,5 +316,65 @@ describe("FileRecord schema", () => {
         contentHash: "abc123",
       }),
     ).toThrow();
+  });
+});
+
+describe("hasFileScope", () => {
+  function agentWith(where: Record<string, unknown>) {
+    return Agent.parse({
+      slug: "example-slug",
+      name: "Example",
+      description: "One line.",
+      prompt: "body",
+      where,
+    });
+  }
+
+  it("is false when neither extensions nor filePatterns is declared", () => {
+    expect(hasFileScope(agentWith({}))).toBe(false);
+  });
+
+  it("is false when both are declared empty", () => {
+    expect(hasFileScope(agentWith({ extensions: [], filePatterns: [] }))).toBe(false);
+  });
+
+  it("is true when extensions is non-empty", () => {
+    expect(hasFileScope(agentWith({ extensions: ["ts"] }))).toBe(true);
+  });
+
+  it("is true when filePatterns is non-empty", () => {
+    expect(hasFileScope(agentWith({ filePatterns: ["src/**"] }))).toBe(true);
+  });
+
+  it("is false when only preFilter and excludePatterns are declared", () => {
+    // preFilter narrows a file scope. It cannot create one.
+    expect(
+      hasFileScope(
+        agentWith({ preFilter: [{ regex: "TARGET" }], excludePatterns: ["**/dist/**"] }),
+      ),
+    ).toBe(false);
+  });
+});
+
+describe("Where.maxTurnsPerBatch", () => {
+  it("is undefined when the author does not declare it", () => {
+    const agent = Agent.parse({
+      slug: "example-slug",
+      name: "Example",
+      description: "One line.",
+      prompt: "body",
+    });
+    expect(agent.where.maxTurnsPerBatch).toBeUndefined();
+  });
+
+  it("keeps the declared value", () => {
+    const agent = Agent.parse({
+      slug: "example-slug",
+      name: "Example",
+      description: "One line.",
+      prompt: "body",
+      where: { maxTurnsPerBatch: 150 },
+    });
+    expect(agent.where.maxTurnsPerBatch).toBe(150);
   });
 });

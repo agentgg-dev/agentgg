@@ -26,6 +26,7 @@ import {
   writeRunMeta,
 } from "../src/index.js";
 import type { FileRecord, RunMeta } from "../src/types.js";
+import { AgentRun } from "../src/types.js";
 
 let outputDir: string;
 
@@ -292,6 +293,29 @@ describe("stateDirHasFiles", () => {
   it("returns true once a FileRecord is written", () => {
     writeFileRecord(outputDir, makeRecord("src/foo.ts"));
     expect(stateDirHasFiles(outputDir)).toBe(true);
+  });
+});
+
+describe("AgentRun.seeded", () => {
+  it("defaults to true so older sidecars keep their meaning", () => {
+    const record = AgentRun.parse({
+      agentSlug: "example-slug",
+      lastCompletedRunId: "run-1",
+      lastCompletedAt: "2026-08-31T00:00:00.000Z",
+      scope: { maxFileSizeKb: 500, rootPath: "/repo" },
+    });
+    expect(record.seeded).toBe(true);
+  });
+
+  it("round-trips false", () => {
+    const record = AgentRun.parse({
+      agentSlug: "example-slug",
+      lastCompletedRunId: "run-1",
+      lastCompletedAt: "2026-08-31T00:00:00.000Z",
+      scope: { maxFileSizeKb: 500, rootPath: "/repo" },
+      seeded: false,
+    });
+    expect(record.seeded).toBe(false);
   });
 });
 

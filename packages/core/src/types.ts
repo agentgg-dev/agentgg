@@ -20,9 +20,11 @@ export type NoiseTier = z.infer<typeof NoiseTier>;
  *      (always run). See `Precondition`.
  *   2. `where` — the file scope fed into the agent as starting points:
  *      `extensions` / `filePatterns` + `excludePatterns` narrow the tree,
- *      `preFilter` regexes anchor specific lines. An empty `where` includes
- *      ALL files. Either way the agent gets a concrete file set (reviewed in
- *      batches) and uses its tools to read beyond it. See `Where`.
+ *      `preFilter` regexes anchor specific lines. An agent that declares
+ *      neither `extensions` nor `filePatterns` has no file scope: the whole
+ *      repository is its scope, it gets no starting files, and it finds its
+ *      own targets with its tools. See `hasFileScope`. Either way the agent
+ *      uses its tools to read beyond what it was given. See `Where`.
  *   3. the prompt body (markdown after the frontmatter) — the harness +
  *      detection instructions the model runs with.
  *
@@ -189,8 +191,9 @@ export const Where = z.object({
    * Optional include patterns for cases `extensions` can't express — a
    * specific file, a directory, or a glob (e.g. "src/legacy", "**​/*.proto").
    * A bare path/dir matches everything under it. OR'd with `extensions`.
-   * When BOTH `extensions` and `filePatterns` are empty, the agent's scope is
-   * ALL files (reviewed in batches) — there is no file-less "roam" mode.
+   * When BOTH `extensions` and `filePatterns` are empty, the agent has no
+   * file scope: the whole repository is its scope and the orchestrator seeds
+   * it with no candidate files.
    */
   filePatterns: z.array(z.string()).default([]),
   /**
@@ -217,8 +220,14 @@ export const Where = z.object({
   preFilter: z.array(AgentPreFilterPattern).default([]),
   /** How many candidate files to pack into one investigation session. */
   maxFilesPerBatch: z.number().int().min(1).default(5),
-  /** Tool-use turn budget per investigation session. */
-  maxTurnsPerBatch: z.number().int().min(1).default(50),
+  /**
+   * Tool-use turn budget per investigation session. Left undefined so the
+   * default can depend on the agent's scope, which the schema cannot see:
+   * a session that must find its own targets before it can judge them needs
+   * more turns than one that arrives pre-seeded. The orchestrator resolves
+   * it to 50 with a file scope and 150 without one.
+   */
+  maxTurnsPerBatch: z.number().int().min(1).optional(),
 });
 export type Where = z.infer<typeof Where>;
 
@@ -261,6 +270,22 @@ export const Agent = z.object({
     .optional(),
 });
 export type Agent = z.infer<typeof Agent>;
+
+/**
+ * Does this agent select files for itself?
+ *
+ * `where.extensions` and `where.filePatterns` are the only two keys that
+ * select files. When both are empty the agent's scope is the whole
+ * repository: the orchestrator seeds it with no candidates and the agent
+ * uses its Read/Glob/Grep tools to find its own targets.
+ *
+ * `preFilter` narrows an existing file scope and cannot create one, so an
+ * agent that declares only a preFilter still has no file scope. Every call
+ * site uses this predicate rather than testing the two arrays itself.
+ */
+export function hasFileScope(agent: Agent): boolean {
+  return agent.where.extensions.length > 0 || agent.where.filePatterns.length > 0;
+}
 
 // ---------------------------------------------------------------------------
 // Candidate match (pre-filter regex hit, optional)
@@ -892,6 +917,17 @@ export const AgentRun = z.object({
    * sidecars.
    */
   filesReviewed: z.number().int().nonnegative().default(0),
+  /**
+   * Did the orchestrator hand this agent a candidate file set?
+   *
+   * False when the agent declared no file scope, so it searched the whole
+   * repository itself. That case has no denominator: `filesReviewed` counts
+   * the files the agent reported on, not the files it could have reviewed,
+   * and `hitCount` is 0 because no preFilter ran. A reader must not compare
+   * the two cases as if they measured the same thing. Defaults to true for
+   * older sidecars, which were all seeded.
+   */
+  seeded: z.boolean().default(true),
   /**
    * Total pre-filter anchor matches across those files. Finer-grained than
    * filesReviewed (a file with 10 hits is more to review than one with 1).

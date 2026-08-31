@@ -352,7 +352,11 @@ export interface RunAgentArgs {
   rootDir: string;
   /** Rendered recon brief, prepended for context. */
   recon?: string;
-  /** Seeded candidate files from the agent's `where` (always non-empty). */
+  /**
+   * Seeded candidate files from the agent's `where`. Empty when the agent
+   * declares no file scope: then the whole repository is its scope and it
+   * finds its own targets. See `hasFileScope` in @agentgg/core.
+   */
   candidates: AgentCandidate[];
   /** Excluded paths, used to bound the agent's tools (Vercel path enforces). */
   excludePatterns: string[];
@@ -636,10 +640,16 @@ ${args.diff.patch}
 \`\`\``
     : "";
 
+  // With no candidates the agent's scope is the whole repository, so the
+  // tools are how it finds its targets, not just how it reads them.
+  const seeded = args.candidates.length > 0;
+
   const toolsBlock = `## Your tools
 
 You have Read, Glob, and Grep. Your working directory is the
-repository root. Use them to read the files below, follow imports,
+repository root. Use them to ${
+    seeded ? "read the files below, follow" : "find and read the relevant code, follow"
+  } imports,
 chase callers, and confirm a finding before reporting it.`;
 
   // Only prompts that actually carry a path get the legend, so every agent
@@ -653,7 +663,7 @@ the source, then each variable the value passes through, then the sink.
 Treat it as a lead to confirm in the code, not as a verdict.`
     : "";
 
-  const targetBlock = `## Candidate files
+  const seededBlock = `## Candidate files
 
 These files were selected as your starting points (some carry scanner
 anchor lines). Investigate each one, and use your tools to pull in
@@ -661,6 +671,31 @@ related files when judgment requires it. Do NOT re-discover the
 candidate set — the files below are already your targets.${taintLegend}
 
 ${args.candidates.map((c, i) => renderSeededFile(c, i + 1, args.candidates.length)).join("\n\n---\n\n")}`;
+
+  // No candidates: the agent selects its own targets. Step 2 is the
+  // load-bearing instruction — it turns the detection criteria already in the
+  // prompt body above into search terms, which is what replaces the anchors a
+  // seeded batch carries.
+  const scopeBlock = `## Your scope
+
+Your scope is the whole repository. You must locate your own
+targets before you can judge them.
+
+Work in this order:
+1. Read the project brief above for the stack, the entry points,
+   and the layout.
+2. Grep for the concrete syntax your detection criteria name. Search
+   for the calls, imports, and identifiers themselves, not for
+   descriptions of them. Run several searches with different terms.
+3. Glob the directories the brief calls out, to find files your
+   searches missed.
+4. Read each promising file in full before you judge it. Follow its
+   imports and callers when a judgement depends on them.
+
+Search widely first, then read deeply. Do not report an issue from a
+search result alone. Read the code and confirm it.`;
+
+  const targetBlock = seeded ? seededBlock : scopeBlock;
 
   const reporting = `## Reporting
 

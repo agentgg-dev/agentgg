@@ -1,4 +1,4 @@
-import type { Agent } from "@agentgg/core";
+import { Agent } from "@agentgg/core";
 import { MockLanguageModelV1 } from "ai/test";
 import { describe, expect, it } from "vitest";
 import { buildAgentPrompt, buildPreconditionPrompt, hydrateFinding } from "../src/detect.js";
@@ -315,5 +315,71 @@ describe("buildAgentPrompt anchor enrichment", () => {
     expect(out).not.toContain("taint:");
     expect(out).not.toContain("why:");
     expect(out).not.toContain("shows the dataflow the scanner traced");
+  });
+});
+
+describe("buildAgentPrompt with no candidates", () => {
+  const agent = Agent.parse({
+    slug: "example-slug",
+    name: "Example",
+    description: "One line.",
+    prompt: "AGENT BODY MARKER",
+  });
+
+  it("emits the scope block instead of the candidate block", () => {
+    const prompt = buildAgentPrompt({ agent, candidates: [] });
+    expect(prompt).toContain("## Your scope");
+    expect(prompt).not.toContain("## Candidate files");
+  });
+
+  it("keeps the agent body, the tools block, and the reporting block", () => {
+    const prompt = buildAgentPrompt({ agent, candidates: [] });
+    expect(prompt).toContain("AGENT BODY MARKER");
+    expect(prompt).toContain("## Your tools");
+    expect(prompt).toContain("## Reporting");
+  });
+
+  it("tells the model to search on its own detection criteria", () => {
+    const prompt = buildAgentPrompt({ agent, candidates: [] });
+    expect(prompt).toContain("Grep for the concrete syntax your detection criteria name");
+  });
+
+  it("still carries the recon brief and the diff patch", () => {
+    const prompt = buildAgentPrompt({
+      agent,
+      candidates: [],
+      recon: "RECON BRIEF MARKER",
+      diff: { commit: "abc123", patch: "PATCH MARKER" },
+    });
+    expect(prompt).toContain("RECON BRIEF MARKER");
+    expect(prompt).toContain("PATCH MARKER");
+    expect(prompt).toContain("abc123");
+  });
+});
+
+describe("buildAgentPrompt with candidates is unchanged", () => {
+  // Regression guard for all 162 shipped agents: a scoped prompt must be
+  // byte-identical to what it was before whole-repo scope existed.
+  it("emits the candidate block and no scope block", () => {
+    const agent = Agent.parse({
+      slug: "example-slug",
+      name: "Example",
+      description: "One line.",
+      prompt: "AGENT BODY MARKER",
+      where: { extensions: ["ts"] },
+    });
+    const prompt = buildAgentPrompt({
+      agent,
+      candidates: [
+        {
+          filePath: "src/a.ts",
+          content: "const a = 1;\n",
+          hits: [{ line: 1, label: "t", snippet: "const a = 1;" }],
+        },
+      ],
+    });
+    expect(prompt).toContain("## Candidate files");
+    expect(prompt).toContain("Do NOT re-discover the\ncandidate set");
+    expect(prompt).not.toContain("## Your scope");
   });
 });

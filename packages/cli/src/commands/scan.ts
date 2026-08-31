@@ -14,6 +14,7 @@ import {
   createRunMeta,
   fingerprint,
   getOfficialAgentsDir,
+  hasFileScope,
   hashContent,
   isSemgrepPreFilter,
   loadAllFileRecords,
@@ -132,7 +133,8 @@ interface ScanOpts {
   /**
    * Max tool-use turns per LLM session. When set, applies uniformly to every
    * agent batch, recon, and the validator. When unset, agent runs use the
-   * agent's `where.maxTurnsPerBatch` (default 50), recon uses 50, validator 50.
+   * agent's `where.maxTurnsPerBatch` (default 50, or 150 when the agent
+   * declares no file scope), recon uses 50, validator 50.
    */
   maxTurns?: number;
   /** Candidate files per agent batch. Overrides the agent's `where.maxFilesPerBatch`. */
@@ -933,6 +935,11 @@ export async function runScan(
     let cappedAgentCount = 0;
     const diffArg =
       opts.diff && diffPatch !== undefined ? { commit: opts.diff, patch: diffPatch } : undefined;
+    /** The turn budget for one session. The default depends on scope: an agent
+     *  that must find its own targets spends turns on the search before it
+     *  spends any on judgement, so 50 (right for a pre-seeded batch) starves it. */
+    const resolveMaxTurns = (agent: Agent): number =>
+      opts.maxTurns ?? agent.where.maxTurnsPerBatch ?? (hasFileScope(agent) ? 50 : 150);
     type AgentRuntime = {
       // Batches not yet settled; the resume sidecar is written when it hits 0.
       remaining: number;
@@ -940,7 +947,16 @@ export async function runScan(
       failed: boolean;
       agentExcludes: string[];
       maxTurns: number;
+      // True when the orchestrator handed this agent a candidate file set.
+      // False for an agent with no file scope, which searched the whole
+      // repository itself: `filesReviewed` then counts `reportedFiles`
+      // instead of the (nonexistent) candidate count.
+      seeded: boolean;
       filesReviewed: number;
+      // Distinct files this agent's findings named. The only honest
+      // "files reviewed" count for an unseeded agent, which has no
+      // candidate set to measure against.
+      reportedFiles: Set<string>;
       hitCount: number;
       degraded: { kind: "semgrep"; reason: string }[];
       preFilterHits: { regex: number; semgrep: number };
@@ -956,6 +972,10 @@ export async function runScan(
     // resume check + walk, no LLM and no engine — and it has to finish before
     // semgrep runs, because the project pass needs every agent's files at once.
     const prepared: { agent: Agent; agentExcludes: string[]; scopedFiles: string[] }[] = [];
+    // Agents that declare no extensions and no filePatterns. Held apart from
+    // `prepared` because they skip the walk, the prefilter, and the project
+    // semgrep pass entirely — there is nothing to seed them with.
+    const unseeded: { agent: Agent; agentExcludes: string[] }[] = [];
     for (const agent of queuedAgents) {
       if (!opts.rescan) {
         const prior = readAgentRun(outDir, agent.slug);
@@ -989,18 +1009,29 @@ export async function runScan(
       const agentExcludes = Array.from(
         new Set([...agentBaseExcludes, ...agent.where.excludePatterns]),
       );
+
+      // No file scope declared: the whole repository is this agent's scope,
+      // so it gets no seeded candidates and the walk, the prefilter, the
+      // project semgrep pass and the per-agent file cap have nothing to do.
+      // Keeping it out of `prepared` is what excludes it from all four —
+      // above all from the zero-candidate early exit below, which would
+      // otherwise write a clean completion sidecar without ever running it.
+      if (!hasFileScope(agent)) {
+        unseeded.push({ agent, agentExcludes });
+        continue;
+      }
+
       const agentWalkCfg: WalkConfig = {
         excludePatterns: agentBaseExcludes,
         includePatterns,
         maxFileSizeBytes,
       };
       // Resolve `where` → seeded candidate files. The walker enumerates every
-      // file the `where` includes (`extensions` / `filePatterns`; an empty
-      // `where` includes ALL files), then `preFilter` narrows to anchor-
-      // carrying files (empty preFilter = every included file is a candidate).
-      // Under --diff, the list is intersected with the changed-file set.
-      // There is no "roam" mode: an agent always reviews a concrete file set
-      // in batches, and uses its tools to read beyond it when needed.
+      // file the `where` includes (`extensions` / `filePatterns`), then
+      // `preFilter` narrows to anchor-carrying files (empty preFilter = every
+      // included file is a candidate). Under --diff, the list is intersected
+      // with the changed-file set. Only agents that declare a file scope reach
+      // here; the branch above already took the rest.
       const [work] = walkForAgents(root, [agent], agentWalkCfg);
       const files = work ? work.files : [];
       const scopedFiles = diffFiles ? files.filter((f) => diffFiles.has(f)) : files;
@@ -1096,6 +1127,7 @@ export async function runScan(
             scope: currentScope,
             precondition: { queued: true },
             findingCount: 0,
+            seeded: true,
             filesReviewed,
             hitCount,
             degraded,
@@ -1197,6 +1229,7 @@ export async function runScan(
             scope: currentScope,
             precondition: { queued: true },
             findingCount: byAgent[agent.slug] ?? 0,
+            seeded: true,
             filesReviewed,
             hitCount,
             degraded,
@@ -1209,7 +1242,7 @@ export async function runScan(
         continue;
       }
 
-      const maxTurns = opts.maxTurns ?? agent.where.maxTurnsPerBatch;
+      const maxTurns = resolveMaxTurns(agent);
       const batchSize = Math.max(1, opts.maxFilesPerBatch ?? agent.where.maxFilesPerBatch);
 
       // Candidates are packed into batches under two ceilings: `batchSize`
@@ -1233,12 +1266,38 @@ export async function runScan(
         failed: false,
         agentExcludes,
         maxTurns,
+        seeded: true,
         filesReviewed,
+        reportedFiles: new Set(),
         hitCount,
         degraded,
         preFilterHits,
       });
       for (const batch of batches) batchQueue.push({ agent, batch });
+    }
+
+    // One batch, no candidates. The prompt swaps its candidate block for a
+    // scope block (see buildAgentPrompt), and the agent finds its own targets
+    // with its Read/Glob/Grep tools. This counts as one pair toward
+    // --max-batches like any other batch.
+    for (const { agent, agentExcludes } of unseeded) {
+      const maxTurns = resolveMaxTurns(agent);
+      console.log(
+        `  ${agent.slug}: no file scope, whole repository → 1 session of up to ${maxTurns} turns`,
+      );
+      runtimeBySlug.set(agent.slug, {
+        remaining: 1,
+        failed: false,
+        agentExcludes,
+        maxTurns,
+        seeded: false,
+        filesReviewed: 0,
+        reportedFiles: new Set(),
+        hitCount: 0,
+        degraded: [],
+        preFilterHits: { regex: 0, semgrep: 0 },
+      });
+      batchQueue.push({ agent, batch: [] });
     }
 
     // `--max-batches` cap: keep at most N (agent, batch) pairs across the
@@ -1310,10 +1369,16 @@ export async function runScan(
         });
         byAgent[agent.slug] = (byAgent[agent.slug] ?? 0) + addFindings(valid);
         for (const f of valid) {
-          if (f.filePath && f.filePath !== "(unknown)") touchedFiles.add(f.filePath);
+          if (f.filePath && f.filePath !== "(unknown)") {
+            touchedFiles.add(f.filePath);
+            rt.reportedFiles.add(f.filePath);
+          }
         }
         if (opts.verbose || valid.length > 0) {
-          const label = batch.map((c) => c.filePath).join(", ");
+          // A batch with no candidate files has no paths to name, so it says
+          // what it covered instead of rendering an empty bracket.
+          const label =
+            batch.length > 0 ? batch.map((c) => c.filePath).join(", ") : "whole repository";
           console.log(`    ${agent.slug} [${label}]: ${valid.length} finding(s)`);
         }
         // Persist findings grouped by file.
@@ -1376,7 +1441,11 @@ export async function runScan(
               scope: currentScope,
               precondition: { queued: true },
               findingCount: byAgent[agent.slug] ?? 0,
-              filesReviewed: rt.filesReviewed,
+              seeded: rt.seeded,
+              // A seeded agent's count is its candidate set, fixed before any LLM
+              // call. An agent that searched for itself has no such denominator, so
+              // the only honest count is the files it actually reported on.
+              filesReviewed: rt.seeded ? rt.filesReviewed : rt.reportedFiles.size,
               hitCount: rt.hitCount,
               degraded: rt.degraded,
               preFilterHits: rt.preFilterHits,
@@ -2053,7 +2122,7 @@ export function registerScanCommand(program: Command): void {
     )
     .option(
       "--max-turns <n>",
-      "Max tool-use turns per LLM session. When set, applies uniformly to every agent batch, recon, and the validator. When unset: agent batches use the agent's `where.maxTurnsPerBatch` (default 50), recon 50, validator 50.",
+      "Max tool-use turns per LLM session. When set, applies uniformly to every agent batch, recon, and the validator. When unset: agent batches use the agent's `where.maxTurnsPerBatch` (default 50, or 150 when the agent declares no extensions and no filePatterns), recon 50, validator 50.",
       (v) => parseInt(v, 10),
     )
     .option(
