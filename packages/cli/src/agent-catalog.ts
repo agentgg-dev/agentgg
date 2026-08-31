@@ -4,6 +4,7 @@ import {
   type Agent,
   type AgentPreFilterRegex,
   getOfficialAgentsDir,
+  hasFileScope,
   isRegexPreFilter,
   isSemgrepPreFilter,
   loadAgentsFromDir,
@@ -179,4 +180,30 @@ export function lintOfficialAgents(agents: ReadonlyArray<Agent>): string[] {
   }
 
   return violations;
+}
+
+/**
+ * Non-fatal notices for the agents repo's pre-commit hook.
+ *
+ * Separate from `lintOfficialAgents` because a warning must not fail the
+ * build: everything reported here is legal. It is reported because it is
+ * more often a mistake than an intention.
+ */
+export function warnOfficialAgents(agents: ReadonlyArray<Agent>): string[] {
+  const warnings: string[] = [];
+
+  // An empty file scope is how an agent asks for the whole repository. It is
+  // also what a forgotten `extensions:` line looks like, and the two are
+  // indistinguishable on disk. Say so once per agent.
+  for (const a of agents) {
+    if (hasFileScope(a)) continue;
+    const path = a.source?.path ?? "(unknown path)";
+    warnings.push(
+      `${a.slug} declares no extensions and no filePatterns, so its scope is ` +
+        `the whole repository and it will receive no candidate files. Add ` +
+        `extensions or filePatterns if that was not intended.\n    ${path}`,
+    );
+  }
+
+  return warnings;
 }

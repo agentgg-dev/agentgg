@@ -1,9 +1,14 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadAgentsFromDir } from "@agentgg/core";
+import { Agent, loadAgentsFromDir } from "@agentgg/core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { defaultAgentDirs, lintOfficialAgents, loadAllAgents } from "../src/agent-catalog.js";
+import {
+  defaultAgentDirs,
+  lintOfficialAgents,
+  loadAllAgents,
+  warnOfficialAgents,
+} from "../src/agent-catalog.js";
 
 const VALID_MD = `---
 slug: SLUG_PLACEHOLDER
@@ -159,5 +164,37 @@ describe("loadAllAgents", () => {
     // Both load — official-vs-custom shadow is intentional, the user
     // gets to keep their tweaked copy alongside the upstream one.
     expect(result.agents).toHaveLength(2);
+  });
+});
+
+describe("warnOfficialAgents", () => {
+  function agentWith(slug: string, where: Record<string, unknown>) {
+    return Agent.parse({
+      slug,
+      name: slug,
+      description: "One line.",
+      prompt: "body",
+      where,
+      source: { kind: "official", path: `/agents/${slug}.md` },
+    });
+  }
+
+  it("warns when an agent declares no extensions and no filePatterns", () => {
+    const warnings = warnOfficialAgents([agentWith("no-scope", {})]);
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("no-scope");
+    expect(warnings[0]).toContain("whole repository");
+  });
+
+  it("is silent for an agent that declares extensions", () => {
+    expect(warnOfficialAgents([agentWith("scoped", { extensions: ["ts"] })])).toEqual([]);
+  });
+
+  it("is silent for an agent that declares filePatterns", () => {
+    expect(warnOfficialAgents([agentWith("scoped", { filePatterns: ["src/**"] })])).toEqual([]);
+  });
+
+  it("does not report the warning as a violation", () => {
+    expect(lintOfficialAgents([agentWith("no-scope", {})])).toEqual([]);
   });
 });

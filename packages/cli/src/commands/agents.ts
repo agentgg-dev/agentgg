@@ -2,7 +2,7 @@ import { existsSync, statSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 import { type Agent, getOfficialAgentsDir, loadAgentsFromDir, NoiseTier } from "@agentgg/core";
 import type { Command } from "commander";
-import { lintOfficialAgents, loadAllAgents } from "../agent-catalog.js";
+import { lintOfficialAgents, loadAllAgents, warnOfficialAgents } from "../agent-catalog.js";
 import { addAgents, getCustomAgentsDir, removeAgent } from "../agents-fs.js";
 import { getInstalledVersion, installOfficialAgents } from "../agents-install.js";
 
@@ -283,7 +283,10 @@ export function registerAgentsCommand(program: Command): void {
       });
       const parseErrors = errors.map((e) => `parse error: ${e.filePath ?? "?"}: ${e.message}`);
       const violations = lintOfficialAgents(loaded);
+      const warnings = warnOfficialAgents(loaded);
       const all = [...parseErrors, ...violations];
+      for (const w of warnings) logWarn(w);
+      if (warnings.length > 0) console.error("");
       if (all.length === 0) {
         console.log(`✓ ${loaded.length} agents lint clean (${target})`);
         return;
