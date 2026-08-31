@@ -38,3 +38,6 @@ packages/cli/LICENSE
 packages/cli/NOTICE
 .gstack/
 .superpowers/
+
+# Working plans and specs from the superpowers workflow. Never artifacts.
+docs/superpowers/
