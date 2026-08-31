@@ -421,6 +421,14 @@ const READ_FILE_OUTPUT_CAP_BYTES = 80_000;
  *  budget. Past the cap the call is left broken and the batch degrades. */
 const MAX_TOOL_CALL_REPAIRS = 5;
 
+/** Repeat counts that mean "you are stuck" rather than "you slipped". Below
+ *  both, `repeatNotice` tells the model to move on; at or above either one it
+ *  tells the model to finalize. Two counters because a loop stalls two ways:
+ *  one call repeated many times, or a handful of calls cycled, which no
+ *  per-call count catches on its own. */
+const REPEAT_STALL_PER_CALL = 3;
+const REPEAT_STALL_TOTAL = 5;
+
 /**
  * Recover the tool the model MEANT to call from a mangled tool name.
  *
@@ -1277,17 +1285,27 @@ export function buildTools(opts: ToolLoopOpts) {
   const SIG_SEP = "\u0000";
 
   const callCounts = new Map<string, number>();
+  // Every repeat in this loop, across all signatures. A model that cycles
+  // A,B,A,B stalls just as hard as one that repeats A, but no single
+  // signature climbs fast enough to show it.
+  let totalRepeats = 0;
   const repeated = (toolName: string, signature: string): string | null => {
     const n = (callCounts.get(signature) ?? 0) + 1;
     callCounts.set(signature, n);
     if (n === 1) return null;
+    totalRepeats++;
+    // One repeat early in a long session is a slip, not a stall, and telling
+    // that model to finalize invites the empty answer this guard exists to
+    // prevent. Only escalate once the loop looks genuinely stuck.
+    const stalled = n >= REPEAT_STALL_PER_CALL || totalRepeats >= REPEAT_STALL_TOTAL;
     // The signature keys on a NUL separator so a pattern containing a space
     // cannot collide with a scoped search. Never print it raw: a NUL byte makes
     // grep treat the whole log as binary and refuse to match it.
     logWarn(
-      `[${label}] repeated ${toolName} call #${n}: ${signature.split(SIG_SEP).join(" ").slice(0, 120)}`,
+      `[${label}] repeated ${toolName} call #${n}: ${signature.split(SIG_SEP).join(" ").slice(0, 120)}` +
+        (stalled ? " (stalled; telling it to finalize)" : ""),
     );
-    return repeatNotice(toolName, phase);
+    return repeatNotice(toolName, phase, stalled);
   };
 
   return {
@@ -1364,16 +1382,24 @@ export function toSearchGlob(path: string): string {
  *  silent empty result the model might keep probing against. */
 /**
  * Returned instead of re-running a tool call this loop already made with
- * identical arguments. Says what happened, why repeating is pointless, and
- * names the two ways forward: a different query, or the answer.
+ * identical arguments. Says what happened and why repeating is pointless.
+ *
+ * Two wordings, because one repeat and forty need opposite advice. `stalled:
+ * false` is a slip: the model already holds the bytes and only needs to
+ * advance, so the notice must NOT offer to finalize — on turn 3 of 200 that
+ * invites the empty answer this guard exists to prevent. `stalled: true` is
+ * the 2026-08-10 case (one Grep run 41 times, whole turn budget spent, no
+ * answer), where finalizing IS the way out.
  */
-export function repeatNotice(toolName: string, phase: ToolLoopPhase): string {
-  return (
+export function repeatNotice(toolName: string, phase: ToolLoopPhase, stalled = false): string {
+  const head =
     `You already ran this exact ${toolName} call in this loop, and its result is above. ` +
-    `Repeating it returns nothing new. ` +
-    `Either try a different query, or output your final ${ARTIFACT[phase]} now, ` +
-    `based on what you have already examined.`
-  );
+    `Repeating it returns nothing new. `;
+  return stalled
+    ? `${head}You are repeating calls instead of advancing. Stop calling tools and ` +
+        `output your final ${ARTIFACT[phase]} now, based on what you have already examined.`
+    : `${head}Move on: run a different query, or use what you already have to reach ` +
+        `your next step.`;
 }
 
 /**
