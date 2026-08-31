@@ -615,9 +615,13 @@ project doesn't use), answer false. When genuinely unsure, answer true
  * `candidates` is empty when the agent declares no file scope: the whole
  * repository is its scope, and it uses its tools to find its own targets
  * rather than read beyond a seeded set. See `hasFileScope`.
+ *
+ * `excludePatterns` is rendered only in the scope block. A seeded agent is
+ * told not to re-discover its candidate set, so it has no traversal to bound
+ * and its prompt stays byte-identical.
  */
 export function buildAgentPrompt(
-  args: Pick<RunAgentArgs, "agent" | "recon" | "candidates" | "diff">,
+  args: Pick<RunAgentArgs, "agent" | "recon" | "candidates" | "diff" | "excludePatterns">,
 ): string {
   const reconBlock = args.recon ? `${args.recon}\n\n---\n\n` : "";
 
@@ -672,6 +676,20 @@ candidate set — the files below are already your targets.${taintLegend}
 
 ${args.candidates.map((c, i) => renderSeededFile(c, i + 1, args.candidates.length)).join("\n\n---\n\n")}`;
 
+  // The excludes bound where this agent looks. On the Vercel path the tool
+  // implementations enforce the same list; on the Claude Agent SDK path the
+  // native Read/Glob/Grep take no filter, so naming the paths here is the only
+  // bound there is. Either way it belongs in the scope block only: a seeded
+  // agent is not traversing anything.
+  const excludeBlock =
+    args.excludePatterns.length > 0
+      ? `
+Skip anything matching these patterns. They are not part of your
+scope, and searching or reading them wastes your budget:
+${args.excludePatterns.map((p) => `  - ${p}`).join("\n")}
+`
+      : "";
+
   // No candidates: the agent selects its own targets. Step 2 is the
   // load-bearing instruction — it turns the detection criteria already in the
   // prompt body above into search terms, which is what replaces the anchors a
@@ -691,7 +709,7 @@ Work in this order:
    searches missed.
 4. Read each promising file in full before you judge it. Follow its
    imports and callers when a judgement depends on them.
-
+${excludeBlock}
 Search widely first, then read deeply. Do not report an issue from a
 search result alone. Read the code and confirm it.`;
 

@@ -48,12 +48,12 @@ describe("buildAgentPrompt", () => {
 
   it("includes the agent's prompt body verbatim", () => {
     const agent = makeAgent();
-    const out = buildAgentPrompt({ agent, candidates });
+    const out = buildAgentPrompt({ excludePatterns: [], agent, candidates });
     expect(out).toContain(agent.prompt);
   });
 
   it("includes each candidate's file path and content in a fenced code block", () => {
-    const out = buildAgentPrompt({ agent: makeAgent(), candidates });
+    const out = buildAgentPrompt({ excludePatterns: [], agent: makeAgent(), candidates });
     expect(out).toContain("src/login.ts");
     expect(out).toContain("```typescript");
     expect(out).toContain("const x = 1;");
@@ -62,6 +62,7 @@ describe("buildAgentPrompt", () => {
   it("renders a multi-line anchor as a range and a single-line one as a point", () => {
     // A semgrep match spans the whole handler; a regex hit is one line.
     const out = buildAgentPrompt({
+      excludePatterns: [],
       agent: makeAgent(),
       candidates: [
         {
@@ -79,24 +80,25 @@ describe("buildAgentPrompt", () => {
   });
 
   it("describes the available tools (Read, Glob, and Grep)", () => {
-    const out = buildAgentPrompt({ agent: makeAgent(), candidates });
+    const out = buildAgentPrompt({ excludePatterns: [], agent: makeAgent(), candidates });
     expect(out).toContain("Read, Glob, and Grep");
   });
 
   it("warns the model against fabricating findings", () => {
-    const out = buildAgentPrompt({ agent: makeAgent(), candidates });
+    const out = buildAgentPrompt({ excludePatterns: [], agent: makeAgent(), candidates });
     expect(out).toContain("Do NOT invent findings");
   });
 
   it("prepends the recon brief when provided, omits it otherwise", () => {
     const withRecon = buildAgentPrompt({
+      excludePatterns: [],
       agent: makeAgent(),
       candidates,
       recon: "## Project recon\nA small JS service.",
     });
     expect(withRecon).toContain("## Project recon");
 
-    const without = buildAgentPrompt({ agent: makeAgent(), candidates });
+    const without = buildAgentPrompt({ excludePatterns: [], agent: makeAgent(), candidates });
     expect(without).not.toContain("## Project recon");
   });
 });
@@ -264,7 +266,11 @@ describe("buildAgentPrompt anchor enrichment", () => {
   const withHits = (hits: unknown[]) => [{ filePath: "src/api.ts", content: "a", hits } as never];
 
   it("renders the taint path as source, intermediates, then sink", () => {
-    const out = buildAgentPrompt({ agent: makeAgent(), candidates: withHits([taintHit]) });
+    const out = buildAgentPrompt({
+      excludePatterns: [],
+      agent: makeAgent(),
+      candidates: withHits([taintHit]),
+    });
     expect(out).toContain("taint: L7 `req.query` → L8 `cmd` → L9 `execSync(cmd)`");
   });
 
@@ -272,6 +278,7 @@ describe("buildAgentPrompt anchor enrichment", () => {
     // It is neither a location nor code. Printing `L99 ...` would name a
     // real but unrelated line, which is worse than naming none.
     const out = buildAgentPrompt({
+      excludePatterns: [],
       agent: makeAgent(),
       candidates: withHits([
         {
@@ -289,12 +296,17 @@ describe("buildAgentPrompt anchor enrichment", () => {
   });
 
   it("renders allow-listed metadata beside the label", () => {
-    const out = buildAgentPrompt({ agent: makeAgent(), candidates: withHits([taintHit]) });
+    const out = buildAgentPrompt({
+      excludePatterns: [],
+      agent: makeAgent(),
+      candidates: withHits([taintHit]),
+    });
     expect(out).toContain("(CWE-78, confidence MEDIUM):");
   });
 
   it("renders the rule message on its own line when it differs from the label", () => {
     const out = buildAgentPrompt({
+      excludePatterns: [],
       agent: makeAgent(),
       candidates: withHits([{ ...taintHit, label: "Shell sink", message: "Input reaches exec." }]),
     });
@@ -303,14 +315,18 @@ describe("buildAgentPrompt anchor enrichment", () => {
   });
 
   it("explains the taint format once, in the prompt that carries a path", () => {
-    const out = buildAgentPrompt({ agent: makeAgent(), candidates: withHits([taintHit]) });
+    const out = buildAgentPrompt({
+      excludePatterns: [],
+      agent: makeAgent(),
+      candidates: withHits([taintHit]),
+    });
     expect(out).toContain("shows the dataflow the scanner traced");
   });
 
   it("leaves a regex-only prompt byte-identical, legend included", () => {
     // The other agents declare no semgrep rule. Their prompt must not move.
     const plain = withHits([{ line: 4, label: "exec(", snippet: "exec(cmd)" }]);
-    const out = buildAgentPrompt({ agent: makeAgent(), candidates: plain });
+    const out = buildAgentPrompt({ excludePatterns: [], agent: makeAgent(), candidates: plain });
     expect(out).toContain("  - L4 [exec(]: exec(cmd)");
     expect(out).not.toContain("taint:");
     expect(out).not.toContain("why:");
@@ -327,25 +343,26 @@ describe("buildAgentPrompt with no candidates", () => {
   });
 
   it("emits the scope block instead of the candidate block", () => {
-    const prompt = buildAgentPrompt({ agent, candidates: [] });
+    const prompt = buildAgentPrompt({ excludePatterns: [], agent, candidates: [] });
     expect(prompt).toContain("## Your scope");
     expect(prompt).not.toContain("## Candidate files");
   });
 
   it("keeps the agent body, the tools block, and the reporting block", () => {
-    const prompt = buildAgentPrompt({ agent, candidates: [] });
+    const prompt = buildAgentPrompt({ excludePatterns: [], agent, candidates: [] });
     expect(prompt).toContain("AGENT BODY MARKER");
     expect(prompt).toContain("## Your tools");
     expect(prompt).toContain("## Reporting");
   });
 
   it("tells the model to search on its own detection criteria", () => {
-    const prompt = buildAgentPrompt({ agent, candidates: [] });
+    const prompt = buildAgentPrompt({ excludePatterns: [], agent, candidates: [] });
     expect(prompt).toContain("Grep for the concrete syntax your detection criteria name");
   });
 
   it("still carries the recon brief and the diff patch", () => {
     const prompt = buildAgentPrompt({
+      excludePatterns: [],
       agent,
       candidates: [],
       recon: "RECON BRIEF MARKER",
@@ -355,11 +372,30 @@ describe("buildAgentPrompt with no candidates", () => {
     expect(prompt).toContain("PATCH MARKER");
     expect(prompt).toContain("abc123");
   });
+
+  it("names the excluded paths in the scope block", () => {
+    // The only bound this agent's traversal gets on the Claude Agent SDK path,
+    // whose native tools take no exclude filter.
+    const prompt = buildAgentPrompt({
+      agent,
+      candidates: [],
+      excludePatterns: ["node_modules/**", ".git/**"],
+    });
+    expect(prompt).toContain("Skip anything matching these patterns");
+    expect(prompt).toContain("  - node_modules/**");
+    expect(prompt).toContain("  - .git/**");
+  });
+
+  it("omits the exclude guidance when there is nothing to exclude", () => {
+    const prompt = buildAgentPrompt({ agent, candidates: [], excludePatterns: [] });
+    expect(prompt).not.toContain("Skip anything matching these patterns");
+  });
 });
 
 describe("buildAgentPrompt with candidates is unchanged", () => {
-  // Regression guard for all 162 shipped agents: a scoped prompt must be
-  // byte-identical to what it was before whole-repo scope existed.
+  // Regression guard for every shipped agent: a prompt built from candidate
+  // files must be byte-identical to what it was before an agent could declare
+  // no file scope.
   it("emits the candidate block and no scope block", () => {
     const agent = Agent.parse({
       slug: "example-slug",
@@ -369,6 +405,7 @@ describe("buildAgentPrompt with candidates is unchanged", () => {
       where: { extensions: ["ts"] },
     });
     const prompt = buildAgentPrompt({
+      excludePatterns: [],
       agent,
       candidates: [
         {
@@ -381,5 +418,33 @@ describe("buildAgentPrompt with candidates is unchanged", () => {
     expect(prompt).toContain("## Candidate files");
     expect(prompt).toContain("Do NOT re-discover the\ncandidate set");
     expect(prompt).not.toContain("## Your scope");
+  });
+
+  it("is byte-identical whether or not excludePatterns are supplied", () => {
+    // Excludes render in the scope block only. A seeded agent is told not to
+    // re-discover its candidate set, so it has no traversal to bound and its
+    // prompt must not move by one byte.
+    const agent = Agent.parse({
+      slug: "example-slug",
+      name: "Example",
+      description: "One line.",
+      prompt: "AGENT BODY MARKER",
+      where: { extensions: ["ts"] },
+    });
+    const candidates = [
+      {
+        filePath: "src/a.ts",
+        content: "const a = 1;\n",
+        hits: [{ line: 1, label: "t", snippet: "const a = 1;" }],
+      },
+    ];
+    const withExcludes = buildAgentPrompt({
+      agent,
+      candidates,
+      excludePatterns: ["node_modules/**", ".git/**", "dist/**"],
+    });
+    const without = buildAgentPrompt({ agent, candidates, excludePatterns: [] });
+    expect(withExcludes).toBe(without);
+    expect(withExcludes).not.toContain("node_modules");
   });
 });

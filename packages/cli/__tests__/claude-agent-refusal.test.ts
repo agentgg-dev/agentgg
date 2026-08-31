@@ -36,6 +36,10 @@ function runAgentArgs() {
     agent: AGENT,
     candidates: [{ filePath: "src/db.ts", content: "const q = 'SELECT 1';", hits: [] }],
     rootDir: process.cwd(),
+    // Required by RunAgentArgs; the `as never` below hides their absence from
+    // the compiler, so they have to be supplied by hand.
+    excludePatterns: [],
+    maxFileSizeKb: 512,
     maxTurns: 3,
   } as never;
 }

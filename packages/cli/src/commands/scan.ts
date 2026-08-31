@@ -1057,6 +1057,37 @@ export async function runScan(
       { onInfo: opts.verbose ? (m) => console.log(`  ${m}`) : undefined },
     );
 
+    // One batch, no candidates. The prompt swaps its candidate block for a
+    // scope block (see buildAgentPrompt), and the agent finds its own targets
+    // with its Read/Glob/Grep tools. This counts as one pair toward
+    // --max-batches like any other batch.
+    //
+    // Enqueued BEFORE every seeded batch, and the position is deliberate.
+    // `--max-batches` truncates the queue from the end, so enqueue order
+    // decides what gets dropped. One of these costs exactly one pair while an
+    // agent with a file scope can cost hundreds, so going last would mean that
+    // on any repository whose seeded queue alone exceeds the cap, an agent with
+    // no file scope never runs, on any number of repeated scans.
+    for (const { agent, agentExcludes } of unseeded) {
+      const maxTurns = resolveMaxTurns(agent);
+      console.log(
+        `  ${agent.slug}: no file scope, whole repository → 1 session of up to ${maxTurns} turns`,
+      );
+      runtimeBySlug.set(agent.slug, {
+        remaining: 1,
+        failed: false,
+        agentExcludes,
+        maxTurns,
+        seeded: false,
+        filesReviewed: 0,
+        reportedFiles: new Set(),
+        hitCount: 0,
+        degraded: [],
+        preFilterHits: { regex: 0, semgrep: 0 },
+      });
+      batchQueue.push({ agent, batch: [] });
+    }
+
     // Pass 2: build each agent's candidates and enqueue its batches.
     for (const { agent, agentExcludes, scopedFiles } of prepared) {
       const candidates: AgentCandidate[] = [];
@@ -1281,30 +1312,6 @@ export async function runScan(
       for (const batch of batches) batchQueue.push({ agent, batch });
     }
 
-    // One batch, no candidates. The prompt swaps its candidate block for a
-    // scope block (see buildAgentPrompt), and the agent finds its own targets
-    // with its Read/Glob/Grep tools. This counts as one pair toward
-    // --max-batches like any other batch.
-    for (const { agent, agentExcludes } of unseeded) {
-      const maxTurns = resolveMaxTurns(agent);
-      console.log(
-        `  ${agent.slug}: no file scope, whole repository → 1 session of up to ${maxTurns} turns`,
-      );
-      runtimeBySlug.set(agent.slug, {
-        remaining: 1,
-        failed: false,
-        agentExcludes,
-        maxTurns,
-        seeded: false,
-        filesReviewed: 0,
-        reportedFiles: new Set(),
-        hitCount: 0,
-        degraded: [],
-        preFilterHits: { regex: 0, semgrep: 0 },
-      });
-      batchQueue.push({ agent, batch: [] });
-    }
-
     // `--max-batches` cap: keep at most N (agent, batch) pairs across the
     // whole scan in enqueue order, drop the rest. A truncated/dropped agent
     // keeps `rt.remaining > 0`, so it writes no completion sidecar and re-runs
@@ -1364,7 +1371,23 @@ export async function runScan(
         // indistinguishable from clean code. Losing analysis silently is the
         // failure this scan path exists to avoid, so it is never quiet.
         const valid = batchFindings.filter((f) => {
-          if (!f.filePath || f.filePath === "(unknown)") return true;
+          if (!f.filePath || f.filePath === "(unknown)") {
+            // A seeded batch never reaches here in practice: the detector
+            // anchors an anchorless finding onto its first candidate. Keep
+            // that path exactly as it was.
+            if (batch.length > 0) return true;
+            // A batch with no candidates has no such fallback, so this is the
+            // only case that produces a finding naming no file. Findings with
+            // no file anchor are not supported, and keeping one is worse than
+            // dropping it: it counts into the agent total and the report, but
+            // writes no file record, so the next scan resumes the agent as
+            // cleanly cached with nothing to show for it.
+            logWarn(
+              `${agent.slug}: discarded a finding that names no file. This agent has no file ` +
+                `scope, so there is no candidate file to anchor it to`,
+            );
+            return false;
+          }
           if (existsSync(resolve(root, f.filePath))) return true;
           logWarn(
             `${agent.slug}: discarded a finding naming "${f.filePath}", which is neither a file ` +

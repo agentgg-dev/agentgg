@@ -120,6 +120,16 @@ function suppressLogs() {
   captureLogs();
 }
 
+/** Silence the scan and return the `logWarn` lines it emitted. */
+function captureWarnings(): string[] {
+  const lines: string[] = [];
+  vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+    lines.push(args.join(" "));
+  });
+  suppressLogs();
+  return lines;
+}
+
 /** Write a synthetic agent whose frontmatter carries `where` verbatim. */
 function writeAgent(slug: string, where: string): string {
   const body = `---
@@ -328,5 +338,62 @@ describe("the turn budget a batch is dispatched with", () => {
     expect(turnsFor("no-scope")).toEqual([7]);
     expect(turnsFor("scoped")).toEqual([7]);
     expect(turnsFor("declared-no-scope")).toEqual([7]);
+  });
+});
+
+describe("a finding that names no file", () => {
+  it("is discarded, and said so, when the batch had no candidates", async () => {
+    const warnings = captureWarnings();
+    const path = writeAgent("no-scope", "");
+    detectorMock.runAgent.mockImplementation(async ({ agent }) => [
+      mockFinding(agent.slug, "(unknown)"),
+    ]);
+    await runScan(projectRoot, { template: [path], output: outputDir }, env);
+
+    // Counting it and then losing it is the failure: it would land in the
+    // agent total and the report while leaving no file record behind, so the
+    // next scan would resume the agent as cleanly cached with zero findings.
+    expect(readAgentRun(outputDir, "no-scope")?.findingCount).toBe(0);
+    expect(warnings.find((w) => w.includes("names no file"))).toContain("no-scope");
+  });
+
+  it("is still kept for a seeded batch, whose behavior does not change", async () => {
+    const warnings = captureWarnings();
+    const path = writeAgent("scoped", "where:\n  extensions:\n    - ts\n");
+    detectorMock.runAgent.mockImplementation(async ({ agent }) => [
+      mockFinding(agent.slug, "(unknown)"),
+    ]);
+    await runScan(projectRoot, { template: [path], output: outputDir }, env);
+
+    expect(readAgentRun(outputDir, "scoped")?.findingCount).toBe(1);
+    expect(warnings.find((w) => w.includes("names no file"))).toBeUndefined();
+  });
+});
+
+describe("--max-batches truncation order", () => {
+  it("keeps the agent with no file scope when the cap is below the seeded queue", async () => {
+    suppressLogs();
+    // 3 seeded batches at maxFilesPerBatch 1, plus the one batch with no
+    // candidates, capped to 2. The unseeded entry costs a single pair and a
+    // seeded agent can cost hundreds, so it has to survive the truncation.
+    writeFileSync(join(projectRoot, "src", "b.ts"), "export const b = 2;\n", "utf8");
+    writeFileSync(join(projectRoot, "src", "c.ts"), "export const c = 3;\n", "utf8");
+    const unscoped = writeAgent("no-scope", "");
+    const scoped = writeAgent("scoped", "where:\n  extensions:\n    - ts\n");
+    await runScan(
+      projectRoot,
+      {
+        template: [unscoped, scoped],
+        output: outputDir,
+        concurrency: 1,
+        maxFilesPerBatch: 1,
+        maxBatches: 2,
+      },
+      env,
+    );
+
+    const calls = dispatched();
+    expect(calls.length).toBe(2);
+    expect(calls.filter((c) => c.slug === "no-scope").length).toBe(1);
   });
 });

@@ -186,6 +186,29 @@ describe("warnOfficialAgents", () => {
     expect(warnings[0]).toContain("whole repository");
   });
 
+  it("warns when an agent with no file scope declares its own turn budget", () => {
+    // The 150 default applies only when the key is absent, so a declared 30
+    // silently survives deleting `extensions`.
+    const warnings = warnOfficialAgents([agentWith("no-scope", { maxTurnsPerBatch: 30 })]);
+    expect(warnings).toHaveLength(2);
+    const budget = warnings.find((w) => w.includes("maxTurnsPerBatch"));
+    expect(budget).toContain("no-scope");
+    expect(budget).toContain("30");
+    expect(budget).toContain("150");
+  });
+
+  it("is silent about the turn budget when the agent declares a file scope", () => {
+    const warnings = warnOfficialAgents([
+      agentWith("scoped", { extensions: ["ts"], maxTurnsPerBatch: 30 }),
+    ]);
+    expect(warnings).toEqual([]);
+  });
+
+  it("emits no em dash, so the warnings read as ordinary CLI copy", () => {
+    const warnings = warnOfficialAgents([agentWith("no-scope", { maxTurnsPerBatch: 30 })]);
+    for (const w of warnings) expect(w).not.toContain("\u2014");
+  });
+
   it("is silent for an agent that declares extensions", () => {
     expect(warnOfficialAgents([agentWith("scoped", { extensions: ["ts"] })])).toEqual([]);
   });
