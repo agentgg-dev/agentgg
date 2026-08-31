@@ -54,9 +54,7 @@ Browse the full documentation at **[docs.agentgg.dev](https://docs.agentgg.dev)*
 
 ## Agents
 
-An agent is one markdown file: YAML frontmatter that declares **where** to look and an optional **precondition** that decides whether the agent is worth running on this repo, plus a markdown body that is the prompt. The catalog auto-downloads on first scan from [agentgg-dev/agentgg-agents](https://github.com/agentgg-dev/agentgg-agents), and `agentgg create` turns a past incident report into a reusable agent.
-
-An agent that declares neither `extensions` nor `filePatterns` in its `where` has no file scope: it gets no pre-selected files and searches the whole repository with its own tools instead. Declare a scope whenever you can, since it's cheaper and a scoped agent can report how many candidate files it reviewed against a known total, while one with no file scope can't.
+An agent is one markdown file: YAML frontmatter that declares **where** to look and an optional **precondition** that decides whether the agent is worth running on this repo, plus a markdown body that is the prompt. An agent that declares neither `extensions` nor `filePatterns` in its `where` has no file scope: it gets no pre-selected files and searches the whole repository with its own tools instead. The catalog auto-downloads on first scan from [agentgg-dev/agentgg-agents](https://github.com/agentgg-dev/agentgg-agents), and `agentgg create` turns a past incident report into a reusable agent.
 
 Write your own: [Agent anatomy](https://docs.agentgg.dev/agents/anatomy) · [Targeting](https://docs.agentgg.dev/agents/targeting) · [Create from reports](https://docs.agentgg.dev/agents/create-from-reports)
 
