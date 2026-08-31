@@ -28,8 +28,8 @@ export type NoiseTier = z.infer<typeof NoiseTier>;
  *   3. the prompt body (markdown after the frontmatter) — the harness +
  *      detection instructions the model runs with.
  *
- * There is no `mode`: the old file / walker / hunt / rule split collapsed
- * into this one shape.
+ * There is no `mode` field: `where` plus the prompt body describe an agent
+ * completely.
  */
 
 /**

@@ -239,7 +239,7 @@ export interface Detector {
        * File-visibility knobs mirrored from the scan walk. Honored only on
        * the tool-enabled path (root set): the validator's Read/Glob/Grep
        * skip excluded paths and oversized files, so it traces the chain over
-       * the same file set the hunt saw. Ignored on the single-shot path and
+       * the same file set the agent run saw. Ignored on the single-shot path and
        * by backends whose SDK tools can't filter (Claude Agent SDK).
        */
       excludePatterns?: string[];

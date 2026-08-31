@@ -260,7 +260,7 @@ describe("an agent with no file scope", () => {
 });
 
 describe("AgentRun.seeded for a seeded agent", () => {
-  it("stays true, and filesReviewed stays the candidate count, unaffected by this task", async () => {
+  it("stays true, and filesReviewed stays the candidate count", async () => {
     suppressLogs();
     const path = writeAgent("scoped", "where:\n  extensions:\n    - ts\n");
     detectorMock.runAgent.mockImplementation(async ({ agent }) => [

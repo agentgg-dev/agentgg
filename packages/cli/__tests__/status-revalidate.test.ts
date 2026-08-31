@@ -31,7 +31,6 @@ vi.mock("../src/llm.js", async () => {
     resolveDetector: () => ({
       name: "test-mock",
       detectFile: async () => [],
-      hunt: async () => [],
       validateFinding: detectorMock.validateFinding,
     }),
   };

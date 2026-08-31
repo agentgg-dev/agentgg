@@ -127,8 +127,8 @@ export class ClaudeAgentDetector implements Detector {
       maxFileSizeKb: args.maxFileSizeKb,
     });
     // Tool-enabled survey with SDK-enforced structured output. Same
-    // mechanism as hunt — the model explores with Read/Glob/Grep and the
-    // final answer is constrained to the ReconResult schema.
+    // mechanism as an agent run — the model explores with Read/Glob/Grep
+    // and the final answer is constrained to the ReconResult schema.
     return this.runStructured({
       prompt,
       tools: ["Read", "Glob", "Grep"],
@@ -191,8 +191,8 @@ export class ClaudeAgentDetector implements Detector {
   async runAgent(args: RunAgentArgs & { signal?: AbortSignal }): Promise<Finding[]> {
     const prompt = buildAgentPrompt(args);
     // Always tool-enabled. The model investigates the seeded candidate
-    // files (or roams the repo when there are none), with SDK-enforced
-    // structured output.
+    // files, or searches the whole repository for its own targets when
+    // there are none, with SDK-enforced structured output.
     let result: z.infer<typeof DetectionResult>;
     try {
       result = await this.runStructured({
@@ -228,14 +228,14 @@ export class ClaudeAgentDetector implements Detector {
     root?: string;
     // Accepted for interface parity; the Claude Agent SDK's built-in
     // Read/Glob/Grep don't take agentgg's exclude / size filters, so —
-    // exactly like this detector's hunt path — they aren't applied here.
+    // exactly like this detector's runAgent path — they aren't applied here.
     excludePatterns?: string[];
     maxFileSizeKb?: number;
     signal?: AbortSignal;
   }) {
     const prompt = buildValidatePrompt(args);
     // Tool-enabled when a repo root is supplied: the validator gets
-    // Read/Glob/Grep (same as the hunt phase) so it can trace the exploit
+    // Read/Glob/Grep (same as the detection phase) so it can trace the exploit
     // chain across files and catch an intermediate guard the finding's own
     // file doesn't reveal, spending up to validateMaxTurns exploring.
     // Without a root it degrades to a single-shot judgement over the
@@ -321,7 +321,8 @@ export class ClaudeAgentDetector implements Detector {
    * Variant of `run` that asks the SDK to enforce a JSON schema on the
    * final output and returns the Zod-validated structured result.
    *
-   * Used by `hunt()` to skip the text→JSON parsing step entirely. The
+   * Used by the tool-enabled passes to skip the text→JSON parsing step
+   * entirely. The
    * SDK converts the schema into a tool-call-style structured-output
    * constraint at the protocol level, so the model literally cannot
    * emit fences, prose, or mistyped fields in the final answer. The

@@ -1,6 +1,6 @@
 /**
  * End-to-end proof that `experimental_repairToolCall` is wired into the agent
- * hunt and actually rescues a batch.
+ * tool loop and actually rescues a batch.
  *
  * Unlike the unit tests for `resolveMangledToolName`, nothing here is stubbed
  * except the model itself: the REAL `generateText` runs, the REAL SDK raises
@@ -56,7 +56,7 @@ function mockModel(calls: Array<Record<string, unknown>>) {
         };
       }
       regularCalls++;
-      // First hunt turn: the malformed call that used to kill the batch.
+      // First tool-loop turn: the malformed call that used to kill the batch.
       if (regularCalls === 1) {
         return {
           toolCalls: [
@@ -72,7 +72,7 @@ function mockModel(calls: Array<Record<string, unknown>>) {
           rawCall: RAW_CALL,
         };
       }
-      // Second hunt turn: the model has the tool result and finishes.
+      // Second tool-loop turn: the model has the tool result and finishes.
       return {
         text: '{"findings": []}',
         finishReason: "stop" as const,

@@ -6,9 +6,9 @@
  * the rolling window.
  *
  * Designed to be installed below the AI SDK by wrapping `fetch` — that
- * way every HTTP call (each step of a hunt tool loop, every file-mode
- * call, every validation) is throttled automatically, without having
- * to thread state through the SDK.
+ * way every HTTP call (each step of an agent's tool loop, every
+ * structured-output call, every validation) is throttled automatically,
+ * without having to thread state through the SDK.
  */
 import { logInfo, logWarn } from "./log.js";
 export class TpmBucket {

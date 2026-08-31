@@ -1,6 +1,12 @@
 import { existsSync, statSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
-import { type Agent, getOfficialAgentsDir, loadAgentsFromDir, NoiseTier } from "@agentgg/core";
+import {
+  type Agent,
+  getOfficialAgentsDir,
+  hasFileScope,
+  loadAgentsFromDir,
+  NoiseTier,
+} from "@agentgg/core";
 import type { Command } from "commander";
 import { lintOfficialAgents, loadAllAgents, warnOfficialAgents } from "../agent-catalog.js";
 import { addAgents, getCustomAgentsDir, removeAgent } from "../agents-fs.js";
@@ -40,9 +46,9 @@ export function formatAgentsTable(
   const rows = agents.map((a) => ({
     slug: a.slug,
     category: getCategory(a, env),
-    // "all" = empty where (every file); "scoped" = extensions/patterns set.
-    // Replaces the old `mode` column.
-    mode: a.where.filePatterns.length === 0 && a.where.extensions.length === 0 ? "all" : "scoped",
+    // "all" = no declared file scope, so the whole repository; "scoped" =
+    // extensions/patterns set. Replaces the old `mode` column.
+    mode: hasFileScope(a) ? "scoped" : "all",
     noise: a.noiseTier,
     description: truncate(a.description, 56),
   }));
@@ -184,12 +190,7 @@ export function registerAgentsCommand(program: Command): void {
         const filtered = all.filter(
           (a) =>
             matches(categories, getCategory(a)) &&
-            matches(
-              modes,
-              a.where.filePatterns.length === 0 && a.where.extensions.length === 0
-                ? "all"
-                : "scoped",
-            ) &&
+            matches(modes, hasFileScope(a) ? "scoped" : "all") &&
             matches(noises, a.noiseTier),
         );
 

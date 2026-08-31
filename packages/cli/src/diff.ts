@@ -108,7 +108,7 @@ function gitShow(commit: string, cwd: string): string {
       }
       if (e.code === "ENOBUFS") {
         throw new Error(
-          `git diff ${commit} produced a patch larger than 64 MB — the range is too wide to inject into a hunt prompt; narrow the scan.`,
+          `git diff ${commit} produced a patch larger than 64 MB. The range is too wide to include in the agent prompt, so narrow the scan.`,
         );
       }
       const stderr = (e.stderr ?? "").toString().trim();
@@ -137,7 +137,7 @@ function gitShow(commit: string, cwd: string): string {
     }
     if (e.code === "ENOBUFS") {
       throw new Error(
-        `git show ${commit} produced a patch larger than 64 MB — likely a vendored-code or generated-file commit. That's too large to inject into a hunt prompt; review it manually or narrow the scan.`,
+        `git show ${commit} produced a patch larger than 64 MB, likely a vendored-code or generated-file commit. That is too large to include in the agent prompt, so review it manually or narrow the scan.`,
       );
     }
     const stderr = (e.stderr ?? "").toString().trim();

@@ -449,9 +449,11 @@ export function resolveMangledToolName(mangled: string, available: string[]): st
 }
 
 /**
- * Detector backed by the Vercel AI SDK's `generateText` for hunt/walker
- * modes (with Read/Glob/Grep tool implementations) and `generateObject`
- * for file mode and validation. Works with any Vercel AI SDK provider —
+ * Detector backed by the Vercel AI SDK. `generateText` drives the
+ * tool loops (recon and agent runs, with Read/Glob/Grep tool
+ * implementations); `generateObject` produces the one-shot structured
+ * answers. That distinction is about how the model is driven, not about
+ * how an agent selects files. Works with any Vercel AI SDK provider —
  * OpenAI, Ollama, etc. — that supports function/tool calling.
  */
 export class VercelAgentDetector implements Detector {
@@ -702,7 +704,7 @@ export class VercelAgentDetector implements Detector {
     const base = buildAgentPrompt(args);
     const prompt = `${base}\n\n${jsonOutputInstruction(false)}`;
     const label = `runAgent:${args.agent.slug}`;
-    const hunt = (budgetBytes: number, maxTurns: number) =>
+    const runToolLoop = (budgetBytes: number, maxTurns: number) =>
       this.metered(
         () =>
           generateText({
@@ -725,14 +727,14 @@ export class VercelAgentDetector implements Detector {
         { label, signal: args.signal },
       );
     try {
-      let gen: Awaited<ReturnType<typeof hunt>>;
+      let gen: Awaited<ReturnType<typeof runToolLoop>>;
       let effectiveTurns = args.maxTurns;
       try {
-        gen = await hunt(toolOutputBudgetBytes("detect"), effectiveTurns);
+        gen = await runToolLoop(toolOutputBudgetBytes("detect"), effectiveTurns);
       } catch (err) {
         // Context overflow: the accumulated tool transcript outgrew the window.
         // Re-sending it unchanged can't work, which is why withTpmRetry refuses
-        // to retry — but a SMALLER hunt can. The transcript grows with both the
+        // to retry — but a SMALLER loop can. The transcript grows with both the
         // bytes read and the number of turns those bytes get re-sent across, so
         // halve each. Once only: a second overflow means the batch itself is too
         // big for this model, and that is a planning problem, not a retry one.
@@ -741,7 +743,7 @@ export class VercelAgentDetector implements Detector {
           `${label}: context overflow; retrying this batch at half the read budget and turn cap`,
         );
         effectiveTurns = Math.floor(args.maxTurns / 2);
-        gen = await hunt(Math.floor(toolOutputBudgetBytes("detect") / 2), effectiveTurns);
+        gen = await runToolLoop(Math.floor(toolOutputBudgetBytes("detect") / 2), effectiveTurns);
       }
       // The tool loop can burn its whole budget without ever emitting findings
       // JSON — typically the model degenerates into repeating one tool call.
@@ -850,12 +852,12 @@ export class VercelAgentDetector implements Detector {
         );
         return asValidationField(object);
       }
-      // Tool-enabled path: same generateText + tool-loop shape as hunt
+      // Tool-enabled path: same generateText + tool-loop shape as runAgent
       // (runAgent), so the validator can Read/Glob/Grep across files to
       // trace the exploit chain. Structured output is recovered from the
       // final message via parseValidation (with a structuredModel reformat
       // fallback), because this SDK can't combine tools with generateObject.
-      // Same exclude / size knobs as the hunt so validation and detection
+      // Same exclude / size knobs as the agent run so validation and detection
       // see the same file set.
       const label = `validate:${args.finding.id}`;
       const prompt = `${buildValidatePrompt(args)}\n\n${validationJsonInstruction()}`;

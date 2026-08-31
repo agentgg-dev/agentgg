@@ -111,11 +111,11 @@ export function buildUserConfig(input: InitInput): UserConfig {
   }
 }
 
-// Models known to reliably handle tool-calling for Ollama hunt/walker
-// mode. General rule: ≥14B parameters. Below that, instruction following
+// Models known to reliably handle tool-calling for Ollama agent runs.
+// General rule: ≥14B parameters. Below that, instruction following
 // is too inconsistent for multi-step agentic investigation. Lives here
 // (not on the ollama module) because it's purely a wizard-UX hint.
-const OLLAMA_HUNT_CAPABLE = [
+const OLLAMA_TOOL_CAPABLE = [
   "qwen2.5:14b",
   "qwen2.5:32b",
   "qwen2.5:72b",
@@ -134,9 +134,9 @@ const OLLAMA_HUNT_CAPABLE = [
   "command-r-plus",
 ];
 
-function isHuntCapable(model: string): boolean {
+function isToolCapable(model: string): boolean {
   const lower = model.toLowerCase();
-  return OLLAMA_HUNT_CAPABLE.some(
+  return OLLAMA_TOOL_CAPABLE.some(
     (cap) => lower === cap || lower.startsWith(`${cap}:`) || lower.startsWith(`${cap}-`),
   );
 }
@@ -165,8 +165,8 @@ async function pickModel(
           "(qwen2.5:32b, llama3.1:70b, deepseek-r1:14b…). Smaller models are less\n" +
           "reliable at driving the tool loop.\n",
       );
-      const capable = installed.filter(isHuntCapable);
-      const rest = installed.filter((m) => !isHuntCapable(m));
+      const capable = installed.filter(isToolCapable);
+      const rest = installed.filter((m) => !isToolCapable(m));
       const choices = [
         ...capable.map((m) => ({ name: `${m}  ← recommended`, value: m })),
         ...rest.map((m) => ({

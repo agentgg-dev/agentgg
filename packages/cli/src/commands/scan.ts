@@ -308,7 +308,7 @@ export async function runScan(
   // so it doesn't sit in `phase: "running"` forever, then exit with the
   // conventional 128+signal code. Files already persisted stay on disk
   // and a re-run with the same --output resumes past them (see
-  // contentHash skip in the file-mode loop below). SIGTERM matters when
+  // contentHash skip in the per-file loop below). SIGTERM matters when
   // the CLI runs inside a Cloud Run Job — `gcloud run jobs executions
   // cancel` sends SIGTERM, and without this handler Node's default would
   // kill the process immediately, leaving no audit trail of why.
@@ -1257,7 +1257,7 @@ export async function runScan(
       const batches = packBatches(pending, batchSize, maxAnchorsPerBatch);
 
       // Only agents that declare a semgrep rule get the attribution suffix, so
-      // the other 159 agents' output is unchanged.
+      // every other agent's output is unchanged.
       const anchorNote = declaresSemgrep
         ? `, ${preFilterHits.regex + preFilterHits.semgrep} anchor(s) (semgrep ${preFilterHits.semgrep}, regex ${preFilterHits.regex})`
         : "";
@@ -2021,7 +2021,7 @@ function sameSet(a: string[], b: string[]): boolean {
 /**
  * Human-readable explanation of which scope field caused a mismatch.
  * Only called from the verbose-mode diagnostic log so the user can see
- * *why* a hunt sidecar got ignored on resume.
+ * *why* an agent's sidecar got ignored on resume.
  */
 function scopeMismatchReason(prior: AgentRun["scope"], current: AgentRun["scope"]): string {
   if (prior.diff !== current.diff) {

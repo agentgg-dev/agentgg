@@ -3,14 +3,14 @@
  *
  * Why this exists: the agent tool-loop transcript grows with both the bytes the
  * tools return AND the number of turns those bytes get re-sent across, so a
- * long hunt on a big repo can blow the model's context window mid-batch. That
+ * long agent run on a big repo can blow the model's context window mid-batch. That
  * throws out of `generateText`, which fails the batch, which sets `rt.failed`,
  * which suppresses the agent's resume sidecar — and the platform then marks the
  * whole agent failed. Prod scan 764dbd1d lost `missing-access-control` this way
  * on 2026-08-18 (1,241,542 tokens requested against a 1,048,576 limit).
  *
  * Re-sending the same request can't work, which is why `withTpmRetry` refuses
- * to retry it. A SMALLER hunt can, so `runAgent` retries once at half the read
+ * to retry it. A SMALLER loop can, so `runAgent` retries once at half the read
  * budget and half the turn cap. Once only, and only for this error class.
  *
  * `generateText` is mocked: these assert the retry routing, not the model.
@@ -66,7 +66,7 @@ describe("runAgent context-overflow retry", () => {
 
     expect(findings).toEqual([]);
     expect(generateTextMock).toHaveBeenCalledTimes(2);
-    // maxSteps is maxTurns + 1: 51 on the first hunt, 26 on the shrunk retry.
+    // maxSteps is maxTurns + 1: 51 on the first attempt, 26 on the shrunk retry.
     expect(generateTextMock.mock.calls[0]?.[0].maxSteps).toBe(51);
     expect(generateTextMock.mock.calls[1]?.[0].maxSteps).toBe(26);
   });

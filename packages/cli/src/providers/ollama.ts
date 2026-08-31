@@ -8,8 +8,8 @@ import type { CollectCredentialsArgs, ProviderModule, ResolveOptions } from "./t
 const DEFAULT_MODEL = "qwen2.5";
 const DEFAULT_BASE_URL = "http://localhost:11434";
 
-// Ollama's default num_ctx (2048) chokes the hunt loop — bump to a
-// workable size for tool-calling and file-mode reads. See llm.ts
+// Ollama's default num_ctx (2048) chokes the tool loop — bump to a
+// workable size for tool-calling and structured-output reads. See llm.ts
 // history for the chat-template-leakage bug this prevents.
 const NUM_CTX = 16384;
 
@@ -22,7 +22,7 @@ function buildDetector(config: UserConfig, options: ResolveOptions): Detector {
   }
   const modelName = options.model ?? config.ollama?.model ?? DEFAULT_MODEL;
   const ollama = createOllama({ baseURL: `${baseUrl}/api` });
-  // structuredOutputs:true is required for generateObject (file mode);
+  // structuredOutputs:true is required for generateObject;
   // tool-calling sessions must NOT set it, or the model emits the
   // example JSON template verbatim instead of reasoning about tool results.
   const structuredModel = ollama(modelName, { structuredOutputs: true, numCtx: NUM_CTX });
