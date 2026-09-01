@@ -43,6 +43,29 @@ describe("parseAgentMarkdown", () => {
     expect(agent.prompt.endsWith("\n")).toBe(false);
   });
 
+  it("reads a multi-line validationPrompt from frontmatter", () => {
+    const md = `---
+slug: hardcoded-secret
+name: Hard-coded secret
+description: Detects credentials committed to source.
+validationPrompt: |
+  Confirm only when the literal is a live credential.
+  A test fixture or an example key is a false-positive.
+where:
+  extensions: [ts]
+---
+
+Look for credentials committed to source.
+`;
+    const agent = parseAgentMarkdown(md);
+    expect(agent.validationPrompt).toContain("live credential");
+    expect(agent.validationPrompt).toContain("false-positive");
+  });
+
+  it("leaves validationPrompt undefined when the agent omits it", () => {
+    expect(parseAgentMarkdown(VALID_MD).validationPrompt).toBeUndefined();
+  });
+
   it("stamps source when provided", () => {
     const agent = parseAgentMarkdown(VALID_MD, {
       kind: "community",

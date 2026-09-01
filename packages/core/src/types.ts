@@ -264,6 +264,16 @@ export const Agent = z.object({
   references: z.array(z.string()).optional(),
   /** The prompt body (markdown content after the frontmatter). */
   prompt: z.string(),
+  /**
+   * This agent's own validation rules, used instead of the validator's
+   * default judgement rules when `--validate` classifies a finding this
+   * agent reported. Write only the confirm/dismiss criteria for this bug
+   * class: the validator still injects the finding, the source, the
+   * cross-file tracing block, the scope block and the verdict contract
+   * around it, and places this text last. Scope-only validation
+   * (`--scope-validate`) ignores it, because it never reads the code.
+   */
+  validationPrompt: z.string().optional(),
   /** Where this agent came from. Set by the loader, not by the author. */
   source: z
     .object({

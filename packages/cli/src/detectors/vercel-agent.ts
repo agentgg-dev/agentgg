@@ -841,6 +841,8 @@ export class VercelAgentDetector implements Detector {
     root?: string;
     excludePatterns?: string[];
     maxFileSizeKb?: number;
+    /** The reporting agent's own validation rules; replaces the defaults. */
+    validationPrompt?: string;
     signal?: AbortSignal;
   }) {
     try {

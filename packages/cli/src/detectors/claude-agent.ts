@@ -231,6 +231,8 @@ export class ClaudeAgentDetector implements Detector {
     // exactly like this detector's runAgent path — they aren't applied here.
     excludePatterns?: string[];
     maxFileSizeKb?: number;
+    /** The reporting agent's own validation rules; replaces the defaults. */
+    validationPrompt?: string;
     signal?: AbortSignal;
   }) {
     const prompt = buildValidatePrompt(args);

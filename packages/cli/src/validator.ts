@@ -85,8 +85,19 @@ export function buildValidatePrompt(args: {
    * isolation. When omitted, the model only has the embedded file.
    */
   root?: string;
+  /**
+   * The reporting agent's own validation rules, from its frontmatter
+   * `validationPrompt`. When set, it REPLACES the default judgement rules
+   * at the top and the default confirm criteria at the bottom, and is
+   * placed last so it is the final instruction the model reads. The
+   * finding, the source, the tracing block, the scope block and the
+   * verdict contract are always injected either way, so the answer
+   * schema can not break.
+   */
+  validationPrompt?: string;
 }): string {
-  const { finding, fileContent, scope, root } = args;
+  const { finding, fileContent, scope, root, validationPrompt } = args;
+  const custom = validationPrompt?.trim();
   const lang = languageFromPath(finding.filePath);
   const lineHint = finding.lineRange
     ? `lines ${finding.lineRange[0]}–${finding.lineRange[1]}`
@@ -153,9 +164,9 @@ NOT confirm the original writeup in that case.
 `
     : "";
 
-  return `You are reviewing a security finding produced by another agent.
-Your job is to classify it by re-examining the source code yourself.
-
+  const rulesBlock = custom
+    ? ""
+    : `
 Be skeptical. Detection agents over-report. Reserve 'confirmed' for
 findings you are certain are a genuine, exploitable security
 vulnerability: the kind you would stake a CVE, a security advisory, or a
@@ -173,7 +184,23 @@ or you could not fully verify reachability. 'uncertain' is the correct
 home for "there is probably something here, but not the clean, certain,
 report-it-upstream finding that was described." Confirming a shaky or
 mischaracterized finding is worse than an honest 'uncertain'.
+`;
 
+  // Last thing the model reads before it answers: either the agent's own
+  // rules or the default confirm criteria. Never both.
+  const tailBlock = custom
+    ? `
+${custom}`
+    : `
+'confirmed' requires ALL of: you traced a working exploit path end to
+end, it is reachable by the relevant attacker, and the finding as
+reported is accurate. If the PoC as written would not work but a real
+issue may still exist, return 'uncertain', not 'confirmed'. If there is
+no real vulnerability at all, return 'false-positive'.`;
+
+  return `You are reviewing a security finding produced by another agent.
+Your job is to classify it by re-examining the source code yourself.
+${rulesBlock}
 ## The finding
 
 **Title:** ${finding.title}
@@ -204,12 +231,7 @@ ${tracingBlock}${scopeBlock}
 
 Return a verdict (${verdictOptions}), a short reasoning (max 4
 sentences, cite a specific code element), and your confidence.
-${scopeVerdictNote}
-'confirmed' requires ALL of: you traced a working exploit path end to
-end, it is reachable by the relevant attacker, and the finding as
-reported is accurate. If the PoC as written would not work but a real
-issue may still exist, return 'uncertain', not 'confirmed'. If there is
-no real vulnerability at all, return 'false-positive'.`;
+${scopeVerdictNote}${tailBlock}`;
 }
 
 /**

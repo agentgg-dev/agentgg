@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import type { FileRecord, Finding, Provider } from "@agentgg/core";
+import type { Agent, FileRecord, Finding, Provider } from "@agentgg/core";
 import {
   completeRun,
   createRunMeta,
@@ -10,6 +10,7 @@ import {
   writeRunMeta,
 } from "@agentgg/core";
 import type { Command } from "commander";
+import { loadAllAgents } from "../agent-catalog.js";
 import { runConcurrent } from "../concurrent.js";
 import { loadDefaultScope } from "../default-scope.js";
 import { handleDetectorError } from "../diagnostics.js";
@@ -194,6 +195,26 @@ export async function runRevalidate(
   const startedAt = new Date();
   const verdicts: Record<string, number> = {};
   const fileCache = new Map<string, string | null>();
+  // A finding only carries `agentSlug`, so resolve its reporting agent from
+  // the catalog. This makes an agent-authored `validationPrompt` apply here
+  // exactly as it does under `scan --validate`. A catalog that fails to load,
+  // or an agent renamed or removed since the scan, leaves the map empty for
+  // that slug and the validator keeps its default rules.
+  const agentBySlug = new Map<string, Agent>();
+  if (!scopeOnlyValidate) {
+    try {
+      for (const agent of loadAllAgents().agents) agentBySlug.set(agent.slug, agent);
+    } catch (err) {
+      if (opts.verbose) logError(`Could not load agents: ${(err as Error).message}`);
+    }
+    const withCustom = tasks.filter(
+      ({ finding }) => agentBySlug.get(finding.agentSlug)?.validationPrompt,
+    ).length;
+    if (withCustom > 0) {
+      console.log(`  ${withCustom} finding(s) use their agent's own validation prompt
+`);
+    }
+  }
   // Track which records actually changed so we don't rewrite every
   // FileRecord on disk for no reason.
   const dirtyRecords = new Set<FileRecord>();
@@ -259,6 +280,7 @@ export async function runRevalidate(
         fileContent: content,
         scope: scopeContent,
         root: rootPath,
+        validationPrompt: agentBySlug.get(finding.agentSlug)?.validationPrompt,
         signal: revalidateAbortController.signal,
       });
       // Mutate in place — the record points to the same Finding

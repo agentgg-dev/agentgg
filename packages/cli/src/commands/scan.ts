@@ -1519,6 +1519,19 @@ export async function runScan(
           `\nValidating ${validatable.length} finding(s)${scopeNote}${carryNote}${modeNote} at concurrency ${concurrency}`,
         );
         const fileCache = new Map<string, string | null>();
+        // A finding only carries `agentSlug`, so resolve its reporting agent
+        // here to pick up an agent-authored `validationPrompt`. Built from the
+        // whole catalog, not the selection: a finding restored from a prior
+        // run can come from an agent this run's `-t` filter left out.
+        const agentBySlug = new Map(catalog.agents.map((a) => [a.slug, a]));
+        if (!scopeOnlyValidate) {
+          const withCustomPrompt = validatable.filter(
+            (f) => agentBySlug.get(f.agentSlug)?.validationPrompt,
+          ).length;
+          if (withCustomPrompt > 0) {
+            console.log(`  ${withCustomPrompt} use their agent's own validation prompt`);
+          }
+        }
         // One bounded pool over findings. Each finding is a distinct object
         // and fileCache is only touched in await-free regions, so workers
         // don't race; verdicts are persisted below once the pool drains.
@@ -1576,6 +1589,9 @@ export async function runScan(
               // as detection, so the validator can't read past --exclude.
               excludePatterns: walkExcludes,
               maxFileSizeKb,
+              // Undefined when the agent declares none, or when its slug is no
+              // longer in the catalog: the validator falls back to its defaults.
+              validationPrompt: agentBySlug.get(finding.agentSlug)?.validationPrompt,
               signal: scanAbortController.signal,
             });
             finding.validation = {

@@ -118,6 +118,61 @@ describe("buildValidatePrompt", () => {
     });
     expect(out).not.toContain("## Scope rules");
   });
+
+  it("keeps the default judgement rules when the agent supplies no prompt", () => {
+    const out = buildValidatePrompt({
+      finding: makeFinding(),
+      fileContent: "x",
+    });
+    expect(out).toContain("Be skeptical");
+    expect(out).toContain("'confirmed' requires ALL of");
+  });
+
+  it("replaces the default judgement rules with the agent's validation prompt", () => {
+    const out = buildValidatePrompt({
+      finding: makeFinding(),
+      fileContent: "x",
+      validationPrompt: "AGENT_RULES: confirm only live credentials.",
+    });
+    expect(out).toContain("AGENT_RULES: confirm only live credentials.");
+    expect(out).not.toContain("Be skeptical");
+    expect(out).not.toContain("'confirmed' requires ALL of");
+  });
+
+  it("places the agent's validation prompt after the finding and the source code", () => {
+    const out = buildValidatePrompt({
+      finding: makeFinding(),
+      fileContent: "const UNIQUE_TOKEN = 1;",
+      validationPrompt: "AGENT_RULES_TOKEN",
+    });
+    expect(out.indexOf("AGENT_RULES_TOKEN")).toBeGreaterThan(out.indexOf("UNIQUE_TOKEN"));
+  });
+
+  it("keeps the injected blocks and the verdict contract with a custom prompt", () => {
+    const finding = makeFinding();
+    const out = buildValidatePrompt({
+      finding,
+      fileContent: "const UNIQUE_TOKEN = 1;",
+      scope: "UNIQUE_SCOPE_TOKEN",
+      root: "/repo",
+      validationPrompt: "AGENT_RULES_TOKEN",
+    });
+    expect(out).toContain("You are reviewing a security finding");
+    expect(out).toContain(finding.title);
+    expect(out).toContain("UNIQUE_TOKEN");
+    expect(out).toContain("UNIQUE_SCOPE_TOKEN");
+    expect(out).toContain("Trace the chain across files");
+    expect(out).toContain("Return a verdict");
+  });
+
+  it("ignores a blank validation prompt and keeps the default rules", () => {
+    const out = buildValidatePrompt({
+      finding: makeFinding(),
+      fileContent: "x",
+      validationPrompt: "   ",
+    });
+    expect(out).toContain("Be skeptical");
+  });
 });
 
 describe("LlmValidation schema", () => {

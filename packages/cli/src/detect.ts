@@ -244,6 +244,13 @@ export interface Detector {
        */
       excludePatterns?: string[];
       maxFileSizeKb?: number;
+      /**
+       * The reporting agent's `validationPrompt`, when it declares one.
+       * Replaces the validator's default judgement rules for this finding
+       * only. The caller resolves it from `finding.agentSlug`; a missing
+       * agent just means the default rules apply.
+       */
+      validationPrompt?: string;
     } & AbortableArgs,
   ): Promise<{
     verdict: "confirmed" | "false-positive" | "out-of-scope" | "uncertain";
