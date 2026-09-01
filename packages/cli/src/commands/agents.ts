@@ -320,4 +320,28 @@ export function registerAgentsCommand(program: Command): void {
         process.exit(1);
       }
     });
+
+  agents
+    .command("install <ref>")
+    .description(
+      "install the catalog at an exact version: a version number (0.1.29), a release " +
+        "tag, a commit SHA or a branch. Always re-downloads. Use `agents update` to go " +
+        "back to the latest release",
+    )
+    .action(async (ref: string) => {
+      const installed = getInstalledVersion();
+      if (installed) {
+        logInfo(`Current version: ${installed.version} (installed ${installed.installedAt})`);
+      }
+      logInfo(`Installing agentgg-agents at ${ref}...`);
+      try {
+        const { version, count } = await installOfficialAgents(process.env, { ref });
+        logInfo(
+          `Successfully installed agentgg-agents at ~/.agentgg/agentgg-agents (${count} agents, ${version})`,
+        );
+      } catch (err) {
+        logError(`Install failed: ${(err as Error).message}`);
+        process.exit(1);
+      }
+    });
 }

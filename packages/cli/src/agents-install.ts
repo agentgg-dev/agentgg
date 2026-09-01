@@ -104,6 +104,16 @@ async function fetchLatestRelease(): Promise<{ tag: string; zipUrl: string } | n
 }
 
 /**
+ * Releases are tagged `v0.1.29`, but a person types `0.1.29`. Add the prefix so
+ * a version number works as typed, and so the marker records the same string
+ * `agents update` writes — otherwise the update check reports an update on a
+ * catalog that is already current. A commit SHA is hex, so it never matches.
+ */
+function normalizeRef(ref: string): string {
+  return /^\d+\.\d+\.\d+/.test(ref) ? `v${ref}` : ref;
+}
+
+/**
  * Download and install all official agents from the agentgg-agents GitHub repo
  * into `~/.agentgg/agentgg-agents/`. Mirrors how nuclei auto-downloads templates
  * on first run and how `nuclei -update-templates` refreshes them.
@@ -112,33 +122,48 @@ async function fetchLatestRelease(): Promise<{ tag: string; zipUrl: string } | n
  * the main branch archive if no releases exist), extracts all `.md` agent files,
  * and writes a `.version.json` marker so subsequent calls are no-ops unless the
  * remote version changed.
+ *
+ * `ref` pins the install to one exact point in the repo — a version number, a
+ * release tag, a commit SHA or a branch. It is what `agentgg agents install
+ * <ref>` passes, and what a deployment uses to make an image reproducible.
  */
 export async function installOfficialAgents(
   env: NodeJS.ProcessEnv = process.env,
-  opts: { force?: boolean } = {},
+  opts: { force?: boolean; ref?: string } = {},
 ): Promise<{ version: string; count: number }> {
   const officialDir = getOfficialAgentsDir(env);
 
-  const release = await fetchLatestRelease();
-  const version = release?.tag ?? "main";
+  const ref = opts.ref ? normalizeRef(opts.ref) : undefined;
+
+  // An explicit ref needs no release lookup: we already know what to fetch.
+  const release = ref ? null : await fetchLatestRelease();
+  const version = ref ?? release?.tag ?? "main";
 
   // No-op if already on the current released version. The "main" fallback
   // (used when the repo has no releases yet) is a mutable branch, so it must
   // always re-fetch — comparing the literal string "main" to itself would
-  // pin the install forever.
-  if (!opts.force && version !== "main") {
+  // pin the install forever. An explicit ref skips the check for the same
+  // reason: a branch moves under a name that does not change, and nothing
+  // here can tell a branch from a tag.
+  if (!ref && !opts.force && version !== "main") {
     const installed = getInstalledVersion(env);
     if (installed?.version === version && existsSync(officialDir)) {
       return { version, count: countAgentFiles(officialDir) };
     }
   }
 
-  // Fall back to the main branch archive when the repo has no releases yet
-  const zipUrl = release?.zipUrl ?? `https://github.com/${AGENTS_REPO}/archive/refs/heads/main.zip`;
+  // The zipball endpoint takes a tag, a SHA or a branch, so one URL covers
+  // every ref. Left unencoded because a branch name may contain a slash.
+  // Fall back to the main branch archive when the repo has no releases yet.
+  const zipUrl = ref
+    ? `${GITHUB_API}/repos/${AGENTS_REPO}/zipball/${ref}`
+    : (release?.zipUrl ?? `https://github.com/${AGENTS_REPO}/archive/refs/heads/main.zip`);
 
   const res = await fetch(zipUrl, { headers: { "User-Agent": "agentgg-cli" } });
   if (!res.ok) {
-    throw new Error(`Failed to download agentgg-agents: ${res.status} ${res.statusText}`);
+    throw new Error(
+      `Failed to download agentgg-agents ${version}: ${res.status} ${res.statusText}`,
+    );
   }
   const buf = Buffer.from(await res.arrayBuffer());
 
