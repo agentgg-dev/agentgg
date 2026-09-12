@@ -249,3 +249,79 @@ describe("runAgent — forced answer carries the schema", () => {
     await expect(detector.runAgent(args)).rejects.toThrow(/without writing an answer/);
   });
 });
+
+/**
+ * The validator's forced answer.
+ *
+ * Detection re-asks with the transcript, no tools, and the findings schema when
+ * its loop ends with no text. Validation had no retry at all: an empty loop fell
+ * straight through to `uncertain` + cut-short. Test 2 (2026-09-12) made that the
+ * bottleneck: 5 validate sessions lost their tools to stalled repeats, one hit
+ * the 60-turn cap, and 9 findings came back unresolved. The verdict schema is
+ * small, so a schema-constrained retry is very likely to land.
+ */
+describe("validateFinding — forced answer carries the verdict schema", () => {
+  /** Replies in order, recording the `mode` and tool presence of each request. */
+  function scriptedModel(texts: string[]) {
+    const modes: string[] = [];
+    const hadTools: boolean[] = [];
+    let n = 0;
+    const model = new MockLanguageModelV1({
+      defaultObjectGenerationMode: "json",
+      doGenerate: async (options) => {
+        const mode = options.mode as { type: string; tools?: unknown[] };
+        modes.push(mode.type);
+        hadTools.push((mode.tools?.length ?? 0) > 0);
+        return {
+          rawCall: { rawPrompt: null, rawSettings: {} },
+          finishReason: "stop" as const,
+          usage: { promptTokens: 10, completionTokens: 0 },
+          text: texts[Math.min(n++, texts.length - 1)],
+        };
+      },
+    });
+    return { model, modes, hadTools };
+  }
+
+  const verdict = JSON.stringify({
+    verdict: "confirmed",
+    reasoning: "The schema name reaches the SQL string with no escaping.",
+    confidence: 0.85,
+  });
+
+  const validateArgs = (model: MockLanguageModelV1) => ({
+    detector: new VercelAgentDetector("openai", model),
+    args: { finding: makeFinding(), fileContent: "<div/>", root: rootDir },
+  });
+
+  it("records the verdict the schema retry produced, not cut-short", async () => {
+    const { model } = scriptedModel(["", verdict]);
+    const { detector, args } = validateArgs(model);
+
+    const result = await detector.validateFinding(args);
+
+    expect(result.verdict).toBe("confirmed");
+    expect(result.reasoning).not.toBe(VALIDATION_CUT_SHORT);
+  });
+
+  it("re-asks in object mode with the tools removed", async () => {
+    const { model, modes, hadTools } = scriptedModel(["", verdict]);
+    const { detector, args } = validateArgs(model);
+
+    await detector.validateFinding(args);
+
+    expect(hadTools[0]).toBe(true);
+    expect(hadTools[1]).toBe(false);
+    expect(modes[1]).toBe("object-json");
+  });
+
+  it("still records cut-short when even the schema retry yields nothing", async () => {
+    const { model } = scriptedModel(["", ""]);
+    const { detector, args } = validateArgs(model);
+
+    const result = await detector.validateFinding(args);
+
+    expect(result.verdict).toBe("uncertain");
+    expect(result.reasoning).toBe(VALIDATION_CUT_SHORT);
+  });
+});

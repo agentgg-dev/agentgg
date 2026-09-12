@@ -13,7 +13,7 @@ import {
   tool,
 } from "ai";
 import { Minimatch, minimatch } from "minimatch";
-import { z } from "zod";
+import { type ZodSchema, z } from "zod";
 import { AgentSpec } from "../agent-spec.js";
 import { buildDedupePrompt, LlmDedup } from "../deduper.js";
 import {
@@ -855,11 +855,13 @@ export class VercelAgentDetector implements Detector {
    * model cannot ignore. Costs one call, and only for a batch that would
    * otherwise produce nothing.
    */
-  private async answerWithoutTools(
+  private async answerWithoutTools<T>(
     label: string,
     prompt: string,
     gen: { response: { messages: CoreMessage[] } },
     phase: ToolLoopPhase,
+    schema: ZodSchema<T>,
+    summarize: (value: T) => string,
     signal?: AbortSignal,
   ): Promise<string> {
     const messages: CoreMessage[] = [
@@ -882,7 +884,7 @@ export class VercelAgentDetector implements Detector {
         () =>
           generateObject({
             model: this.model,
-            schema: DetectionResult,
+            schema,
             mode: this.objectMode,
             messages,
             providerOptions: this.providerOptionsArg(),
@@ -891,8 +893,8 @@ export class VercelAgentDetector implements Detector {
         { label, signal },
       );
       logWarn(
-        `[${label}] answered against the findings schema after the loop ran out of turns ` +
-          `(${object.findings.length} finding(s))`,
+        `[${label}] answered against the ${ARTIFACT[phase]} schema after the loop ran out ` +
+          `of turns (${summarize(object)})`,
       );
       // Re-serialized rather than returned as an object: the caller parses the
       // answer either way, so one path stays downstream of this.
@@ -999,7 +1001,15 @@ export class VercelAgentDetector implements Detector {
       let answer = gen.text;
       if (!answer.trim()) {
         logUnparseableGeneration(label, gen);
-        answer = await this.answerWithoutTools(label, prompt, gen, "detect", args.signal);
+        answer = await this.answerWithoutTools(
+          label,
+          prompt,
+          gen,
+          "detect",
+          DetectionResult,
+          (o) => `${o.findings.length} finding(s)`,
+          args.signal,
+        );
       }
       if (!answer.trim()) {
         throw new ExpectedDetectorError(
@@ -1126,8 +1136,24 @@ export class VercelAgentDetector implements Detector {
       // these two lines that is completely silent: the finding shows a
       // confident-looking `uncertain` and no log says the loop was cut short.
       warnIfTurnCapped(label, gen, this.validateMaxTurns);
-      if (!gen.text.trim()) logUnparseableGeneration(label, gen);
-      return await this.parseValidation(gen.text, args.finding.id, args.signal);
+      let answer = gen.text;
+      if (!answer.trim()) {
+        logUnparseableGeneration(label, gen);
+        // Same last chance detection gets. Test 2 (2026-09-12) moved the stall
+        // here: 5 validate sessions lost their tools to repeats and one hit the
+        // turn cap, and every one of those was recorded `uncertain` without a
+        // second ask. The verdict schema is small, so this usually lands.
+        answer = await this.answerWithoutTools(
+          label,
+          prompt,
+          gen,
+          "validate",
+          LlmValidation,
+          (o) => `verdict ${o.verdict}`,
+          args.signal,
+        );
+      }
+      return await this.parseValidation(answer, args.finding.id, args.signal);
     } catch (err) {
       debugLog("VercelAgentDetector.validateFinding", err);
       throw err;
