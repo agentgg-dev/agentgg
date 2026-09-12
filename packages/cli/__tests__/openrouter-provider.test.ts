@@ -301,13 +301,22 @@ describe("createRoutingFetch output caps", () => {
   };
 
   it("caps total output so a runaway generation cannot run to six figures", async () => {
-    expect((await send({})).max_tokens).toBe(32_000);
+    expect((await send({})).max_tokens).toBe(64_000);
   });
 
-  it("caps reasoning below the total, so the answer still has room", async () => {
-    const sent = await send({});
-    expect(sent.reasoning).toEqual({ max_tokens: 8_000 });
-    expect(sent.reasoning.max_tokens).toBeLessThan(sent.max_tokens);
+  // Run A (2026-09-12) hit the old 32k cap eight times with textChars=0: the
+  // model spends its whole output budget on reasoning and writes nothing. One
+  // of those became the run's only failed batch. The cap has to leave room for
+  // an answer AFTER a long think, not squeeze the think.
+  it("leaves room for an answer after a long reasoning spend", async () => {
+    expect((await send({})).max_tokens).toBeGreaterThan(2 * 32_000 - 1);
+  });
+
+  // GLM-5.2 ignores reasoning.max_tokens, so shipping one bought nothing here
+  // and would throttle a model that DOES honor it. The total cap already bounds
+  // the runaway. Opt in per run if a specific model needs it.
+  it("sends no reasoning cap by default", async () => {
+    expect((await send({})).reasoning).toBeUndefined();
   });
 
   it("leaves a caller's own caps alone", async () => {
@@ -316,16 +325,18 @@ describe("createRoutingFetch output caps", () => {
     expect(sent.reasoning).toEqual({ effort: "low" });
   });
 
-  it("takes both caps from the environment", async () => {
+  it("takes the total cap from the environment", async () => {
     process.env.OPENROUTER_MAX_TOKENS = "4000";
+    expect((await send({})).max_tokens).toBe(4_000);
+  });
+
+  it("sends a reasoning cap only when the environment asks for one", async () => {
     process.env.OPENROUTER_REASONING_MAX_TOKENS = "1000";
-    const sent = await send({});
-    expect(sent.max_tokens).toBe(4_000);
-    expect(sent.reasoning).toEqual({ max_tokens: 1_000 });
+    expect((await send({})).reasoning).toEqual({ max_tokens: 1_000 });
   });
 
   it("ignores a cap that is not a positive number", async () => {
     process.env.OPENROUTER_MAX_TOKENS = "nope";
-    expect((await send({})).max_tokens).toBe(32_000);
+    expect((await send({})).max_tokens).toBe(64_000);
   });
 });

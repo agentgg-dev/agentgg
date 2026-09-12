@@ -25,7 +25,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { buildTools, repeatNotice } from "../src/detectors/vercel-agent.js";
+import { buildTools, repeatedGrepNotice, repeatNotice } from "../src/detectors/vercel-agent.js";
 
 let root: string;
 let warn: ReturnType<typeof vi.spyOn>;
@@ -63,7 +63,7 @@ describe("repeated tool calls", () => {
     const t = tools();
     const args = { pattern: "alpha", glob: null, path: null };
     await run(t.Grep, args);
-    expect(await run(t.Grep, args)).toBe(repeatNotice("Grep", "detect"));
+    expect(await run(t.Grep, args)).toBe(repeatedGrepNotice(["a.ts", "b.ts"], "detect"));
   });
 
   it("still runs a different query", async () => {
@@ -109,7 +109,7 @@ describe("stall escalation", () => {
     for (let i = 0; i < 2; i++) await run(t.Grep, args);
     const notice = await run(t.Grep, args);
     expect(notice).toContain("output your final findings JSON");
-    expect(notice).toBe(repeatNotice("Grep", "detect", true));
+    expect(notice).toBe(repeatedGrepNotice(["a.ts", "b.ts"], "detect", true));
   });
 
   // A model that cycles between calls never drives one signature to three,
@@ -147,7 +147,9 @@ describe("signature normalization", () => {
     const t = tools();
     await run(t.Grep, { pattern: "alpha", glob: null, path: "." });
     const second = await run(t.Grep, { pattern: "alpha", glob: "{.,./**}", path: null });
-    expect(second).toBe(repeatNotice("Grep", "detect"));
+    // Both spellings resolve to the same scope, which matches nothing here, so
+    // the notice is the no-match one. The point is that it IS the repeat notice.
+    expect(second).toBe(repeatedGrepNotice([], "detect"));
   });
 
   it("does not collapse different scopes", async () => {
@@ -184,7 +186,54 @@ describe("visibility and cost", () => {
     const first = await run(t.Grep, args);
     const repeat = await run(t.Grep, args);
     // The notice is a fixed short string; the real result is the costly one.
-    expect(repeat.length).toBeLessThan(first.length + repeatNotice("Grep", "detect").length);
-    expect(repeat).toBe(repeatNotice("Grep", "detect"));
+    expect(repeat.length).toBeLessThan(
+      first.length + repeatedGrepNotice(["a.ts", "b.ts"], "detect").length,
+    );
+    expect(repeat).toBe(repeatedGrepNotice(["a.ts", "b.ts"], "detect"));
+  });
+});
+
+/**
+ * A repeated Grep must name a way forward.
+ *
+ * Run A (2026-09-12) had 26 stalls from a repeated Grep against 12 from a
+ * repeated Read, because Read's notice names the next unread line and Grep's
+ * named nothing. One of those cost a CRITICAL verdict: the validator for
+ * `FilterToSqlHelper.constructEquality` was tracing reachability, re-ran
+ * `Grep jsonArrayContains` three times, stalled, lost its tools, and recorded
+ * `uncertain` saying reachability "is not fully verified in this codebase".
+ *
+ * The files the first search matched are the concrete next move, so the notice
+ * carries them.
+ */
+describe("repeated Grep names the way forward", () => {
+  it("names the files the earlier search matched", async () => {
+    const t = tools();
+    await run(t.Grep, { pattern: "alpha", glob: null, path: null });
+
+    const again = await run(t.Grep, { pattern: "alpha", glob: null, path: null });
+
+    expect(again).toContain("a.ts");
+    expect(again).toContain("b.ts");
+  });
+
+  it("says the earlier search found nothing, rather than listing files", async () => {
+    const t = tools();
+    await run(t.Grep, { pattern: "nowhere", glob: null, path: null });
+
+    const again = await run(t.Grep, { pattern: "nowhere", glob: null, path: null });
+
+    expect(again).toContain("no matches");
+    expect(again).not.toContain(".ts");
+  });
+
+  it("still tells a stalled loop to finalize", async () => {
+    const t = tools();
+    for (let i = 0; i < 3; i++) await run(t.Grep, { pattern: "alpha", glob: null, path: null });
+
+    const stalled = await run(t.Grep, { pattern: "alpha", glob: null, path: null });
+
+    expect(stalled).toContain("a.ts");
+    expect(stalled).toMatch(/Stop calling tools|output your final/);
   });
 });

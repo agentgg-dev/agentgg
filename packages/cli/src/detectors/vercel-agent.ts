@@ -1612,6 +1612,12 @@ export function buildTools(opts: ToolLoopOpts) {
   const coverage = readCoverage();
   const coveredSig = (path: string) => `Read${SIG_SEP}${path}${SIG_SEP}covered`;
 
+  // What each Grep signature matched the first time. A repeat is told which
+  // files to open next; without that the notice is a dead end and the model
+  // retries the same query until it stalls. Run A (2026-09-12): 26 stalls from
+  // a repeated Grep against 12 from a repeated Read, which has a redirect.
+  const grepHits = new Map<string, string[]>();
+
   return {
     Read: tool({
       description:
@@ -1699,11 +1705,14 @@ export function buildTools(opts: ToolLoopOpts) {
         // widens to count as the same call. NUL separates the fields because
         // it cannot appear in either, so `Grep "a b"` cannot collide with
         // `Grep "a"` scoped to `b`.
-        const dup = repeated("Grep", `Grep${SIG_SEP}${pattern}${SIG_SEP}${scope ?? ""}`);
-        if (dup) return emit(dup);
-        return emit(
-          account(await grepToolExecute(pattern, scope, cwd, { exclude, maxFileSizeKb })),
+        const sig = `Grep${SIG_SEP}${pattern}${SIG_SEP}${scope ?? ""}`;
+        const dup = repeated("Grep", sig, (stalled) =>
+          repeatedGrepNotice(grepHits.get(sig) ?? [], phase, stalled),
         );
+        if (dup) return emit(dup);
+        const out = await grepToolExecute(pattern, scope, cwd, { exclude, maxFileSizeKb });
+        if (!grepHits.has(sig)) grepHits.set(sig, matchedFiles(out));
+        return emit(account(out));
       },
     }),
   };
@@ -1810,6 +1819,43 @@ export function repeatNotice(toolName: string, phase: ToolLoopPhase, stalled = f
         `output your final ${ARTIFACT[phase]} now, based on what you have already examined.`
     : `${head}Move on: run a different query, or use what you already have to reach ` +
         `your next step.`;
+}
+
+/** Distinct file paths named by a Grep result, in order, at most `cap`. */
+export function matchedFiles(out: string, cap = 5): string[] {
+  if (out.startsWith("(no matches)") || out.startsWith("Error")) return [];
+  const seen: string[] = [];
+  for (const line of out.split("\n")) {
+    if (line.startsWith("(")) continue; // a trailing note, not a match
+    const file = line.slice(0, line.indexOf(":"));
+    if (file && !seen.includes(file)) seen.push(file);
+    if (seen.length >= cap) break;
+  }
+  return seen;
+}
+
+/**
+ * Returned when a Grep repeats a search this loop already ran. Naming the files
+ * it matched is the whole point: the generic "run a different query" left the
+ * model with no concrete move, so it reissued the same search until the stall
+ * guard took its tools away.
+ */
+export function repeatedGrepNotice(files: string[], phase: ToolLoopPhase, stalled = false): string {
+  const head = files.length
+    ? `You already ran this exact Grep call in this loop. It matched ${files.join(", ")}` +
+      `, and its full result is above. `
+    : "You already ran this exact Grep call in this loop, and it returned no matches. ";
+  if (stalled) {
+    return (
+      `${head}You are repeating calls instead of advancing. Stop calling tools and ` +
+      `output your final ${ARTIFACT[phase]} now, based on what you have already examined.`
+    );
+  }
+  return files.length
+    ? `${head}Move on: Read one of those files, search a different term, or use what ` +
+        `you already have to reach your next step.`
+    : `${head}Repeating it returns nothing new. Move on: search a different term, or use ` +
+        `what you already have to reach your next step.`;
 }
 
 /**

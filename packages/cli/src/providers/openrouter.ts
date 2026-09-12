@@ -163,7 +163,7 @@ export function createCostMeter(): CostMeter {
  * and records what each call was charged.
  */
 /**
- * Output caps for every OpenRouter completion.
+ * Output cap for every OpenRouter completion.
  *
  * Two prod sessions ended with `finishReason=length` at 207,432 and 132,763
  * completion tokens, no text and no tool call: the model spent the whole
@@ -171,19 +171,19 @@ export function createCostMeter(): CostMeter {
  * `providerOptionsArg()` has no OpenRouter branch and no `maxTokens` is set
  * anywhere in the engine.
  *
- * Both caps matter, and the reasoning one must stay below the total. Capping
- * only the total turns an expensive failure into a cheap one: the model still
- * spends everything on reasoning and still answers with nothing. Capping
- * reasoning is what leaves room for the answer. A whole session averages about
- * 11k output tokens, so 32k total is generous and 8k of thinking per call is
- * far above what a normal turn uses.
+ * The cap has to leave room for an ANSWER after a long think. Run A
+ * (2026-09-12) hit a 32k cap eight times with `textChars=0`, and one of those
+ * became the run's only failed batch: the model used the whole budget to reason
+ * and had nothing left to write with. 64k holds the runaway to a third of what
+ * it was while leaving about 32k for the answer.
  *
- * Override per run with OPENROUTER_MAX_TOKENS and
- * OPENROUTER_REASONING_MAX_TOKENS; a model with a different thinking budget
- * needs a different number, and that belongs in the environment, not here.
+ * There is deliberately NO default reasoning sub-cap. `z-ai/glm-5.2` ignores
+ * `reasoning.max_tokens` outright, so shipping one bought nothing, and a model
+ * that DOES honor it would be throttled to a fraction of its thinking for no
+ * reason. Reasoning depth is the product here. Set
+ * OPENROUTER_REASONING_MAX_TOKENS per run if a specific model needs it.
  */
-const DEFAULT_MAX_TOKENS = 32_000;
-const DEFAULT_REASONING_MAX_TOKENS = 8_000;
+const DEFAULT_MAX_TOKENS = 64_000;
 
 /** A positive integer from `env`, or `fallback` when it is absent or junk. */
 function tokenCap(raw: string | undefined, fallback: number): number {
@@ -212,13 +212,10 @@ export function createRoutingFetch(
         if (body.max_tokens == null) {
           body.max_tokens = tokenCap(process.env.OPENROUTER_MAX_TOKENS, DEFAULT_MAX_TOKENS);
         }
-        if (body.reasoning == null) {
-          body.reasoning = {
-            max_tokens: tokenCap(
-              process.env.OPENROUTER_REASONING_MAX_TOKENS,
-              DEFAULT_REASONING_MAX_TOKENS,
-            ),
-          };
+        // Opt-in only: no default, so nothing throttles the model's thinking.
+        const reasoningCap = tokenCap(process.env.OPENROUTER_REASONING_MAX_TOKENS, 0);
+        if (body.reasoning == null && reasoningCap > 0) {
+          body.reasoning = { max_tokens: reasoningCap };
         }
         nextInit = { ...init, body: JSON.stringify(body) };
       } catch {
