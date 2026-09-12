@@ -11,7 +11,7 @@
       "**/*.json",
       "!**/dist",
       "!**/node_modules",
-      "!**/scan-results",
+      "!**/scan-results*",
       "!**/state/files",
       "!**/state/runs",
       "!**/coverage",

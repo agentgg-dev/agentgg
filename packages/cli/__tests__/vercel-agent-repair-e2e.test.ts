@@ -96,6 +96,7 @@ function runAgentArgs(rootDir: string) {
 
 describe("experimental_repairToolCall wiring (real generateText, mocked model only)", () => {
   beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => {});
     vi.spyOn(console, "warn").mockImplementation(() => {});
   });
 

@@ -20,6 +20,8 @@ const ENV_KEYS = [
   "OPENROUTER_MAX_PRICE_COMPLETION",
   "OPENROUTER_ZDR",
   "OPENROUTER_IGNORE",
+  "OPENROUTER_MAX_TOKENS",
+  "OPENROUTER_REASONING_MAX_TOKENS",
 ];
 afterEach(() => {
   for (const k of ENV_KEYS) delete process.env[k];
@@ -272,5 +274,58 @@ describe("createRoutingFetch and streamed responses", () => {
     expect(clone).not.toHaveBeenCalled();
     expect(res.bodyUsed).toBe(false);
     expect(meter.totalUsd()).toBe(0);
+  });
+});
+
+/**
+ * Output caps. Two prod incidents (2026-09-08, 2026-09-12) ended with
+ * `finishReason=length` after 207,432 and 132,763 completion tokens, with no
+ * text and no tool call: the model spent its whole generation on reasoning we
+ * never see. Nothing capped it, because `providerOptionsArg()` returns
+ * undefined for OpenRouter and no `maxTokens` is set anywhere.
+ *
+ * Both halves are needed. The reasoning cap bounds the thinking; the total cap
+ * bounds the runaway. The total must stay the larger of the two, or a session
+ * that spends its whole reasoning budget has nothing left to answer with, which
+ * is the failure this is meant to stop.
+ */
+describe("createRoutingFetch output caps", () => {
+  const send = async (body: Record<string, unknown>) => {
+    const inner = vi.fn(async () => new Response("{}"));
+    const f = createRoutingFetch({}, inner as unknown as typeof fetch);
+    await f("https://openrouter.ai/api/v1/chat/completions", {
+      method: "POST",
+      body: JSON.stringify({ model: "z-ai/glm-5.2", messages: [], ...body }),
+    });
+    return JSON.parse((inner.mock.calls[0][1] as RequestInit).body as string);
+  };
+
+  it("caps total output so a runaway generation cannot run to six figures", async () => {
+    expect((await send({})).max_tokens).toBe(32_000);
+  });
+
+  it("caps reasoning below the total, so the answer still has room", async () => {
+    const sent = await send({});
+    expect(sent.reasoning).toEqual({ max_tokens: 8_000 });
+    expect(sent.reasoning.max_tokens).toBeLessThan(sent.max_tokens);
+  });
+
+  it("leaves a caller's own caps alone", async () => {
+    const sent = await send({ max_tokens: 100, reasoning: { effort: "low" } });
+    expect(sent.max_tokens).toBe(100);
+    expect(sent.reasoning).toEqual({ effort: "low" });
+  });
+
+  it("takes both caps from the environment", async () => {
+    process.env.OPENROUTER_MAX_TOKENS = "4000";
+    process.env.OPENROUTER_REASONING_MAX_TOKENS = "1000";
+    const sent = await send({});
+    expect(sent.max_tokens).toBe(4_000);
+    expect(sent.reasoning).toEqual({ max_tokens: 1_000 });
+  });
+
+  it("ignores a cap that is not a positive number", async () => {
+    process.env.OPENROUTER_MAX_TOKENS = "nope";
+    expect((await send({})).max_tokens).toBe(32_000);
   });
 });

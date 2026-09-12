@@ -162,6 +162,35 @@ export function createCostMeter(): CostMeter {
  * With a `cost` meter attached it also turns on OpenRouter's usage accounting
  * and records what each call was charged.
  */
+/**
+ * Output caps for every OpenRouter completion.
+ *
+ * Two prod sessions ended with `finishReason=length` at 207,432 and 132,763
+ * completion tokens, no text and no tool call: the model spent the whole
+ * generation on reasoning nobody ever sees. Nothing bounded it, because
+ * `providerOptionsArg()` has no OpenRouter branch and no `maxTokens` is set
+ * anywhere in the engine.
+ *
+ * Both caps matter, and the reasoning one must stay below the total. Capping
+ * only the total turns an expensive failure into a cheap one: the model still
+ * spends everything on reasoning and still answers with nothing. Capping
+ * reasoning is what leaves room for the answer. A whole session averages about
+ * 11k output tokens, so 32k total is generous and 8k of thinking per call is
+ * far above what a normal turn uses.
+ *
+ * Override per run with OPENROUTER_MAX_TOKENS and
+ * OPENROUTER_REASONING_MAX_TOKENS; a model with a different thinking budget
+ * needs a different number, and that belongs in the environment, not here.
+ */
+const DEFAULT_MAX_TOKENS = 32_000;
+const DEFAULT_REASONING_MAX_TOKENS = 8_000;
+
+/** A positive integer from `env`, or `fallback` when it is absent or junk. */
+function tokenCap(raw: string | undefined, fallback: number): number {
+  const n = Number(raw);
+  return raw && Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
 export function createRoutingFetch(
   routing: Record<string, unknown>,
   inner: typeof fetch = fetch,
@@ -178,6 +207,19 @@ export function createRoutingFetch(
         // Opt in to usage accounting so the response carries `usage.cost`.
         // Only when someone is listening: it changes the request we send.
         if (cost && body.usage == null) body.usage = { include: true };
+        // Only when the caller set neither: an explicit cap is a deliberate
+        // choice and must win over this floor.
+        if (body.max_tokens == null) {
+          body.max_tokens = tokenCap(process.env.OPENROUTER_MAX_TOKENS, DEFAULT_MAX_TOKENS);
+        }
+        if (body.reasoning == null) {
+          body.reasoning = {
+            max_tokens: tokenCap(
+              process.env.OPENROUTER_REASONING_MAX_TOKENS,
+              DEFAULT_REASONING_MAX_TOKENS,
+            ),
+          };
+        }
         nextInit = { ...init, body: JSON.stringify(body) };
       } catch {
         // Non-JSON body should never reach chat/completions; pass through.

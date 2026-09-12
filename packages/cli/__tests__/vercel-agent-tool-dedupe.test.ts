@@ -34,6 +34,7 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), "agentgg-dedupe-"));
   writeFileSync(join(root, "a.ts"), "const alpha = 1;\nconst beta = 2;\n", "utf8");
   writeFileSync(join(root, "b.ts"), "const alpha = 3;\n", "utf8");
+  vi.spyOn(console, "log").mockImplementation(() => {});
   warn = vi.spyOn(console, "warn").mockImplementation(() => {});
 });
 

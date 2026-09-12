@@ -174,3 +174,78 @@ describe("validateFinding (tool-enabled) — empty completion", () => {
     expect(result.reasoning).toContain("sanitizer");
   });
 });
+
+/**
+ * The forced answer, schema-constrained.
+ *
+ * When a tool loop ends with no text, `answerWithoutTools` re-asks with the
+ * transcript and no tools. As free text that request can be answered with
+ * nothing, and on 2026-09-12 it was: "asked again with no tools and still got
+ * nothing". A request carrying the findings schema is much harder to answer
+ * with nothing, and it is the last chance before the batch fails.
+ */
+describe("runAgent — forced answer carries the schema", () => {
+  /** Records the `mode` of every request so the retry shape can be asserted. */
+  function recordingModel(texts: string[]) {
+    const modes: string[] = [];
+    let n = 0;
+    const model = new MockLanguageModelV1({
+      defaultObjectGenerationMode: "json",
+      doGenerate: async (options) => {
+        modes.push((options.mode as { type: string }).type);
+        return {
+          rawCall: { rawPrompt: null, rawSettings: {} },
+          finishReason: "stop" as const,
+          usage: { promptTokens: 10, completionTokens: 0 },
+          text: texts[Math.min(n++, texts.length - 1)],
+        };
+      },
+    });
+    return { model, modes };
+  }
+
+  it("re-asks in object mode after an empty loop, not as free text", async () => {
+    const answer = JSON.stringify({ findings: [] });
+    const { model, modes } = recordingModel(["", answer]);
+    const { detector, args } = runAgentArgs(model);
+
+    await detector.runAgent(args);
+
+    expect(modes[0]).toBe("regular");
+    expect(modes[1]).toBe("object-json");
+  });
+
+  it("returns the findings the schema-constrained retry produced", async () => {
+    const answer = JSON.stringify({
+      findings: [
+        {
+          title: "SQL injection in constructEquality",
+          vulnSlug: "sql-injection",
+          agentSlug: null,
+          filePath: "comment.tsx",
+          lineRange: [4, 6],
+          summary: "Unescaped string value reaches the SQL string.",
+          details: "The helper concatenates the literal without escaping it.",
+          poc: "Send a filter whose literal closes the quote.",
+          impact: "Arbitrary SQL runs against the backing database.",
+          references: ["CWE-89"],
+          confidence: 0.9,
+        },
+      ],
+    });
+    const { model } = recordingModel(["", answer]);
+    const { detector, args } = runAgentArgs(model);
+
+    const findings = await detector.runAgent(args);
+
+    expect(findings).toHaveLength(1);
+    expect(findings[0].title).toContain("constructEquality");
+  });
+
+  it("still fails the batch when even the schema request yields nothing", async () => {
+    const { model } = recordingModel(["", ""]);
+    const { detector, args } = runAgentArgs(model);
+
+    await expect(detector.runAgent(args)).rejects.toThrow(/without writing an answer/);
+  });
+});

@@ -13,7 +13,7 @@ coverage/
 npm-debug.log*
 .pnpm-debug.log*
 
-scan-results/
+scan-results*/
 
 # Local dev / debug scripts (one-off prompt-builder dumps, etc.)
 scripts/dump-*.ts

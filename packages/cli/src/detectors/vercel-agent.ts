@@ -1,7 +1,8 @@
-import { readdir, readFile } from "node:fs/promises";
+import { type FileHandle, open, readdir, readFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
 import type { CvssScore, Finding, ReconReport } from "@agentgg/core";
 import {
+  type CoreMessage,
   generateObject,
   generateText,
   type LanguageModelV1,
@@ -11,7 +12,7 @@ import {
   type ToolSet,
   tool,
 } from "ai";
-import { minimatch } from "minimatch";
+import { Minimatch, minimatch } from "minimatch";
 import { z } from "zod";
 import { AgentSpec } from "../agent-spec.js";
 import { buildDedupePrompt, LlmDedup } from "../deduper.js";
@@ -335,10 +336,37 @@ const SKIP_DIRS = new Set([
   "__pycache__",
   ".next",
   ".nuxt",
+  // Dot-prefixed build caches. Named one by one since the walk no longer
+  // skips dot entries as a class.
+  ".gradle",
+  ".terraform",
+  ".yarn",
+  ".turbo",
+  ".cache",
+  ".parcel-cache",
+  ".mypy_cache",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".tox",
+  ".svn",
+  ".hg",
 ]);
 
 const GLOB_MAX_RESULTS = 500;
 const GREP_MAX_MATCHES = 200;
+/** Files one Grep will search. Well above a large repo (geotools: 8.6k .java),
+ *  so it only bounds a pathological tree, and hitting it adds a notice. */
+const GREP_MAX_FILES = 20_000;
+/** Longest matching line Grep returns. A longer one (minified code, data)
+ *  becomes a marker with its length and keeps its file:line. */
+const GREP_MAX_LINE_CHARS = 500;
+/** One Grep result stops here, the size of one Read page. The loop budget is
+ *  checked before a call, so it cannot stop one large result by itself. */
+const GREP_OUTPUT_CAP_BYTES = 80_000;
+/** A NUL in this many leading bytes marks a file as binary. */
+const BINARY_SNIFF_BYTES = 8000;
+/** Files Grep reads per await. One at a time cost 4.4s on 11.6k files. */
+const GREP_READ_CHUNK = 12;
 
 /** Per-session cumulative cap on bytes returned by Read/Glob/Grep. The agent
  *  tool-loop transcript (mostly file contents) is what blows the model's
@@ -412,8 +440,8 @@ export function toolOutputBudgetBytes(
   const kb = raw == null ? Number.NaN : Number(raw);
   return Number.isFinite(kb) && kb > 0 ? Math.round(kb * 1024) : TOOL_OUTPUT_BUDGET_BYTES;
 }
-/** Per-file cap so a single huge file can't dominate the budget in one Read.
- *  Truncated reads carry a notice pointing the model at Grep for specifics. */
+/** Per-call cap so a single huge file can't dominate the budget in one Read.
+ *  Larger files come back in pages; the notice gives the offset of the next. */
 const READ_FILE_OUTPUT_CAP_BYTES = 80_000;
 
 /** Repairs allowed per LLM session. A model stuck in a malformed-tool-call
@@ -428,6 +456,110 @@ const MAX_TOOL_CALL_REPAIRS = 5;
  *  per-call count catches on its own. */
 const REPEAT_STALL_PER_CALL = 3;
 const REPEAT_STALL_TOTAL = 5;
+/** Stalled repeats before the hard stop fires. One warning first: a loop that
+ *  slipped once only needs to be told to move on. */
+const HARD_STOP_STALLS = 2;
+
+/**
+ * Which lines of which file this session has already been shown.
+ *
+ * The exact-signature guard keys on `(path, offset, limit)`, so a model that
+ * re-reads a region in different windows never repeats a call and never stalls.
+ * Coverage is per path, as sorted non-overlapping line intervals; a read that
+ * lies fully inside them returns nothing the model does not already hold.
+ *
+ * A read reaching past the covered end is paging, which is progress, so it must
+ * stay allowed. That is why `covers` needs the whole requested range, not just
+ * its start, and why a whole-file request (end unknown until the read runs)
+ * passes `Infinity` and is never covered by a bounded read.
+ */
+export function readCoverage() {
+  const byPath = new Map<string, Array<[number, number]>>();
+  /** Line count per path, once a read has revealed it. */
+  const totals = new Map<string, number>();
+  return {
+    covers(path: string, start: number, end: number): boolean {
+      for (const [lo, hi] of byPath.get(path) ?? []) {
+        if (lo <= start && end <= hi) return true;
+      }
+      return false;
+    },
+    /**
+     * The first line at or after `from` that this path has NOT returned, or
+     * null once the whole file is covered. A covered read is only a dead end if
+     * the notice cannot say where to resume, so this is what makes the block
+     * actionable.
+     */
+    nextUnread(path: string, from: number): number | null {
+      let at = from;
+      // Spans are sorted and non-overlapping, so one pass forward settles it:
+      // each span that contains `at` pushes it to just past that span.
+      for (const [lo, hi] of byPath.get(path) ?? []) {
+        if (lo <= at && at <= hi) at = hi + 1;
+      }
+      const total = totals.get(path);
+      return total !== undefined && at > total ? null : at;
+    },
+    add(path: string, start: number, end: number, total?: number): void {
+      if (total !== undefined && Number.isFinite(total)) totals.set(path, total);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return;
+      const merged: Array<[number, number]> = [];
+      let [lo, hi] = [start, end];
+      for (const span of byPath.get(path) ?? []) {
+        // `hi + 1` so two pages that touch (1-100 then 101-200) become one
+        // span: the model holds the region continuously, and a window across
+        // the seam is still a re-read.
+        if (span[1] + 1 < lo || span[0] > hi + 1) merged.push(span);
+        else [lo, hi] = [Math.min(lo, span[0]), Math.max(hi, span[1])];
+      }
+      merged.push([lo, hi]);
+      merged.sort((a, b) => a[0] - b[0]);
+      byPath.set(path, merged);
+    },
+  };
+}
+
+/** Monotonic session counter behind `sessionLabel`. Process-wide: one scan is
+ *  one process, so the numbers stay unique for the whole run. */
+let sessionSeq = 0;
+
+/**
+ * A distinct log label per tool-loop session. Batches of one agent all share
+ * `runAgent:<slug>`, so with five running at once a warning cannot be tied to
+ * the call it is about, and a per-cause split has to come from counts.
+ */
+export function sessionLabel(base: string): string {
+  return `${base}#${++sessionSeq}`;
+}
+
+/**
+ * Hard stop for a tool loop. A stalled model ignores the finalize notice and
+ * spends every remaining step on tools, so the loop ends with no answer and the
+ * batch fails (prod 2026-09-08: one call sent 49 times in 51 steps). Removing
+ * the tools leaves one move: answer from what it already read. It also reserves
+ * the last allowed step, so a loop that never repeats still answers.
+ */
+export function hardStop(label: string, maxSteps: number) {
+  let stalls = 0;
+  let announced = false;
+  const off = (why: string) => {
+    if (!announced) {
+      announced = true;
+      logWarn(`[${label}] tools off (${why}): answer from what you already read`);
+    }
+    return { toolChoice: "none" as const };
+  };
+  return {
+    onStall: () => {
+      stalls++;
+    },
+    prepareStep: async ({ stepNumber }: { stepNumber: number }) => {
+      if (stalls >= HARD_STOP_STALLS) return off(`${stalls} stalled repeats`);
+      if (stepNumber >= maxSteps - 1) return off("last turn");
+      return {};
+    },
+  };
+}
 
 /**
  * Recover the tool the model MEANT to call from a mangled tool name.
@@ -617,6 +749,7 @@ export class VercelAgentDetector implements Detector {
       maxFileSizeKb: args.maxFileSizeKb,
     });
     const prompt = `${basePrompt}\n\n${reconJsonInstruction()}`;
+    const stop = hardStop("recon", args.maxTurns + 1);
     try {
       const { text } = await this.metered(
         () =>
@@ -630,8 +763,10 @@ export class VercelAgentDetector implements Detector {
               exclude: args.excludePatterns,
               label: "recon",
               phase: "recon",
+              onStall: stop.onStall,
             }),
             maxSteps: args.maxTurns + 1,
+            experimental_prepareStep: stop.prepareStep,
             experimental_repairToolCall: this.toolCallRepair("recon"),
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
@@ -680,6 +815,7 @@ export class VercelAgentDetector implements Detector {
       maxFileSizeKb: args.maxFileSizeKb,
     });
     const prompt = `${basePrompt}\n\n${createAgentJsonInstruction()}`;
+    const stop = hardStop("create-agent", args.maxTurns + 1);
     try {
       const { text } = await this.metered(
         () =>
@@ -693,8 +829,10 @@ export class VercelAgentDetector implements Detector {
               exclude: args.excludePatterns,
               label: "create-agent",
               phase: "create-agent",
+              onStall: stop.onStall,
             }),
             maxSteps: args.maxTurns + 1,
+            experimental_prepareStep: stop.prepareStep,
             experimental_repairToolCall: this.toolCallRepair("create-agent"),
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
@@ -708,12 +846,95 @@ export class VercelAgentDetector implements Detector {
     }
   }
 
+  /**
+   * Last resort for a tool loop that ended on a tool call: ask once more with
+   * the transcript and NO tools, so the only thing the model can return is its
+   * answer. `toolChoice: "none"` is not enough — GLM-5.2 ignored it in prod on
+   * 2026-09-11 and called a tool on the step where the hard stop fired, which
+   * failed the batch. Taking the tools out of the request is the one thing a
+   * model cannot ignore. Costs one call, and only for a batch that would
+   * otherwise produce nothing.
+   */
+  private async answerWithoutTools(
+    label: string,
+    prompt: string,
+    gen: { response: { messages: CoreMessage[] } },
+    phase: ToolLoopPhase,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const messages: CoreMessage[] = [
+      { role: "user", content: prompt },
+      ...gen.response.messages,
+      {
+        role: "user",
+        content:
+          `You have no tools for this turn. Output your final ${ARTIFACT[phase]} now, ` +
+          "based on what you have already examined.",
+      },
+    ];
+    // Schema first. As free text this request can be answered with nothing, and
+    // on 2026-09-12 it was ("asked again with no tools and still got nothing"):
+    // the model returns empty text even with the tools removed. A request
+    // carrying the findings schema is far harder to answer with nothing, and
+    // this is the last call before the batch fails.
+    try {
+      const { object } = await this.metered(
+        () =>
+          generateObject({
+            model: this.model,
+            schema: DetectionResult,
+            mode: this.objectMode,
+            messages,
+            providerOptions: this.providerOptionsArg(),
+            abortSignal: signal,
+          }),
+        { label, signal },
+      );
+      logWarn(
+        `[${label}] answered against the findings schema after the loop ran out of turns ` +
+          `(${object.findings.length} finding(s))`,
+      );
+      // Re-serialized rather than returned as an object: the caller parses the
+      // answer either way, so one path stays downstream of this.
+      return JSON.stringify(object);
+    } catch (err) {
+      if (signal?.aborted) return "";
+      debugLog("VercelAgentDetector.answerWithoutTools:object", err);
+    }
+    // Free text as a fallback, so a provider that cannot do structured output
+    // is no worse off than before.
+    try {
+      const { text } = await this.metered(
+        () =>
+          generateText({
+            model: this.model,
+            messages,
+            providerOptions: this.providerOptionsArg(),
+            abortSignal: signal,
+          }),
+        { label, signal },
+      );
+      logWarn(
+        text.trim()
+          ? `[${label}] answered with no tools after the loop ran out of turns`
+          : `[${label}] asked again with no tools and still got nothing`,
+      );
+      return text;
+    } catch (err) {
+      // The batch fails on the empty answer below; do not mask that with a
+      // retry-time error.
+      debugLog("VercelAgentDetector.answerWithoutTools", err);
+      return "";
+    }
+  }
+
   async runAgent(args: RunAgentArgs & { signal?: AbortSignal }): Promise<Finding[]> {
     const base = buildAgentPrompt(args);
     const prompt = `${base}\n\n${jsonOutputInstruction(false)}`;
-    const label = `runAgent:${args.agent.slug}`;
-    const runToolLoop = (budgetBytes: number, maxTurns: number) =>
-      this.metered(
+    const label = sessionLabel(`runAgent:${args.agent.slug}`);
+    const runToolLoop = (budgetBytes: number, maxTurns: number) => {
+      const stop = hardStop(label, maxTurns + 1);
+      return this.metered(
         () =>
           generateText({
             model: this.model,
@@ -726,14 +947,17 @@ export class VercelAgentDetector implements Detector {
               label,
               phase: "detect",
               budgetBytes,
+              onStall: stop.onStall,
             }),
             maxSteps: maxTurns + 1,
+            experimental_prepareStep: stop.prepareStep,
             experimental_repairToolCall: this.toolCallRepair(label),
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
           }),
         { label, signal: args.signal },
       );
+    };
     try {
       let gen: Awaited<ReturnType<typeof runToolLoop>>;
       let effectiveTurns = args.maxTurns;
@@ -772,8 +996,12 @@ export class VercelAgentDetector implements Detector {
       // sets `rt.failed` in scan.ts, which suppresses the agent sidecar so the
       // agent re-runs instead of recording a clean pass. Not scan-fatal: an
       // unrecognized Error is logged and the batch pool continues.
-      if (!gen.text.trim()) {
+      let answer = gen.text;
+      if (!answer.trim()) {
         logUnparseableGeneration(label, gen);
+        answer = await this.answerWithoutTools(label, prompt, gen, "detect", args.signal);
+      }
+      if (!answer.trim()) {
         throw new ExpectedDetectorError(
           `${label}: the model ended its tool loop without writing an answer, so this batch produced no analysis. ` +
             `Failing the batch rather than recording 0 findings; raise --max-turns if it repeats.`,
@@ -781,22 +1009,20 @@ export class VercelAgentDetector implements Detector {
       }
       let result: DetectionResultType;
       try {
-        result = await this.parseOrReformat(gen.text, false, label, args.signal);
+        result = await this.parseOrReformat(answer, false, label, args.signal);
       } catch (parseErr) {
         // Empty / unparseable final message. Emit a one-line diagnostic
         // (always, not gated on AGENTGG_DEBUG) so the logs show WHY: an empty
         // completion, a length cutoff, or reasoning that never produced
         // visible content. See logUnparseableGeneration.
-        logUnparseableGeneration(`runAgent:${args.agent.slug}`, gen);
+        logUnparseableGeneration(label, gen);
         // A content refusal lands here as prose instead of findings JSON. Treat
         // it as an empty result, not an agent failure: the batch yields 0
         // findings, the agent still completes, and the refusal doesn't crash
         // the agent or count against the scan's failure ratio. A non-refusal
         // parse failure (empty completion, length cutoff, garbage) still throws.
         if (looksLikeRefusal(gen.text)) {
-          logWarn(
-            `[runAgent:${args.agent.slug}] model refused to analyze this batch; recording 0 findings`,
-          );
+          logWarn(`[${label}] model refused to analyze this batch; recording 0 findings`);
           return [];
         }
         throw parseErr;
@@ -871,6 +1097,7 @@ export class VercelAgentDetector implements Detector {
       // see the same file set.
       const label = `validate:${args.finding.id}`;
       const prompt = `${buildValidatePrompt(args)}\n\n${validationJsonInstruction()}`;
+      const stop = hardStop(label, this.validateMaxTurns + 1);
       const gen = await this.metered(
         () =>
           generateText({
@@ -883,8 +1110,10 @@ export class VercelAgentDetector implements Detector {
               exclude: args.excludePatterns ?? [],
               label,
               phase: "validate",
+              onStall: stop.onStall,
             }),
             maxSteps: this.validateMaxTurns + 1,
+            experimental_prepareStep: stop.prepareStep,
             experimental_repairToolCall: this.toolCallRepair(label),
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
@@ -1215,6 +1444,30 @@ export const GrepParameters = z.preprocess(
   }),
 );
 
+/** A nullable whole number that also accepts one sent as text ("2900"). A
+ *  rejected call costs a repair, and a failed repair fails the batch. The
+ *  JSON schema the model sees is still integer | null. */
+const wholeNumberArg = (description: string) =>
+  z.preprocess(
+    (v) => (typeof v === "string" && /^\s*-?\d+\s*$/.test(v) ? Number(v) : v),
+    z.number().int().nullable().describe(description),
+  );
+
+/** Read's argument schema. `offset` and `limit` are nullable-but-required and
+ *  default to null when absent, for the same two reasons as GrepParameters. */
+export const ReadParameters = z.preprocess(
+  (v) => (typeof v === "object" && v !== null ? { offset: null, limit: null, ...v } : v),
+  z.object({
+    path: z.string().describe("File path relative to the repository root"),
+    offset: wholeNumberArg(
+      "1-based line to start reading at. Pass null to start at the first line.",
+    ),
+    limit: wholeNumberArg(
+      "Maximum number of lines to return. Pass null to read as far as one call allows.",
+    ),
+  }),
+);
+
 /**
  * Everything one tool loop needs to build its tools. `label` names the loop
  * (`recon`, `create-agent`, `runAgent:<slug>`, `validate:<findingId>`) and
@@ -1231,17 +1484,29 @@ interface ToolLoopOpts {
   /** Which pass owns this loop. Drives the wording of every notice below. */
   phase: ToolLoopPhase;
   budgetBytes?: number;
+  /** Called on every stalled repeat. `hardStop` counts them and then takes the
+   *  tools away, because the notice alone does not end a stalled loop. */
+  onStall?: () => void;
 }
 
 export function buildTools(opts: ToolLoopOpts) {
   const { cwd, maxFileSizeKb, verbose, label, phase } = opts;
   const exclude = opts.exclude ?? [];
   const budgetBytes = opts.budgetBytes ?? toolOutputBudgetBytes(phase);
-  // Prefix every tool line with the loop that made the call. Ten concurrent
-  // validators share one stdout, so an unlabelled line cannot be attributed.
-  const logTool = verbose
-    ? (name: string, arg: string) => console.log(`    [${label}] ${name} ${arg.slice(0, 100)}`)
-    : () => undefined;
+  // One line per call, once the call returns, NOT gated on --verbose: the
+  // platform passes no verbose flag, so its logs carried repeat warnings and
+  // never the results that caused them. Prefixed with the loop that made the
+  // call, because ten concurrent validators share one stdout. Arguments are
+  // the ones the repeat guard keys on, so a warning can be traced to its call;
+  // --verbose only widens how much of a long pattern is shown.
+  const argCap = verbose ? 400 : 100;
+  const logCall = (name: string, args: string, started: number, out: string): string => {
+    const ms = Date.now() - started;
+    console.log(
+      `    [${label}] ${name} ${args.slice(0, argCap)} -> ${summarizeToolResult(name, out)} (${ms}ms)`,
+    );
+    return out;
+  };
 
   // Per-session tool-output budget, shared across every tool call in this
   // generateText loop (buildTools is constructed once per LLM session) so the
@@ -1291,7 +1556,11 @@ export function buildTools(opts: ToolLoopOpts) {
   // A,B,A,B stalls just as hard as one that repeats A, but no single
   // signature climbs fast enough to show it.
   let totalRepeats = 0;
-  const repeated = (toolName: string, signature: string): string | null => {
+  const repeated = (
+    toolName: string,
+    signature: string,
+    notice?: (stalled: boolean) => string,
+  ): string | null => {
     const n = (callCounts.get(signature) ?? 0) + 1;
     callCounts.set(signature, n);
     if (n === 1) return null;
@@ -1300,6 +1569,7 @@ export function buildTools(opts: ToolLoopOpts) {
     // that model to finalize invites the empty answer this guard exists to
     // prevent. Only escalate once the loop looks genuinely stuck.
     const stalled = n >= REPEAT_STALL_PER_CALL || totalRepeats >= REPEAT_STALL_TOTAL;
+    if (stalled) opts.onStall?.();
     // The signature keys on a NUL separator so a pattern containing a space
     // cannot collide with a scoped search. Never print it raw: a NUL byte makes
     // grep treat the whole log as binary and refuse to match it.
@@ -1307,21 +1577,66 @@ export function buildTools(opts: ToolLoopOpts) {
       `[${label}] repeated ${toolName} call #${n}: ${signature.split(SIG_SEP).join(" ").slice(0, 120)}` +
         (stalled ? " (stalled; telling it to finalize)" : ""),
     );
-    return repeatNotice(toolName, phase, stalled);
+    return notice ? notice(stalled) : repeatNotice(toolName, phase, stalled);
   };
+
+  // Which lines of which file this loop already returned. The signature guard
+  // above cannot see a re-read: every window is a distinct `(path, offset,
+  // limit)`. See `readCoverage`.
+  const coverage = readCoverage();
+  const coveredSig = (path: string) => `Read${SIG_SEP}${path}${SIG_SEP}covered`;
 
   return {
     Read: tool({
-      description: "Read the contents of a file. Path must be relative to the repository root.",
-      parameters: z.object({
-        path: z.string().describe("File path relative to the repository root"),
-      }),
-      execute: async ({ path }) => {
-        logTool("Read", path);
-        if (budgetExhausted()) return budgetNotice(phase, budgetBytes);
-        const dup = repeated("Read", `Read${SIG_SEP}${path}`);
-        if (dup) return dup;
-        return account(await readToolExecute(path, cwd, maxFileSizeKb, exclude));
+      description:
+        "Read the contents of a file. Path must be relative to the repository root. " +
+        "A large file comes back one part at a time; the note at the end gives the offset of the next part.",
+      parameters: ReadParameters,
+      execute: async ({ path, offset, limit }) => {
+        const started = Date.now();
+        const shown = [
+          path,
+          offset != null && `offset=${offset}`,
+          limit != null && `limit=${limit}`,
+        ]
+          .filter(Boolean)
+          .join(" ");
+        const emit = (out: string) => logCall("Read", shown, started, out);
+        if (budgetExhausted()) return emit(budgetNotice(phase, budgetBytes));
+        const start = Math.max(1, offset ?? 1);
+        const lineLimit = limit ?? null;
+        // Signed on the range too, so the next part of a file is not a repeat.
+        // A plain read keeps the bare signature: offset 1 is the same call.
+        const range =
+          start === 1 && lineLimit === null ? "" : `${SIG_SEP}${start}${SIG_SEP}${lineLimit ?? ""}`;
+        const dup = repeated("Read", `Read${SIG_SEP}${path}${range}`);
+        if (dup) return emit(dup);
+        // A window inside what this loop already returned is a re-read, even
+        // though its arguments are new. `limit: null` asks for the rest of the
+        // file, whose end is unknown until the read runs, so it can only be
+        // covered by a read that already ran to the end.
+        const wantedEnd = lineLimit === null ? Number.POSITIVE_INFINITY : start + lineLimit - 1;
+        if (coverage.covers(path, start, wantedEnd)) {
+          const held = repeated("Read", coveredSig(path), (stalled) =>
+            coveredReadNotice(
+              path,
+              start,
+              wantedEnd,
+              phase,
+              stalled,
+              coverage.nextUnread(path, start),
+            ),
+          );
+          if (held) return emit(held);
+        }
+        const got = await readToolExecute(path, cwd, maxFileSizeKb, exclude, start, lineLimit);
+        if (got.range) {
+          coverage.add(path, got.range[0], got.range[1], got.total);
+          // This read is occurrence #1 for the path, so the first covered
+          // re-read counts as a repeat rather than as a fresh call.
+          if (!callCounts.has(coveredSig(path))) callCounts.set(coveredSig(path), 1);
+        }
+        return emit(account(got.text));
       },
     }),
     Glob: tool({
@@ -1331,33 +1646,100 @@ export function buildTools(opts: ToolLoopOpts) {
         pattern: z.string().describe("Glob pattern, e.g. '**/*.ts' or 'src/**/*.js'"),
       }),
       execute: async ({ pattern }) => {
-        logTool("Glob", pattern);
-        if (budgetExhausted()) return budgetNotice(phase, budgetBytes);
+        const started = Date.now();
+        const emit = (out: string) => logCall("Glob", pattern, started, out);
+        if (budgetExhausted()) return emit(budgetNotice(phase, budgetBytes));
         const dup = repeated("Glob", `Glob${SIG_SEP}${pattern}`);
-        if (dup) return dup;
-        return account(await globToolExecute(pattern, cwd, exclude));
+        if (dup) return emit(dup);
+        return emit(account(await globToolExecute(pattern, cwd, exclude)));
       },
     }),
     Grep: tool({
       description:
-        "Search for a regex pattern across files. Returns matching lines as 'file:line: content'.",
+        "Search for a regex pattern across files. Returns matching lines as 'file:line: content'. " +
+        "To see the code around a match, Read that file with an offset near its line number.",
       parameters: GrepParameters,
       execute: async ({ pattern, glob, path }) => {
-        logTool("Grep", pattern);
-        if (budgetExhausted()) return budgetNotice(phase, budgetBytes);
+        const started = Date.now();
         // A bare directory path is not a glob — `src/api` matches that one
         // entry, not the files under it — so widen it before handing it over.
         const scope = glob || (path ? toSearchGlob(path) : undefined);
+        // Logged with the RESOLVED scope, which is what the repeat guard keys
+        // on, so a repeat warning can be traced to the call it is about.
+        const shown = `${pattern} glob=${scope ?? "(all)"}`;
+        const emit = (out: string) => logCall("Grep", shown, started, out);
+        if (budgetExhausted()) return emit(budgetNotice(phase, budgetBytes));
         // Signed on the RESOLVED scope so `{path: "src"}` and the glob it
         // widens to count as the same call. NUL separates the fields because
         // it cannot appear in either, so `Grep "a b"` cannot collide with
         // `Grep "a"` scoped to `b`.
         const dup = repeated("Grep", `Grep${SIG_SEP}${pattern}${SIG_SEP}${scope ?? ""}`);
-        if (dup) return dup;
-        return account(await grepToolExecute(pattern, scope, cwd, exclude));
+        if (dup) return emit(dup);
+        return emit(
+          account(await grepToolExecute(pattern, scope, cwd, { exclude, maxFileSizeKb })),
+        );
       },
     }),
   };
+}
+
+/**
+ * One-line summary of a tool result for the call log. Derived from the text the
+ * model receives, so the log can never claim something the model did not see.
+ * Notes are carried through verbatim: a truncation or a skipped-file line is
+ * exactly what explains a search the model then repeats.
+ */
+export function summarizeToolResult(name: string, out: string): string {
+  if (out.startsWith("Error")) return `error: ${out.slice(0, 80).replace(/\n/g, " ")}`;
+  // No parentheses of their own: a carried-through note already brings some,
+  // and the duration follows in its own pair.
+  if (out.includes("already ran this exact")) return "skipped: repeat";
+  // Not an exact repeat: the arguments were new, the lines were not. Without
+  // its own label the Read branch below reports it as a very short page.
+  if (out.includes("already read lines") || out.includes("already read from line")) {
+    return "skipped: re-read";
+  }
+  if (out.startsWith("Tool budget reached")) return "skipped: budget spent";
+
+  const lines = out.replace(/\n$/, "").split("\n");
+  const notes = lines.filter((l) => l.startsWith("(") && l !== "(no matches)");
+  const suffix = notes.length > 0 ? ` ${notes.join(" ")}` : "";
+  const empty = out.startsWith("(no matches)");
+  const body = lines.filter((l) => !l.startsWith("("));
+
+  if (name === "Read") {
+    const page = /showing lines (\d+)-(\d+) of (\d+)/.exec(out);
+    const size = `${Math.round(out.length / 1024)} KB`;
+    return page
+      ? `lines ${page[1]}-${page[2]} of ${page[3]}, ${size}`
+      : `${lines.length} lines, ${size}`;
+  }
+  if (name === "Glob") return `${empty ? 0 : body.length} files${suffix}`;
+
+  if (empty) return `0 matches${suffix}`;
+  const files = new Set(body.map((l) => l.slice(0, l.indexOf(":"))).filter(Boolean));
+  return `${body.length} matches in ${files.size} files${suffix}`;
+}
+
+/**
+ * A readable slice of an over-long matching line, centred on the match.
+ *
+ * The old message was `[matching line omitted: 21402 characters]`, which told
+ * the model a match existed and gave it nothing to judge, so it re-ran the
+ * search or guessed. Minified and generated code hits this on every match.
+ * Naming the cut keeps the model from reading the ellipsis as real source.
+ */
+export function windowAroundMatch(line: string, regex: RegExp): string {
+  // `regex` is shared across lines and may be sticky or global, so start from a
+  // known index rather than trusting lastIndex from the previous line.
+  regex.lastIndex = 0;
+  const at = regex.exec(line)?.index ?? 0;
+  const half = Math.floor(GREP_MAX_LINE_CHARS / 2);
+  const from = Math.max(0, at - half);
+  const to = Math.min(line.length, from + GREP_MAX_LINE_CHARS);
+  const head = from > 0 ? "..." : "";
+  const tail = to < line.length ? "..." : "";
+  return `${head}${line.slice(from, to)}${tail} [cut from ${line.length} characters]`;
 }
 
 /**
@@ -1405,6 +1787,47 @@ export function repeatNotice(toolName: string, phase: ToolLoopPhase, stalled = f
 }
 
 /**
+ * Returned when a Read asks for lines this loop already returned. Distinct from
+ * `repeatNotice` because the arguments did NOT match: naming the region is what
+ * tells the model it is crawling ground it already holds.
+ */
+export function coveredReadNotice(
+  path: string,
+  start: number,
+  end: number,
+  phase: ToolLoopPhase,
+  stalled = false,
+  nextUnread: number | null = null,
+): string {
+  const span = Number.isFinite(end) ? `lines ${start}-${end}` : `from line ${start}`;
+  const head =
+    `You already read ${span} of ${path} in this loop, and that content is above. ` +
+    `Reading it again returns nothing new. `;
+  if (stalled) {
+    return (
+      `${head}You are re-reading instead of advancing. Stop calling tools and ` +
+      `output your final ${ARTIFACT[phase]} now, based on what you have already examined.`
+    );
+  }
+  // A block that names no next move is a dead end. Test 1 (2026-09-12) watched
+  // session #4 sweep this file in order, meet a region it had read while
+  // tracing a helper, then retry the SAME window three times until its tools
+  // were taken away. Naming the line it has not seen is what lets a sweep
+  // resume instead of stall.
+  if (nextUnread === null) {
+    return (
+      `${head}You have now read the whole file. Stop reading it: open a ` +
+      `different file, or use what you already have to reach your next step.`
+    );
+  }
+  return (
+    `${head}The next lines you have NOT read start at ${nextUnread}. ` +
+    `Continue there with Read(offset: ${nextUnread}), open a different file, or ` +
+    `use what you already have to reach your next step.`
+  );
+}
+
+/**
  * Returned by every tool once the loop's output budget is spent: an explicit
  * instruction to stop calling tools and answer, rather than a silent empty
  * result the model might keep probing against.
@@ -1430,6 +1853,22 @@ export function budgetNotice(
 /** A path is excluded (treated as deleted) when it matches any exclude
  *  glob. Directory globs are also tested with a trailing `/**` stripped so
  *  the directory itself and its contents are both blocked. */
+/**
+ * Compile the exclude globs once. `isExcludedPath` compiled them per path, and
+ * the walk calls it for every file: 5 patterns x 17.9k files x a fresh
+ * Minimatch each was most of an 813ms Grep on a repo whose glob matched ONE
+ * file. Same two readings as before: the pattern, and a directory's contents.
+ */
+function compileExcludes(exclude: string[]): (rel: string) => boolean {
+  const tests = exclude.map((p) => {
+    const base = p.replace(/\/\*\*?$/, "").replace(/\/+$/, "");
+    const own = new Minimatch(p, { dot: true });
+    const under = base !== p ? new Minimatch(`${base}/**`, { dot: true }) : null;
+    return (rel: string) => own.match(rel) || rel === base || (under?.match(rel) ?? false);
+  });
+  return (rel: string) => tests.some((t) => t(rel));
+}
+
 function isExcludedPath(rel: string, exclude: string[]): boolean {
   return exclude.some((p) => {
     if (minimatch(rel, p, { dot: true })) return true;
@@ -1438,39 +1877,106 @@ function isExcludedPath(rel: string, exclude: string[]): boolean {
   });
 }
 
+/**
+ * One Read, plus the line range it actually returned. The range feeds
+ * `readCoverage`, which is why it cannot be inferred at the call site: a whole
+ * file read carries no explicit `limit`, and a page can stop early on the byte
+ * cap rather than at `start + limit - 1`. `null` means nothing was returned
+ * (an error), so nothing is recorded as held.
+ */
+type ReadOutput = { text: string; range: [number, number] | null; total?: number };
+
+const failedRead = (text: string): ReadOutput => ({ text, range: null });
+
+/** Lines in `content`, ignoring the empty string after a trailing newline. */
+function countLines(content: string): number {
+  const lines = content.split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  return lines.length;
+}
+
 async function readToolExecute(
   path: string,
   cwd: string,
   maxFileSizeKb: number | undefined,
   exclude: string[] = [],
-): Promise<string> {
+  start = 1,
+  limit: number | null = null,
+): Promise<ReadOutput> {
   try {
     const absolutePath = resolve(cwd, path);
     if (!isSafe(absolutePath, cwd)) {
-      return "Error: Access denied. Path must be within the repository root.";
+      return failedRead("Error: Access denied. Path must be within the repository root.");
     }
     if (isExcludedPath(normalizeSep(relative(cwd, absolutePath)), exclude)) {
-      return "Error: This path is excluded from the scan (treated as not present).";
+      return failedRead("Error: This path is excluded from the scan (treated as not present).");
     }
     if (maxFileSizeKb !== undefined) {
       const { stat } = await import("node:fs/promises");
       const s = await stat(absolutePath).catch(() => null);
       if (s && s.size > maxFileSizeKb * 1024) {
-        return `Error: File exceeds size limit (${Math.round(s.size / 1024)}KB > ${maxFileSizeKb}KB). Skipped.`;
+        return failedRead(
+          `Error: File exceeds size limit (${Math.round(s.size / 1024)}KB > ${maxFileSizeKb}KB). Skipped.`,
+        );
       }
     }
     const content = await readFile(absolutePath, "utf-8");
-    if (content.length > READ_FILE_OUTPUT_CAP_BYTES) {
-      return (
-        `${content.slice(0, READ_FILE_OUTPUT_CAP_BYTES)}\n\n` +
-        `... [truncated: file is ${Math.round(content.length / 1024)} KB; showing the first ` +
-        `${Math.round(READ_FILE_OUTPUT_CAP_BYTES / 1024)} KB. Use Grep to locate specific lines.]`
-      );
+    if (start === 1 && limit === null && content.length <= READ_FILE_OUTPUT_CAP_BYTES) {
+      const total = countLines(content);
+      return { text: content, range: [1, total], total };
     }
-    return content;
+    return readPage(content, start, limit);
   } catch (err) {
-    return `Error reading file: ${(err as Error).message}`;
+    return failedRead(`Error reading file: ${(err as Error).message}`);
   }
+}
+
+/**
+ * One page of a file: lines from `start` (1-based), at most `limit` of them,
+ * cut at a line boundary to stay under READ_FILE_OUTPUT_CAP_BYTES. When lines
+ * remain, a closing note gives the offset of the next page.
+ */
+function readPage(content: string, start: number, limit: number | null): ReadOutput {
+  const lines = content.split("\n");
+  if (lines.at(-1) === "") lines.pop(); // a trailing newline ends the last line
+  const total = lines.length;
+  if (total === 0) {
+    // "offset 1 is past the end of the file, which has 0 lines" reads like a
+    // wrong path, so the model re-globs for a file it is already holding.
+    return failedRead("This file is empty (0 lines). There is nothing to read in it.");
+  }
+  if (start > total) {
+    return failedRead(
+      `Error: offset ${start} is past the end of the file, which has ${total} lines. ` +
+        `Read it from offset 1 to see it from the start.`,
+    );
+  }
+  const last = limit === null ? total : Math.min(total, start + Math.max(1, limit) - 1);
+  const kept: string[] = [];
+  let size = 0;
+  let end = start - 1;
+  for (let n = start; n <= last; n++) {
+    const line = lines[n - 1];
+    if (kept.length > 0 && size + line.length + 1 > READ_FILE_OUTPUT_CAP_BYTES) break;
+    // One line longer than a page (minified code) keeps only its head.
+    kept.push(
+      line.length > READ_FILE_OUTPUT_CAP_BYTES
+        ? `${line.slice(0, READ_FILE_OUTPUT_CAP_BYTES)} ... [line cut at ${Math.round(READ_FILE_OUTPUT_CAP_BYTES / 1024)} KB]`
+        : line,
+    );
+    size += line.length + 1;
+    end = n;
+  }
+  const page = kept.join("\n");
+  const range: [number, number] = [start, end];
+  if (end >= total) return { text: page, range, total };
+  return {
+    text:
+      `${page}\n\n... [showing lines ${start}-${end} of ${total}; the file is ` +
+      `${Math.round(content.length / 1024)} KB. To read more, call Read with offset ${end + 1}.]`,
+    range,
+    total,
+  };
 }
 
 async function globToolExecute(
@@ -1490,12 +1996,16 @@ async function globToolExecute(
   }
 }
 
-async function grepToolExecute(
+export async function grepToolExecute(
   pattern: string,
   glob: string | undefined,
   cwd: string,
-  exclude: string[] = [],
+  opts: { exclude?: string[]; maxFiles?: number; maxFileSizeKb?: number } = {},
 ): Promise<string> {
+  const exclude = opts.exclude ?? [];
+  const maxFiles = opts.maxFiles ?? GREP_MAX_FILES;
+  const maxBytes =
+    opts.maxFileSizeKb === undefined ? Number.POSITIVE_INFINITY : opts.maxFileSizeKb * 1024;
   let regex: RegExp;
   try {
     regex = new RegExp(pattern);
@@ -1504,32 +2014,95 @@ async function grepToolExecute(
   }
 
   try {
-    const files = await walkAndMatch(cwd, glob ?? "**/*", GLOB_MAX_RESULTS, exclude);
+    // Walk one past the limit to tell "exactly maxFiles" from "more than that".
+    const walked = await walkAndMatch(cwd, glob ?? "**/*", maxFiles + 1, exclude);
+    const filesCut = walked.length > maxFiles;
+    const files = filesCut ? walked.slice(0, maxFiles) : walked;
+    // A silent cut reads as "not in the repo", and the model searches again.
+    const cutNotice = `(searched only the first ${maxFiles} files; pass a narrower glob to search the rest)`;
     const results: string[] = [];
+    let outBytes = 0;
+    let stopped: "matches" | "bytes" | null = null;
+    // Text files Read refuses for size. Counted so an empty result has a reason.
+    let skippedLarge = 0;
 
-    for (const file of files) {
-      if (results.length >= GREP_MAX_MATCHES) break;
-      try {
-        const content = await readFile(join(cwd, file), "utf-8");
-        const lines = content.split("\n");
+    // Read a chunk at a time: one file per await spent 4.4s on 11.6k files,
+    // and five sessions share the container. Results are still assembled in
+    // file order, so the caps below cut at the same place they always did.
+    for (let c = 0; c < files.length && !stopped; c += GREP_READ_CHUNK) {
+      const chunk = files.slice(c, c + GREP_READ_CHUNK);
+      const read = await Promise.all(chunk.map((f) => readSearchable(join(cwd, f), maxBytes)));
+      for (let k = 0; k < chunk.length && !stopped; k++) {
+        const file = chunk[k];
+        const found = read[k];
+        if ("skip" in found) {
+          if (found.skip === "large") skippedLarge++;
+          continue;
+        }
+        const lines = found.text.split("\n");
         for (let i = 0; i < lines.length; i++) {
-          if (results.length >= GREP_MAX_MATCHES) break;
-          if (regex.test(lines[i])) {
-            results.push(`${file}:${i + 1}: ${lines[i].trimEnd()}`);
+          if (!regex.test(lines[i])) continue;
+          const line = lines[i].trimEnd();
+          const shown = line.length > GREP_MAX_LINE_CHARS ? windowAroundMatch(line, regex) : line;
+          const entry = `${file}:${i + 1}: ${shown}`;
+          if (outBytes + entry.length + 1 > GREP_OUTPUT_CAP_BYTES) {
+            stopped = "bytes";
+            break;
+          }
+          results.push(entry);
+          outBytes += entry.length + 1;
+          if (results.length >= GREP_MAX_MATCHES) {
+            stopped = "matches";
+            break;
           }
         }
-      } catch {
-        // skip unreadable files
       }
     }
 
-    if (results.length === 0) return "(no matches)";
-    const out = results.join("\n");
-    return results.length >= GREP_MAX_MATCHES
-      ? `${out}\n(truncated at ${GREP_MAX_MATCHES} matches)`
-      : out;
+    const notes: string[] = [];
+    if (stopped === "matches") notes.push(`(truncated at ${GREP_MAX_MATCHES} matches)`);
+    else if (stopped === "bytes") {
+      notes.push(
+        `(truncated at ${Math.round(GREP_OUTPUT_CAP_BYTES / 1024)} KB of output; ` +
+          "narrow the glob or the pattern to see the rest)",
+      );
+    } else if (filesCut) notes.push(cutNotice);
+    // Only on an empty result: that is when a missing match needs a reason,
+    // and most repos keep a few large files, so a note on every result is noise.
+    if (skippedLarge > 0 && results.length === 0) {
+      notes.push(
+        `(${skippedLarge} ${skippedLarge === 1 ? "file" : "files"} larger than ` +
+          `${opts.maxFileSizeKb} KB not searched: the scan skips files over its size limit, and Read refuses them too)`,
+      );
+    }
+    return [results.length > 0 ? results.join("\n") : "(no matches)", ...notes].join("\n");
   } catch (err) {
     return `Error: ${(err as Error).message}`;
+  }
+}
+
+/** A file's text for Grep, or why Grep skips it. `large` is a text file over
+ *  the size limit; binary and unreadable files are skipped without a count. */
+async function readSearchable(
+  path: string,
+  maxBytes: number,
+): Promise<{ text: string } | { skip: "large" | "binary" | "unreadable" }> {
+  let fh: FileHandle | undefined;
+  try {
+    fh = await open(path, "r");
+    const { size } = await fh.stat();
+    if (size > maxBytes) {
+      const head = Buffer.alloc(Math.min(size, BINARY_SNIFF_BYTES));
+      const { bytesRead } = await fh.read(head, 0, head.length, 0);
+      return { skip: head.subarray(0, bytesRead).includes(0) ? "binary" : "large" };
+    }
+    const buf = await fh.readFile();
+    if (buf.subarray(0, BINARY_SNIFF_BYTES).includes(0)) return { skip: "binary" };
+    return { text: buf.toString("utf8") };
+  } catch {
+    return { skip: "unreadable" };
+  } finally {
+    await fh?.close().catch(() => undefined);
   }
 }
 
@@ -1540,6 +2113,9 @@ async function walkAndMatch(
   exclude: string[] = [],
 ): Promise<string[]> {
   const results: string[] = [];
+  // Both matchers are compiled once per walk, not once per file.
+  const matcher = new Minimatch(pattern, { dot: true, matchBase: !pattern.includes("/") });
+  const excluded = compileExcludes(exclude);
 
   async function walk(dir: string): Promise<void> {
     if (results.length >= maxResults) return;
@@ -1547,16 +2123,19 @@ async function walkAndMatch(
     if (!entries) return;
     for (const entry of entries) {
       if (results.length >= maxResults) break;
-      if (entry.name.startsWith(".") || SKIP_DIRS.has(entry.name)) continue;
+      // Dot entries are NOT skipped as a class. The candidate walker scans
+      // them (minimatch `dot: true`), and agents target `.github/workflows/*`
+      // and `.env*`, so hiding them here made Grep and Glob answer "(no
+      // matches)" for the very files those agents were given.
+      if (SKIP_DIRS.has(entry.name)) continue;
       const fullPath = join(dir, entry.name);
       const relPath = normalizeSep(relative(rootDir, fullPath));
       // Excluded paths are treated as deleted — never descended or matched.
-      if (isExcludedPath(relPath, exclude)) continue;
+      if (excluded(relPath)) continue;
       if (entry.isDirectory()) {
         await walk(fullPath);
       } else {
-        const matchOpts = { dot: true, matchBase: !pattern.includes("/") };
-        if (minimatch(relPath, pattern, matchOpts)) {
+        if (matcher.match(relPath)) {
           results.push(relPath);
         }
       }
@@ -2051,13 +2630,18 @@ export function warnIfTurnCapped(label: string, result: unknown, maxTurns: numbe
  * the whole point. Reads every field defensively so a provider that omits one
  * degrades to a 0/"unknown" rather than throwing inside the error path.
  */
-function logUnparseableGeneration(label: string, result: unknown): void {
+export function logUnparseableGeneration(label: string, result: unknown): void {
   const r = (result ?? {}) as {
     text?: unknown;
     reasoning?: unknown;
     finishReason?: unknown;
     usage?: { promptTokens?: unknown; completionTokens?: unknown };
-    steps?: Array<{ text?: unknown; finishReason?: unknown; toolCalls?: unknown[] }>;
+    steps?: Array<{
+      text?: unknown;
+      finishReason?: unknown;
+      toolCalls?: unknown[];
+      usage?: { promptTokens?: unknown };
+    }>;
   };
   const textChars = typeof r.text === "string" ? r.text.length : 0;
   const reasoningChars = typeof r.reasoning === "string" ? r.reasoning.length : 0;
@@ -2069,11 +2653,16 @@ function logUnparseableGeneration(label: string, result: unknown): void {
   const lastFinish = last && typeof last.finishReason === "string" ? last.finishReason : "n/a";
   const lastToolCalls = last && Array.isArray(last.toolCalls) ? last.toolCalls.length : 0;
   const lastTextChars = last && typeof last.text === "string" ? last.text.length : 0;
+  // `usage.promptTokens` above is the SUM over every step, so it grows with the
+  // step count. The last step's own prompt is the peak transcript, and a peak
+  // near the model's context window is its own cause of an empty answer.
+  const lastPromptTokens = numberish(last?.usage?.promptTokens);
   logWarn(
     `[${label}] unparseable model response: finishReason=${finishReason} ` +
       `textChars=${textChars} reasoningChars=${reasoningChars} ` +
       `promptTokens=${promptTokens} completionTokens=${completionTokens} ` +
-      `steps=${steps.length} lastStep(finish=${lastFinish},toolCalls=${lastToolCalls},textChars=${lastTextChars})` +
+      `steps=${steps.length} lastPromptTokens=${lastPromptTokens} ` +
+      `lastStep(finish=${lastFinish},toolCalls=${lastToolCalls},textChars=${lastTextChars})` +
       `${formatGenerationIds(result)}`,
   );
 }

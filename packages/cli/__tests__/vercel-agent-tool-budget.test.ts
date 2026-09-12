@@ -85,6 +85,7 @@ describe("exhaustion warning", () => {
     // Comfortably larger than the 1 KB budget the tests below set.
     writeFileSync(join(root, "big.ts"), "x".repeat(4000), "utf8");
     writeFileSync(join(root, "other.ts"), "y".repeat(4000), "utf8");
+    vi.spyOn(console, "log").mockImplementation(() => {});
     warn = vi.spyOn(console, "warn").mockImplementation(() => {});
   });
 
