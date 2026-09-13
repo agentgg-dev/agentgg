@@ -27,8 +27,9 @@ function csv(raw: string | undefined): string[] {
  * without a CLI rebuild. Defaults are tuned for a code-analysis agent:
  * fp8 only (quality on coding/tool-use), require the params we send
  * (drops providers that would silently ignore tool-calls), and route by
- * throughput. An explicit OPENROUTER_PROVIDER_ORDER pins an allow-list
- * and switches off open fallback.
+ * price, as production does (a throughput sort sent test runs to a provider
+ * costing about 3x per call). An explicit OPENROUTER_PROVIDER_ORDER pins an
+ * allow-list and switches off open fallback.
  *
  * OPENROUTER_IGNORE is the escape hatch for a provider whose serving stack
  * is broken for this model. It is a CSV of provider slugs and applies in
@@ -57,7 +58,7 @@ export function buildProviderRouting(overrideJson?: string): Record<string, unkn
     routing.order = order;
     routing.allow_fallbacks = process.env.OPENROUTER_ALLOW_FALLBACKS !== "0";
   } else {
-    routing.sort = process.env.OPENROUTER_SORT ?? "throughput";
+    routing.sort = process.env.OPENROUTER_SORT ?? "price";
   }
   const prompt = process.env.OPENROUTER_MAX_PRICE_PROMPT;
   const completion = process.env.OPENROUTER_MAX_PRICE_COMPLETION;

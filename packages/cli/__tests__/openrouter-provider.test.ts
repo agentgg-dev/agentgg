@@ -28,11 +28,12 @@ afterEach(() => {
 });
 
 describe("buildProviderRouting", () => {
-  it("defaults to fp8 + require_parameters + throughput sort", () => {
+  // Production routes by price (Terraform `openrouter_sort`); the CLI matches it.
+  it("defaults to fp8 + require_parameters + price sort", () => {
     const r = buildProviderRouting();
     expect(r.quantizations).toEqual(["fp8"]);
     expect(r.require_parameters).toBe(true);
-    expect(r.sort).toBe("throughput");
+    expect(r.sort).toBe("price");
     expect(r.order).toBeUndefined();
   });
 
@@ -94,7 +95,7 @@ describe("buildProviderRouting with --openrouter-routing override", () => {
 
   it("ignores an empty / whitespace override (env defaults stand)", () => {
     const r = buildProviderRouting("   ");
-    expect(r.sort).toBe("throughput");
+    expect(r.sort).toBe("price");
     expect(r.order).toBeUndefined();
   });
 
