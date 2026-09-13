@@ -147,6 +147,9 @@ missing guard upstream can confirm it).
 Before deciding, actually investigate:
 - Grep for the sink method / endpoint named in the finding to locate its
   callers and the request handler that reaches it.
+- If the sink is reached through type dispatch (an instanceof check, a
+  visitor, or a class registered by type), also Grep for the class name: a
+  search for the method name does not find those call sites.
 - Read those intermediate files. Confirm whether the untrusted input
   really flows to the sink UNCHANGED, or whether an intermediate step
   filters, allowlists, or otherwise constrains it (e.g. the input is used

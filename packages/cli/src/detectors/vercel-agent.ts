@@ -27,14 +27,17 @@ import {
   type DetectionResult as DetectionResultType,
   type Detector,
   hydrateFinding,
+  languageFromPath,
   PreconditionCheck,
   type PreconditionCheckArgs,
   type ReconArgs,
   ReconResult,
   type RunAgentArgs,
+  repairFindingExcerpts,
   repairFindingPath,
   type SuggestExcludesArgs,
   SuggestExcludesResult,
+  type UnverifiedExcerpt,
 } from "../detect.js";
 import { ExpectedDetectorError } from "../diagnostics.js";
 import { logError, logInfo, logWarn } from "../log.js";
@@ -518,6 +521,9 @@ export function readCoverage() {
     },
   };
 }
+
+/** One replacement excerpt per flagged block, in order. */
+const RequotedExcerpts = z.object({ excerpts: z.array(z.string()) });
 
 /** Monotonic session counter behind `sessionLabel`. Process-wide: one scan is
  *  one process, so the numbers stay unique for the whole run. */
@@ -1038,13 +1044,81 @@ export class VercelAgentDetector implements Detector {
         throw parseErr;
       }
       const fallback = args.candidates[0]?.filePath ?? "(unknown)";
-      return result.findings.map((f) =>
+      const findings = result.findings.map((f) =>
         hydrateFinding(repairFindingPath(f, args.rootDir, args.candidates), args.agent, fallback),
       );
+      return await this.verifyExcerpts(label, findings, args);
     } catch (err) {
       debugLog("VercelAgentDetector.runAgent", err);
       throw err;
     }
+  }
+
+  /**
+   * Re-quotes invented code once per finding (`repairFindingExcerpts`). Sources
+   * are the batch files plus the finding's own file, which the model may have
+   * found with its tools.
+   */
+  private async verifyExcerpts(
+    label: string,
+    findings: Finding[],
+    args: RunAgentArgs & { signal?: AbortSignal },
+  ): Promise<Finding[]> {
+    const out: Finding[] = [];
+    for (const finding of findings) {
+      const sources = args.candidates.map((c) => c.content);
+      let fileText = args.candidates.find((c) => c.filePath === finding.filePath)?.content;
+      if (fileText === undefined) {
+        fileText = await readFile(resolve(args.rootDir, finding.filePath), "utf-8").catch(
+          () => undefined,
+        );
+        if (fileText !== undefined) sources.push(fileText);
+      }
+      const text = fileText;
+      const { finding: checked, outcome } = await repairFindingExcerpts(
+        finding,
+        sources,
+        text === undefined || args.signal?.aborted
+          ? undefined
+          : (flagged) => this.requote(label, finding, text, flagged, args.signal),
+      );
+      if (outcome === "requoted")
+        logInfo(`[${label}] re-quoted invented code in finding ${finding.id}`);
+      if (outcome === "unverified") {
+        logWarn(`[${label}] quoted code in finding ${finding.id} could not be verified`);
+      }
+      out.push(checked);
+    }
+    return out;
+  }
+
+  private async requote(
+    label: string,
+    finding: Finding,
+    fileText: string,
+    flagged: readonly UnverifiedExcerpt[],
+    signal?: AbortSignal,
+  ): Promise<readonly string[]> {
+    const fence = "```";
+    const lang = languageFromPath(finding.filePath);
+    const excerpts = flagged.map((b, i) => `### Excerpt ${i + 1}\n${b.body}`).join("\n\n");
+    const { object } = await this.metered(
+      () =>
+        generateObject({
+          model: this.model,
+          schema: RequotedExcerpts,
+          mode: this.objectMode,
+          prompt:
+            `A security finding about ${finding.filePath} quotes code that is not in that file. ` +
+            "For each excerpt below, return the lines from the file that show the same code, " +
+            "copied exactly. Return one string per excerpt, in order, without code fences.\n\n" +
+            `## ${finding.filePath}\n${fence}${lang}\n${fileText}\n${fence}\n\n${excerpts}`,
+          providerOptions: this.providerOptionsArg(),
+          abortSignal: signal,
+        }),
+      { label: `${label}:requote`, signal },
+    );
+    return object.excerpts;
   }
 
   async checkPrecondition(

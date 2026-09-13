@@ -45,7 +45,7 @@ export const LlmFinding = z.object({
   details: z
     .string()
     .describe(
-      "Markdown body with the full analysis. Point to the affected source code: include the file path, line numbers, and a fenced code block excerpt. Explain why this code is unsafe.",
+      "Markdown body with the full analysis. Point to the affected source code: include the file path, line numbers, and a fenced code block excerpt copied verbatim from the file (never reconstructed or paraphrased), tagged with the file's language. Explain why this code is unsafe.",
     ),
   poc: z
     .string()
@@ -871,6 +871,167 @@ export function repairFindingPath(
   if (existsSync(resolve(rootDir, reported))) return raw;
   const repaired = resolveCandidatePath(reported, candidates);
   return repaired === undefined || repaired === reported ? raw : { ...raw, filePath: repaired };
+}
+
+/** Fence tags that name a language by a short alias. */
+const FENCE_ALIASES: Record<string, string> = {
+  ts: "typescript",
+  tsx: "typescript",
+  js: "javascript",
+  jsx: "javascript",
+  py: "python",
+  rb: "ruby",
+  kt: "kotlin",
+  cs: "csharp",
+  sh: "bash",
+  yml: "yaml",
+};
+
+/** Shorter normalized lines (`}`, `return x;`) match almost any file. */
+const MIN_EVIDENCE_CHARS = 10;
+
+interface FencedBlock {
+  index: number;
+  tag: string;
+  open: number;
+  close: number;
+}
+
+function fencedBlocks(lines: readonly string[]): FencedBlock[] {
+  const blocks: FencedBlock[] = [];
+  let open = -1;
+  let tag = "";
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (!t.startsWith("```")) continue;
+    if (open < 0) {
+      open = i;
+      tag = t.slice(3).trim().split(" ")[0].toLowerCase();
+    } else {
+      blocks.push({ index: blocks.length, tag, open, close: i });
+      open = -1;
+    }
+  }
+  return blocks;
+}
+
+/** Drops `//` comments and all whitespace: reflowed Java was 44 of 65 exact-match misses. */
+function normalizeCode(text: string): string {
+  const code = text
+    .split("\n")
+    .map((line) => {
+      const at = line.indexOf("//");
+      return at < 0 ? line : line.slice(0, at);
+    })
+    .join("");
+  return Array.from(code)
+    .filter((c) => c.trim() !== "")
+    .join("");
+}
+
+export interface UnverifiedExcerpt {
+  /** Position among all fenced blocks in `details`. */
+  index: number;
+  body: string;
+}
+
+/**
+ * Fenced blocks in `details` with a line found in none of `sources`. About 1
+ * finding in 9 quoted invented code (geotools, 2026-09-13). A block tagged with
+ * another language is example output, not source, so it is skipped.
+ */
+export function findUnverifiedExcerpts(
+  details: string,
+  sources: readonly string[],
+  language: string,
+): UnverifiedExcerpt[] {
+  const lines = details.split("\n");
+  const haystacks = sources.map(normalizeCode);
+  const out: UnverifiedExcerpt[] = [];
+  for (const block of fencedBlocks(lines)) {
+    const tag = FENCE_ALIASES[block.tag] ?? block.tag;
+    if (tag !== "" && tag !== language) continue;
+    const body = lines.slice(block.open + 1, block.close);
+    const invented = body.some((line) => {
+      const needle = normalizeCode(line);
+      return needle.length >= MIN_EVIDENCE_CHARS && !haystacks.some((h) => h.includes(needle));
+    });
+    if (invented) out.push({ index: block.index, body: body.join("\n") });
+  }
+  return out;
+}
+
+/** Replaces the bodies of the given blocks; every other character stays. */
+export function replaceExcerpts(details: string, bodies: ReadonlyMap<number, string>): string {
+  const lines = details.split("\n");
+  // Last block first, so earlier line numbers stay valid while splicing.
+  for (const block of fencedBlocks(lines).reverse()) {
+    const body = bodies.get(block.index);
+    if (body !== undefined)
+      lines.splice(block.open + 1, block.close - block.open - 1, ...body.split("\n"));
+  }
+  return lines.join("\n");
+}
+
+export const UNVERIFIED_EXCERPT_NOTE =
+  "Note: part of the code quoted above could not be found in the scanned source, so it may not match the real code.";
+
+export function markExcerptsUnverified(details: string): string {
+  return `${details}\n\n_${UNVERIFIED_EXCERPT_NOTE}_`;
+}
+
+/** A re-quote must carry real evidence; an empty or trivial one would pass the check. */
+function quotesRealCode(body: string, sources: readonly string[], language: string): boolean {
+  const lines = body.split("\n");
+  // A model can wrap its answer in fences despite being told not to.
+  if (lines[0]?.trim().startsWith("```")) lines.shift();
+  if (lines.at(-1)?.trim().startsWith("```")) lines.pop();
+  const code = lines.join("\n");
+  const hasEvidence = lines.some((line) => normalizeCode(line).length >= MIN_EVIDENCE_CHARS);
+  return (
+    hasEvidence &&
+    findUnverifiedExcerpts(["```", code, "```"].join("\n"), sources, language).length === 0
+  );
+}
+
+export type ExcerptOutcome = "verified" | "requoted" | "unverified";
+
+/**
+ * Checks a finding's quoted code and asks for at most ONE re-quote of what is
+ * invented. Only `details` changes: the id hashes slug, path, title and line
+ * range, and carries a person's triage status. A re-quote that still fails
+ * keeps the original and marks it, so a real bug is never dropped.
+ */
+export async function repairFindingExcerpts(
+  finding: Finding,
+  sources: readonly string[],
+  requote?: (flagged: readonly UnverifiedExcerpt[]) => Promise<readonly string[]>,
+): Promise<{ finding: Finding; outcome: ExcerptOutcome }> {
+  const language = languageFromPath(finding.filePath);
+  const flagged = findUnverifiedExcerpts(finding.details, sources, language);
+  if (flagged.length === 0) return { finding, outcome: "verified" };
+  let replacements: readonly string[] = [];
+  if (requote) {
+    try {
+      replacements = await requote(flagged);
+    } catch {
+      // A failed call counts as a failed re-quote: keep and mark below.
+    }
+  }
+  const accepted = new Map<number, string>();
+  flagged.forEach((block, i) => {
+    const body = replacements[i];
+    if (body !== undefined && quotesRealCode(body, sources, language))
+      accepted.set(block.index, body);
+  });
+  const details = replaceExcerpts(finding.details, accepted);
+  if (accepted.size === flagged.length) {
+    return { finding: { ...finding, details }, outcome: "requoted" };
+  }
+  return {
+    finding: { ...finding, details: markExcerptsUnverified(details) },
+    outcome: "unverified",
+  };
 }
 
 export function hydrateFinding(raw: LlmFinding, agent: Agent, fallbackFilePath: string): Finding {

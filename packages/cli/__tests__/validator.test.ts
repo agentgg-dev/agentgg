@@ -165,6 +165,24 @@ describe("buildValidatePrompt", () => {
     expect(out).toContain("Return a verdict");
   });
 
+  // Type dispatch (`instanceof`, a visitor, a registered class) is found by the
+  // class name; a search for the method name misses it.
+  it("tells a tool-enabled validator to search the class name for type dispatch", () => {
+    const out = buildValidatePrompt({ finding: makeFinding(), fileContent: "x", root: "/repo" });
+    expect(out).toContain("instanceof");
+    expect(out).toMatch(/class name/i);
+  });
+
+  it("keeps the type-dispatch advice when an agent sets its own rules", () => {
+    const out = buildValidatePrompt({
+      finding: makeFinding(),
+      fileContent: "x",
+      root: "/repo",
+      validationPrompt: "AGENT_RULES_TOKEN",
+    });
+    expect(out).toContain("instanceof");
+  });
+
   it("ignores a blank validation prompt and keeps the default rules", () => {
     const out = buildValidatePrompt({
       finding: makeFinding(),
