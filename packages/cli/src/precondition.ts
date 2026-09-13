@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Agent, PreconditionRegex, ReconReport } from "@agentgg/core";
 import { minimatch } from "minimatch";
+import { compileAgentRegex } from "./agent-regex.js";
 import { runConcurrent } from "./concurrent.js";
 import type { Detector } from "./detect.js";
 import { renderReconForPrompt } from "./recon.js";
@@ -187,7 +188,7 @@ export function evaluateRegex(
   for (const p of regex.patterns) {
     let re: RegExp;
     try {
-      re = new RegExp(p.regex);
+      re = compileAgentRegex(p.regex);
     } catch {
       continue; // bad regex in the template — skip rather than crash
     }

@@ -1,4 +1,5 @@
 import { type AgentPreFilterPattern, isRegexPreFilter } from "@agentgg/core";
+import { compileAgentRegex } from "./agent-regex.js";
 
 /**
  * One line where an agent's preFilter regex matched. The
@@ -71,7 +72,7 @@ export function evaluatePreFilter(
     const { regex, label } = entry;
     let re: RegExp;
     try {
-      re = new RegExp(regex);
+      re = compileAgentRegex(regex);
     } catch {
       // Bad regex in the agent .md — skip it rather than crash the
       // whole scan. The author should fix it; we surface a warning

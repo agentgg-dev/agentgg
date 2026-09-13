@@ -9,6 +9,7 @@ import {
   isSemgrepPreFilter,
   loadAgentsFromDir,
 } from "@agentgg/core";
+import { compileAgentRegex } from "./agent-regex.js";
 import { getCustomAgentsDir } from "./agents-fs.js";
 
 /** Official subtree that is opt-in only, never part of the default set. */
@@ -170,7 +171,7 @@ export function lintOfficialAgents(agents: ReadonlyArray<Agent>): string[] {
     ];
     for (const { regex, field } of patterns) {
       try {
-        new RegExp(regex);
+        compileAgentRegex(regex);
       } catch (err) {
         violations.push(
           `invalid regex in ${field}: /${regex}/ — ${(err as Error).message}\n    ${path}`,
