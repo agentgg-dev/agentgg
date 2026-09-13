@@ -2,7 +2,12 @@ import type { Finding } from "@agentgg/core";
 import { MockLanguageModelV1 } from "ai/test";
 import { describe, expect, it } from "vitest";
 import { VercelAgentDetector } from "../src/detectors/vercel-agent.js";
-import { asValidationField, buildValidatePrompt, LlmValidation } from "../src/validator.js";
+import {
+  asValidationField,
+  buildScopeValidatePrompt,
+  buildValidatePrompt,
+  LlmValidation,
+} from "../src/validator.js";
 
 function makeFinding(overrides: Partial<Finding> = {}): Finding {
   return {
@@ -183,6 +188,30 @@ describe("buildValidatePrompt", () => {
     expect(out).toContain("instanceof");
   });
 
+  // One home per case. The scope document sent trusted input to out-of-scope,
+  // these rules sent it to uncertain, and 9 of 10 verdicts that changed on
+  // revalidate (2026-09-13) were that case.
+  it("does not send a trusted or privileged actor to uncertain", () => {
+    const out = buildValidatePrompt({
+      finding: makeFinding(),
+      fileContent: "x",
+      root: "/repo",
+      scope: "SCOPE",
+    });
+    expect(out).not.toMatch(/privileged or otherwise trusted actor/);
+    expect(out).not.toMatch(/reachable only by a privileged actor/);
+  });
+
+  it("names trust-boundary rules as a reason for out-of-scope", () => {
+    const out = buildValidatePrompt({ finding: makeFinding(), fileContent: "x", scope: "SCOPE" });
+    expect(out).toMatch(/trust.boundary/i);
+  });
+
+  it("calls a guard that lets only trusted values reach the sink a false positive", () => {
+    const out = buildValidatePrompt({ finding: makeFinding(), fileContent: "x", root: "/repo" });
+    expect(out).toMatch(/only trusted values/i);
+  });
+
   it("ignores a blank validation prompt and keeps the default rules", () => {
     const out = buildValidatePrompt({
       finding: makeFinding(),
@@ -315,5 +344,12 @@ describe("VercelAgentDetector.validateFinding (single-shot, no root)", () => {
         fileContent: "x",
       }),
     ).rejects.toThrow();
+  });
+});
+
+describe("buildScopeValidatePrompt", () => {
+  it("names trust-boundary rules as a reason for out-of-scope", () => {
+    const out = buildScopeValidatePrompt({ finding: makeFinding(), scope: "SCOPE" });
+    expect(out).toMatch(/trust.boundary/i);
   });
 });

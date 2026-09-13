@@ -110,9 +110,13 @@ export function buildValidatePrompt(args: {
 The document below describes what's in-scope for this engagement
 (usually a SECURITY.md). If the finding describes a real bug but its
 file path, vulnerability class, or affected component is explicitly
-excluded by this scope, return \`out-of-scope\`. Quote the matching
-scope rule in your reasoning. If nothing in the scope disqualifies it,
-ignore the scope and judge the finding on technical merit.
+excluded by this scope, return \`out-of-scope\`. Also return
+\`out-of-scope\` when the scope's trust boundary rules exclude it:
+only an actor already on the trusted side (an administrator, a database
+owner, or someone who controls the data source) can supply the unsafe
+value. Quote the matching scope rule in your reasoning. If nothing in
+the scope disqualifies it, ignore the scope and judge the finding on
+technical merit.
 
 \`\`\`
 ${scope}
@@ -160,10 +164,15 @@ Before deciding, actually investigate:
 Only after tracing the reachable path end to end should you classify. If
 the reported mechanism is broken by an intermediate guard (for example
 the input only selects an already-trusted value rather than being the
-sink argument): return 'false-positive' when no real vulnerability
-remains, or 'uncertain' when a weaker or different real issue remains (a
-different entry point, or one reachable only by a privileged actor). Do
-NOT confirm the original writeup in that case.
+sink argument), return 'false-positive'. A guard that lets
+only trusted values reach the sink leaves no real vulnerability, even
+though the unsafe code is still there. This comes before the scope
+rules: if the reported untrusted input cannot carry an unsafe value to
+the sink, return 'false-positive' even when a trusted actor could reach
+the same sink another way. Return 'uncertain' only when a different
+real path from untrusted input remains, such as a different entry
+point, and you could not verify it. Do NOT confirm the original writeup
+in that case.
 `
     : "";
 
@@ -178,12 +187,15 @@ code element AND a concrete, working exploit path from an
 attacker-reachable entry point, AND the finding as reported matches that
 path. If you are not that certain, do not confirm.
 
-Use 'uncertain' whenever a real issue is plausible but you cannot stand
-behind the report as written: the reported entry point turns out to be a
-filter or guard, the described PoC does not actually work as stated, the
-true exploit path runs through a different endpoint than the title
-claims, exploitation depends on a privileged or otherwise trusted actor,
-or you could not fully verify reachability. 'uncertain' is the correct
+Use 'uncertain' whenever a real issue that untrusted input can reach is
+plausible but you cannot stand behind the report as written: the
+reported entry point turns out to be a filter or guard, the described
+PoC does not actually work as stated, the true exploit path runs through
+a different endpoint than the title claims, or you could not fully
+verify reachability. When only a trusted actor can supply the unsafe
+value, that is not 'uncertain': it is 'out-of-scope' under the scope
+rules, or 'false-positive' when a guard lets only trusted values reach
+the sink. 'uncertain' is the correct
 home for "there is probably something here, but not the clean, certain,
 report-it-upstream finding that was described." Confirming a shaky or
 mischaracterized finding is worse than an honest 'uncertain'.
@@ -292,8 +304,10 @@ ${finding.impact}
 
 The document below describes what's in-scope for this engagement
 (usually a SECURITY.md). If the finding's file path, vulnerability
-class, or affected component is explicitly excluded by this scope,
-return \`out-of-scope\` and quote the matching rule. Otherwise return
+class, or affected component is explicitly excluded by this scope, or
+the scope's trust boundary rules exclude it because only an actor
+already on the trusted side can supply the unsafe value, return
+\`out-of-scope\` and quote the matching rule. Otherwise return
 \`uncertain\` — that signals the scope did not disqualify the finding
 (full validation against the source is still needed to confirm or
 dismiss it).
