@@ -1226,6 +1226,27 @@ export class VercelAgentDetector implements Detector {
           (o) => `verdict ${o.verdict}`,
           args.signal,
         );
+      } else if (
+        isTurnCapped(gen, this.validateMaxTurns) &&
+        !hasVerdict(answer) &&
+        !looksLikeRefusal(answer)
+      ) {
+        // GLM ignores `toolChoice: "none"`, so a capped loop often spends its
+        // reserved turn on a tool call written as prose. Reformatting that text
+        // invents a verdict from a non-answer (new1b, 2026-09-13).
+        logWarn(
+          `[${label}] the loop was cut short and its last message is not a verdict; asking again with no tools`,
+        );
+        const retry = await this.answerWithoutTools(
+          label,
+          prompt,
+          gen,
+          "validate",
+          LlmValidation,
+          (o) => `verdict ${o.verdict}`,
+          args.signal,
+        );
+        if (retry.trim()) answer = retry;
       }
       return await this.parseValidation(answer, args.finding.id, args.signal);
     } catch (err) {
@@ -2743,9 +2764,25 @@ export function logGenerationIds(
   logInfo(`[${label}] call complete:${ids}`, "err");
 }
 
-export function warnIfTurnCapped(label: string, result: unknown, maxTurns: number): void {
+/** The loop spent its whole turn budget, so its analysis stopped early. */
+export function isTurnCapped(result: unknown, maxTurns: number): boolean {
   const steps = (result as { steps?: unknown[] })?.steps;
-  if (!Array.isArray(steps) || steps.length < maxTurns + 1) return;
+  return Array.isArray(steps) && steps.length >= maxTurns + 1;
+}
+
+/** The text already carries a verdict, so nothing needs re-asking. */
+function hasVerdict(text: string): boolean {
+  try {
+    LlmValidation.parse(extractJSON(text));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function warnIfTurnCapped(label: string, result: unknown, maxTurns: number): void {
+  if (!isTurnCapped(result, maxTurns)) return;
+  const steps = (result as { steps?: unknown[] }).steps as unknown[];
   const last = steps[steps.length - 1] as { toolCalls?: unknown[] } | undefined;
   const stillCalling = Array.isArray(last?.toolCalls) && last.toolCalls.length > 0;
   logWarn(

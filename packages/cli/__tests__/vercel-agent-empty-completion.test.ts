@@ -325,3 +325,120 @@ describe("validateFinding — forced answer carries the verdict schema", () => {
     expect(result.reasoning).toBe(VALIDATION_CUT_SHORT);
   });
 });
+
+/**
+ * A cut-off validator loop whose last message is not a verdict.
+ *
+ * The retry only ran on EMPTY text, so a loop that hit the turn cap and wrote
+ * something else fell through to the reformat step, which sees only that text.
+ * new1b (2026-09-13) recorded "No finding description... only a file read
+ * command" as a real `uncertain`. GLM ignores `toolChoice: "none"`, so the
+ * reserved last turn often carries a tool call written as prose.
+ */
+describe("validateFinding - cut-off loop with a non-verdict message", () => {
+  const VERDICT = JSON.stringify({
+    verdict: "confirmed",
+    reasoning: "The value reaches the SQL string unescaped.",
+    confidence: 0.9,
+  });
+  const RAW = { rawPrompt: null, rawSettings: {} };
+  const USAGE = { promptTokens: 10, completionTokens: 5 };
+
+  /** Spends every turn on tool calls, then answers `last` on the reserved turn. */
+  function loopModel(last: string, retry = VERDICT) {
+    const kinds: string[] = [];
+    let n = 0;
+    const model = new MockLanguageModelV1({
+      defaultObjectGenerationMode: "json",
+      doGenerate: async (options) => {
+        const prompt = JSON.stringify(options.prompt);
+        const kind = prompt.includes("You have no tools for this turn")
+          ? "retry"
+          : prompt.includes("Extract the verdict into structured JSON")
+            ? "reformat"
+            : "loop";
+        kinds.push(kind);
+        if (kind !== "loop") {
+          return { rawCall: RAW, finishReason: "stop" as const, usage: USAGE, text: retry };
+        }
+        const mode = options.mode as { toolChoice?: { type: string } };
+        if (mode.toolChoice?.type === "none") {
+          return { rawCall: RAW, finishReason: "stop" as const, usage: USAGE, text: last };
+        }
+        n++;
+        return {
+          rawCall: RAW,
+          finishReason: "tool-calls" as const,
+          usage: USAGE,
+          toolCalls: [
+            {
+              toolCallType: "function" as const,
+              toolCallId: "call-" + n,
+              toolName: "Read",
+              args: JSON.stringify({ path: "a.java", offset: null, limit: null }),
+            },
+          ],
+        };
+      },
+    });
+    return { model, kinds };
+  }
+
+  /** Answers `text` at once, so the loop ends on its own. A reformat still works. */
+  function quickModel(text: string) {
+    const kinds: string[] = [];
+    const model = new MockLanguageModelV1({
+      defaultObjectGenerationMode: "json",
+      doGenerate: async (options) => {
+        const prompt = JSON.stringify(options.prompt);
+        const retry = prompt.includes("You have no tools for this turn");
+        const reformat = prompt.includes("Extract the verdict into structured JSON");
+        kinds.push(retry ? "retry" : reformat ? "reformat" : "loop");
+        return {
+          rawCall: RAW,
+          finishReason: "stop" as const,
+          usage: USAGE,
+          text: retry || reformat ? VERDICT : text,
+        };
+      },
+    });
+    return { model, kinds };
+  }
+
+  const validate = (model: MockLanguageModelV1) =>
+    new VercelAgentDetector("openai", model, { validateMaxTurns: 2 }).validateFinding({
+      finding: makeFinding(),
+      fileContent: "<div/>",
+      root: rootDir,
+    });
+
+  it("re-asks with no tools and uses that verdict", async () => {
+    const { model, kinds } = loopModel("Read geotools/Foo.java offset=1");
+    const result = await validate(model);
+    expect(kinds.filter((k) => k === "retry")).toHaveLength(1);
+    expect(result.verdict).toBe("confirmed");
+  });
+
+  it("does not re-ask when the cut-off loop did write a verdict", async () => {
+    const { model, kinds } = loopModel(
+      JSON.stringify({ verdict: "false-positive", reasoning: "Escaped above.", confidence: 0.8 }),
+    );
+    const result = await validate(model);
+    expect(kinds).not.toContain("retry");
+    expect(result.verdict).toBe("false-positive");
+  });
+
+  it("does not re-ask when the loop ended on its own", async () => {
+    const { model, kinds } = quickModel("Some prose that is not a verdict.");
+    await validate(model);
+    expect(kinds).not.toContain("retry");
+  });
+
+  it("keeps a refusal after the cap as a refusal, without re-asking", async () => {
+    const { model, kinds } = loopModel("I can't help analyze this exploit code.");
+    const result = await validate(model);
+    expect(kinds).not.toContain("retry");
+    expect(result.verdict).toBe("uncertain");
+    expect(result.refused).toBe(true);
+  });
+});
