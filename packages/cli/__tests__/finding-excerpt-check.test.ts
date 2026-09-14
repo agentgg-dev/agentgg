@@ -217,3 +217,85 @@ describe("repairFindingExcerpts", () => {
     expect(out.finding.details).toMatch(/could not be found/);
   });
 });
+
+/**
+ * Corrections from the audit of 105 real findings (2026-09-13). Lines under 20
+ * characters matched by chance, lines shortened with "..." are abbreviations of
+ * real code, and correct quotes from files outside the batch were flagged:
+ * `JDBCDataStore` quoted `SQLDialect.getNameEscape`, which was not in its batch.
+ */
+describe("excerpt check, audit corrections", () => {
+  const elsewhere = (needle: string) => needle.includes("getNameEscape");
+  const quoting = (code: string): Finding =>
+    ({
+      id: "abc123abc123",
+      agentSlug: "sql-injection",
+      title: "t",
+      vulnSlug: "sql-injection",
+      filePath: "FilterToSqlHelper.java",
+      lineRange: [3, 4],
+      summary: "s",
+      details: details(`${F}java`, code, F),
+      poc: "p",
+      impact: "i",
+      references: [],
+      confidence: 0.9,
+      notifications: [],
+    }) as Finding;
+
+  it("does not count a 17-character line as evidence", () => {
+    // VirtualTable, a confirmed critical, was flagged only for this line.
+    const d = details(`${F}java`, "private String sql;", F);
+    expect(findUnverifiedExcerpts(d, [SOURCE], "java")).toEqual([]);
+  });
+
+  it("ignores a line shortened with an ellipsis", () => {
+    const d = details(`${F}java`, 'String sql = "SELECT ... FROM sys.indexes ind ... WHERE x";', F);
+    expect(findUnverifiedExcerpts(d, [SOURCE], "java")).toEqual([]);
+  });
+
+  it("still flags an invented line next to a shortened one", () => {
+    const d = details(
+      `${F}java`,
+      'String sql = "SELECT ... FROM t";',
+      "LiteralExpressionImpl lit = (LiteralExpressionImpl) expr;",
+      F,
+    );
+    expect(findUnverifiedExcerpts(d, [SOURCE], "java")).toHaveLength(1);
+  });
+
+  it("accepts a line that exists elsewhere in the repository", () => {
+    const d = details(`${F}java`, "String nameEscape = getNameEscape();", F);
+    expect(findUnverifiedExcerpts(d, [SOURCE], "java", elsewhere)).toEqual([]);
+  });
+
+  it("asks the repository only about lines the sources lack", () => {
+    const asked: string[] = [];
+    const d = details(
+      `${F}java`,
+      "Object value = ((LiteralExpressionImpl) expected).getValue();",
+      "String nameEscape = getNameEscape();",
+      F,
+    );
+    findUnverifiedExcerpts(d, [SOURCE], "java", (needle) => {
+      asked.push(needle);
+      return true;
+    });
+    expect(asked).toHaveLength(1);
+  });
+
+  it("does not re-quote code that exists elsewhere in the repository", async () => {
+    let calls = 0;
+    const out = await repairFindingExcerpts(
+      quoting("String nameEscape = getNameEscape();"),
+      [SOURCE],
+      async () => {
+        calls++;
+        return [];
+      },
+      elsewhere,
+    );
+    expect(out.outcome).toBe("verified");
+    expect(calls).toBe(0);
+  });
+});

@@ -26,8 +26,10 @@ import {
   DetectionResult,
   type DetectionResult as DetectionResultType,
   type Detector,
+  findUnverifiedExcerpts,
   hydrateFinding,
   languageFromPath,
+  normalizeCode,
   PreconditionCheck,
   type PreconditionCheckArgs,
   type ReconArgs,
@@ -1075,12 +1077,19 @@ export class VercelAgentDetector implements Detector {
         if (fileText !== undefined) sources.push(fileText);
       }
       const text = fileText;
+      const language = languageFromPath(finding.filePath);
+      // The repository is indexed only once some quote misses the batch files.
+      const clean = findUnverifiedExcerpts(finding.details, sources, language).length === 0;
+      const index = clean
+        ? []
+        : await this.sourceIndex(args.rootDir, language, args.excludePatterns);
       const { finding: checked, outcome } = await repairFindingExcerpts(
         finding,
         sources,
         text === undefined || args.signal?.aborted
           ? undefined
           : (flagged) => this.requote(label, finding, text, flagged, args.signal),
+        (needle) => index.some((t) => t.includes(needle)),
       );
       if (outcome === "requoted")
         logInfo(`[${label}] re-quoted invented code in finding ${finding.id}`);
@@ -1090,6 +1099,19 @@ export class VercelAgentDetector implements Detector {
       out.push(checked);
     }
     return out;
+  }
+
+  /** Normalized source per root, language and excludes; built once per scan. */
+  private readonly sourceIndexes = new Map<string, Promise<string[]>>();
+
+  private sourceIndex(rootDir: string, language: string, exclude: string[]): Promise<string[]> {
+    const key = JSON.stringify([rootDir, language, exclude]);
+    let index = this.sourceIndexes.get(key);
+    if (!index) {
+      index = buildSourceIndex(rootDir, language, exclude);
+      this.sourceIndexes.set(key, index);
+    }
+    return index;
   }
 
   private async requote(
@@ -2271,6 +2293,47 @@ async function readSearchable(
   } finally {
     await fh?.close().catch(() => undefined);
   }
+}
+
+const UNKNOWN_LANGUAGE = languageFromPath("file.__no_extension__");
+const INDEX_READ_BATCH = 12;
+
+/**
+ * Normalized text of every `language` source file under `rootDir`, for the
+ * excerpt check. A correct quote can come from a file outside the batch:
+ * JDBCDataStore quoted SQLDialect.getNameEscape (2026-09-13). Same skip rules,
+ * excludes and file cap as Grep.
+ */
+async function buildSourceIndex(
+  rootDir: string,
+  language: string,
+  exclude: string[],
+): Promise<string[]> {
+  if (language === UNKNOWN_LANGUAGE) return [];
+  const excluded = compileExcludes(exclude);
+  const files: string[] = [];
+  async function walk(dir: string): Promise<void> {
+    if (files.length >= GREP_MAX_FILES) return;
+    const entries = await readdir(dir, { withFileTypes: true }).catch(() => null);
+    if (!entries) return;
+    for (const entry of entries) {
+      if (files.length >= GREP_MAX_FILES) break;
+      if (SKIP_DIRS.has(entry.name)) continue;
+      const fullPath = join(dir, entry.name);
+      if (excluded(normalizeSep(relative(rootDir, fullPath)))) continue;
+      if (entry.isDirectory()) await walk(fullPath);
+      else if (languageFromPath(entry.name) === language) files.push(fullPath);
+    }
+  }
+  await walk(rootDir);
+  const texts: string[] = [];
+  for (let i = 0; i < files.length; i += INDEX_READ_BATCH) {
+    const chunk = files.slice(i, i + INDEX_READ_BATCH);
+    for (const text of await Promise.all(chunk.map((f) => readFile(f, "utf-8").catch(() => "")))) {
+      if (text) texts.push(normalizeCode(text));
+    }
+  }
+  return texts;
 }
 
 async function walkAndMatch(

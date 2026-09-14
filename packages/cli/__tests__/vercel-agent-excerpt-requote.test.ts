@@ -121,4 +121,14 @@ describe("runAgent re-quotes invented code", () => {
     expect(finding.details).toMatch(/could not be found/);
     expect(modes).toHaveLength(2);
   });
+
+  // JDBCDataStore quoted SQLDialect.getNameEscape correctly, and SQLDialect.java
+  // was not in its batch. A batch-only check re-asked for it.
+  it("makes no extra call when the quote exists in another repository file", async () => {
+    writeFileSync(join(root, "SQLDialect.java"), "String nameEscape = getNameEscape();", "utf8");
+    const { model, modes } = scripted([answer("String nameEscape = getNameEscape();")]);
+    const [finding] = await run(model);
+    expect(finding.details).not.toMatch(/could not be found/);
+    expect(modes).toEqual(["regular"]);
+  });
 });

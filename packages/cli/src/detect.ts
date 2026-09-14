@@ -887,8 +887,8 @@ const FENCE_ALIASES: Record<string, string> = {
   yml: "yaml",
 };
 
-/** Shorter normalized lines (`}`, `return x;`) match almost any file. */
-const MIN_EVIDENCE_CHARS = 10;
+/** Shorter lines match by chance: `private String sql;` flagged a confirmed critical. */
+const MIN_EVIDENCE_CHARS = 20;
 
 interface FencedBlock {
   index: number;
@@ -916,7 +916,7 @@ function fencedBlocks(lines: readonly string[]): FencedBlock[] {
 }
 
 /** Drops `//` comments and all whitespace: reflowed Java was 44 of 65 exact-match misses. */
-function normalizeCode(text: string): string {
+export function normalizeCode(text: string): string {
   const code = text
     .split("\n")
     .map((line) => {
@@ -929,6 +929,13 @@ function normalizeCode(text: string): string {
     .join("");
 }
 
+/** Long enough to prove something, and not shortened with an ellipsis. */
+function isEvidence(line: string): boolean {
+  // "SELECT ... FROM t" abbreviates real code, so it can never match verbatim.
+  if (line.includes("...") || line.includes("…")) return false;
+  return normalizeCode(line).length >= MIN_EVIDENCE_CHARS;
+}
+
 export interface UnverifiedExcerpt {
   /** Position among all fenced blocks in `details`. */
   index: number;
@@ -936,7 +943,8 @@ export interface UnverifiedExcerpt {
 }
 
 /**
- * Fenced blocks in `details` with a line found in none of `sources`. About 1
+ * Fenced blocks in `details` with a line found in none of `sources`, nor by
+ * `existsElsewhere` (the repository) when given. About 1
  * finding in 9 quoted invented code (geotools, 2026-09-13). A block tagged with
  * another language is example output, not source, so it is skipped.
  */
@@ -944,6 +952,7 @@ export function findUnverifiedExcerpts(
   details: string,
   sources: readonly string[],
   language: string,
+  existsElsewhere?: (needle: string) => boolean,
 ): UnverifiedExcerpt[] {
   const lines = details.split("\n");
   const haystacks = sources.map(normalizeCode);
@@ -953,8 +962,10 @@ export function findUnverifiedExcerpts(
     if (tag !== "" && tag !== language) continue;
     const body = lines.slice(block.open + 1, block.close);
     const invented = body.some((line) => {
+      if (!isEvidence(line)) return false;
       const needle = normalizeCode(line);
-      return needle.length >= MIN_EVIDENCE_CHARS && !haystacks.some((h) => h.includes(needle));
+      if (haystacks.some((h) => h.includes(needle))) return false;
+      return !existsElsewhere?.(needle);
     });
     if (invented) out.push({ index: block.index, body: body.join("\n") });
   }
@@ -981,16 +992,21 @@ export function markExcerptsUnverified(details: string): string {
 }
 
 /** A re-quote must carry real evidence; an empty or trivial one would pass the check. */
-function quotesRealCode(body: string, sources: readonly string[], language: string): boolean {
+function quotesRealCode(
+  body: string,
+  sources: readonly string[],
+  language: string,
+  existsElsewhere?: (needle: string) => boolean,
+): boolean {
   const lines = body.split("\n");
   // A model can wrap its answer in fences despite being told not to.
   if (lines[0]?.trim().startsWith("```")) lines.shift();
   if (lines.at(-1)?.trim().startsWith("```")) lines.pop();
   const code = lines.join("\n");
-  const hasEvidence = lines.some((line) => normalizeCode(line).length >= MIN_EVIDENCE_CHARS);
+  const hasEvidence = lines.some(isEvidence);
+  const block = ["```", code, "```"].join("\n");
   return (
-    hasEvidence &&
-    findUnverifiedExcerpts(["```", code, "```"].join("\n"), sources, language).length === 0
+    hasEvidence && findUnverifiedExcerpts(block, sources, language, existsElsewhere).length === 0
   );
 }
 
@@ -1006,9 +1022,10 @@ export async function repairFindingExcerpts(
   finding: Finding,
   sources: readonly string[],
   requote?: (flagged: readonly UnverifiedExcerpt[]) => Promise<readonly string[]>,
+  existsElsewhere?: (needle: string) => boolean,
 ): Promise<{ finding: Finding; outcome: ExcerptOutcome }> {
   const language = languageFromPath(finding.filePath);
-  const flagged = findUnverifiedExcerpts(finding.details, sources, language);
+  const flagged = findUnverifiedExcerpts(finding.details, sources, language, existsElsewhere);
   if (flagged.length === 0) return { finding, outcome: "verified" };
   let replacements: readonly string[] = [];
   if (requote) {
@@ -1021,7 +1038,7 @@ export async function repairFindingExcerpts(
   const accepted = new Map<number, string>();
   flagged.forEach((block, i) => {
     const body = replacements[i];
-    if (body !== undefined && quotesRealCode(body, sources, language))
+    if (body !== undefined && quotesRealCode(body, sources, language, existsElsewhere))
       accepted.set(block.index, body);
   });
   const details = replaceExcerpts(finding.details, accepted);
