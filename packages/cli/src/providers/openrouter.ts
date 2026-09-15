@@ -4,6 +4,7 @@ import { createOpenAI } from "@ai-sdk/openai";
 import { password } from "@inquirer/prompts";
 import type { Detector } from "../detect.js";
 import { VercelAgentDetector } from "../detectors/index.js";
+import { createDeadlineFetch } from "../request-deadline.js";
 import {
   announceThrottle,
   createThrottledFetch,
@@ -27,9 +28,9 @@ function csv(raw: string | undefined): string[] {
  * without a CLI rebuild. Defaults are tuned for a code-analysis agent:
  * fp8 only (quality on coding/tool-use), require the params we send
  * (drops providers that would silently ignore tool-calls), and route by
- * price, as production does (a throughput sort sent test runs to a provider
- * costing about 3x per call). An explicit OPENROUTER_PROVIDER_ORDER pins an
- * allow-list and switches off open fallback.
+ * price (a throughput sort walks up the price curve). An explicit
+ * OPENROUTER_PROVIDER_ORDER pins an allow-list and switches off open
+ * fallback.
  *
  * OPENROUTER_IGNORE is the escape hatch for a provider whose serving stack
  * is broken for this model. It is a CSV of provider slugs and applies in
@@ -38,12 +39,11 @@ function csv(raw: string | undefined): string[] {
  * endpoints (`baseten` covers `baseten/fp8` and `baseten/fast`); use the
  * full slug to drop one variant.
  *
- * Why it exists: Novita's GLM-5.2 endpoint returns the model's JSON answer
- * in the `reasoning` channel and leaves `message.content` empty, so every
- * `generateObject` call against it fails with NoObjectGeneratedError while
- * reporting `finishReason: "stop"`. The model answers correctly; the
- * provider files it in the wrong field. That is unfixable from our side and
- * invisible until a scan dies, so it needs to be excludable by config.
+ * Why it exists: an endpoint can serve a model in a broken way that still
+ * reports success, for example by returning the answer in the `reasoning`
+ * channel and leaving `message.content` empty, which fails every structured
+ * call. Nothing on our side repairs that, so a host has to be excludable by
+ * config.
  */
 export function buildProviderRouting(overrideJson?: string): Record<string, unknown> {
   const quant = csv(process.env.OPENROUTER_QUANTIZATIONS);
@@ -156,33 +156,20 @@ export function createCostMeter(): CostMeter {
 }
 
 /**
- * Wrap fetch to merge the routing block into chat-completions bodies and
- * add OpenRouter's attribution headers. Mirrors vertex.ts's fetch
- * injection so we stay free of an extra SDK dependency.
- *
- * With a `cost` meter attached it also turns on OpenRouter's usage accounting
- * and records what each call was charged.
- */
-/**
  * Output cap for every OpenRouter completion.
  *
- * Two prod sessions ended with `finishReason=length` at 207,432 and 132,763
- * completion tokens, no text and no tool call: the model spent the whole
- * generation on reasoning nobody ever sees. Nothing bounded it, because
- * `providerOptionsArg()` has no OpenRouter branch and no `maxTokens` is set
- * anywhere in the engine.
+ * A model can spend a whole generation on reasoning the caller never sees, and
+ * nothing else bounds it: `providerOptionsArg()` has no OpenRouter branch and
+ * no `maxTokens` is set anywhere in the engine.
  *
- * The cap has to leave room for an ANSWER after a long think. Run A
- * (2026-09-12) hit a 32k cap eight times with `textChars=0`, and one of those
- * became the run's only failed batch: the model used the whole budget to reason
- * and had nothing left to write with. 64k holds the runaway to a third of what
- * it was while leaving about 32k for the answer.
+ * The cap has to leave room for an ANSWER after a long think, so it sits far
+ * above what an answer alone needs. Set it too low and a long think leaves the
+ * model nothing to write with, which costs a whole batch.
  *
- * There is deliberately NO default reasoning sub-cap. `z-ai/glm-5.2` ignores
- * `reasoning.max_tokens` outright, so shipping one bought nothing, and a model
- * that DOES honor it would be throttled to a fraction of its thinking for no
- * reason. Reasoning depth is the product here. Set
- * OPENROUTER_REASONING_MAX_TOKENS per run if a specific model needs it.
+ * There is deliberately NO default reasoning sub-cap. Some models ignore
+ * `reasoning.max_tokens` outright, and a model that DOES honor it would be
+ * throttled to a fraction of its thinking for no reason. Reasoning depth is the
+ * product here. Set OPENROUTER_REASONING_MAX_TOKENS per run when a model needs it.
  */
 const DEFAULT_MAX_TOKENS = 64_000;
 
@@ -192,6 +179,14 @@ function tokenCap(raw: string | undefined, fallback: number): number {
   return raw && Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
 }
 
+/**
+ * Wrap fetch to merge the routing block into chat-completions bodies and
+ * add OpenRouter's attribution headers. Mirrors vertex.ts's fetch
+ * injection so we stay free of an extra SDK dependency.
+ *
+ * With a `cost` meter attached it also turns on OpenRouter's usage accounting
+ * and records what each call was charged.
+ */
 export function createRoutingFetch(
   routing: Record<string, unknown>,
   inner: typeof fetch = fetch,
@@ -250,19 +245,25 @@ async function recordResponseCost(cost: CostMeter, res: Response): Promise<void>
   }
 }
 
-function buildDetector(config: UserConfig, options: ResolveOptions): Detector {
-  const apiKey =
-    options.credentials?.openrouterApiKey ??
-    config.openrouter?.apiKey ??
-    process.env.OPENROUTER_API_KEY;
-  if (!apiKey) {
-    throw new Error(
-      "OpenRouter provider requested but no API key available. Set $OPENROUTER_API_KEY or pass --api-key.",
-    );
-  }
-  const modelName = options.model ?? config.openrouter?.model ?? DEFAULT_MODEL;
-  const baseURL = process.env.OPENROUTER_BASE_URL ?? config.openrouter?.baseUrl ?? DEFAULT_BASE_URL;
+/**
+ * Deadline for one OpenRouter request, headers and body together. Nothing else
+ * ends a stalled request: no host promises to give up, and neither does fetch.
+ * Sized well above the slowest answer a healthy call produces, so only a stalled
+ * one is cut. Override per run with OPENROUTER_REQUEST_TIMEOUT_MS.
+ */
+const DEFAULT_REQUEST_TIMEOUT_MS = 30 * 60_000;
 
+export function openRouterRequestTimeoutMs(
+  raw = process.env.OPENROUTER_REQUEST_TIMEOUT_MS,
+): number {
+  return tokenCap(raw, DEFAULT_REQUEST_TIMEOUT_MS);
+}
+
+/** The fetch every OpenRouter call goes through. */
+export function buildOpenRouterFetch(
+  routing: Record<string, unknown>,
+  cost?: CostMeter,
+): typeof fetch {
   // Optional shared TPM throttle (same knob shape as openai.ts). Off by
   // default: OpenRouter's TPM headroom is provider-dependent, not a fixed
   // account cap we need to pace against.
@@ -276,14 +277,28 @@ function buildDetector(config: UserConfig, options: ResolveOptions): Detector {
     announceThrottle(orLabels, tpmLimit);
     innerFetch = createThrottledFetch(new TpmBucket(tpmLimit), orLabels);
   }
+  // Inside the routing fetch so its cost read of the body is covered too.
+  const deadlineFetch = createDeadlineFetch(innerFetch, openRouterRequestTimeoutMs());
+  return createRoutingFetch(routing, deadlineFetch, cost);
+}
+
+function buildDetector(config: UserConfig, options: ResolveOptions): Detector {
+  const apiKey =
+    options.credentials?.openrouterApiKey ??
+    config.openrouter?.apiKey ??
+    process.env.OPENROUTER_API_KEY;
+  if (!apiKey) {
+    throw new Error(
+      "OpenRouter provider requested but no API key available. Set $OPENROUTER_API_KEY or pass --api-key.",
+    );
+  }
+  const modelName = options.model ?? config.openrouter?.model ?? DEFAULT_MODEL;
+  const baseURL = process.env.OPENROUTER_BASE_URL ?? config.openrouter?.baseUrl ?? DEFAULT_BASE_URL;
+
   // One counter per detector: the fetch wrapper folds each response's charge
   // in, and the usage meter reads the running total at every checkpoint.
   const cost = createCostMeter();
-  const routingFetch = createRoutingFetch(
-    buildProviderRouting(options.openrouterRouting),
-    innerFetch,
-    cost,
-  );
+  const routingFetch = buildOpenRouterFetch(buildProviderRouting(options.openrouterRouting), cost);
 
   const openrouter = createOpenAI({ apiKey, baseURL, fetch: routingFetch });
 
