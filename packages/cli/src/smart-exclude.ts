@@ -1,5 +1,7 @@
 import type { Detector, SuggestExcludesResult } from "./detect.js";
 import { loadExcludeInstructions } from "./exclude-agent.js";
+import { logWarn } from "./log.js";
+import { createPathAnchor } from "./path-anchor.js";
 import { collectAllFiles } from "./walker.js";
 
 /**
@@ -79,9 +81,10 @@ export function renderDirTree(files: string[], opts: { maxDirs?: number } = {}):
 }
 
 /**
- * Run the pass and return the suggested excludes. On an empty tree,
- * returns []. Detector/transport errors propagate; the caller (scan.ts)
- * treats smart-exclude as advisory and continues without it on failure.
+ * Run the pass and return the suggested excludes, each glob anchored to
+ * the tree (see path-anchor.ts). On an empty tree, returns []. Detector/
+ * transport errors propagate; the caller (scan.ts) treats smart-exclude as
+ * advisory and continues without it on failure.
  */
 export async function runSmartExclude(
   opts: RunSmartExcludeOptions,
@@ -98,5 +101,11 @@ export async function runSmartExclude(
     dirTree: renderDirTree(files),
     signal: opts.signal,
   });
-  return result.excludes;
+  // A glob that matches nothing stays: an agent that skips the default excludes walks more files.
+  const anchor = createPathAnchor(files);
+  return result.excludes.map((s) => {
+    const glob = anchor.glob(s.glob);
+    if (glob === null) logWarn(`auto-exclude: "${s.glob}" matches no file; keeping it as written`);
+    return glob === null ? s : { ...s, glob };
+  });
 }

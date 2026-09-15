@@ -3,7 +3,9 @@ import type { ReconReport } from "@agentgg/core";
 import { hashContent, readReconReport, writeReconReport } from "@agentgg/core";
 import type { Detector, ReconResult } from "./detect.js";
 import { logWarn } from "./log.js";
+import { createPathAnchor } from "./path-anchor.js";
 import { loadReconInstructions } from "./recon-agent.js";
+import { collectAllFiles } from "./walker.js";
 /**
  * Recon orchestration. Runs once at the start of a scan, before
  * precondition evaluation and agent dispatch. The resulting brief is
@@ -111,13 +113,26 @@ export async function runRecon(opts: RunReconOptions): Promise<ReconReport> {
     // ReconResult.authModel is nullable; ReconReport.authModel is optional.
     authModel: result.authModel ?? undefined,
     integrations: result.integrations,
-    notableDirs: result.notableDirs,
+    notableDirs: anchorNotableDirs(result.notableDirs, opts),
     summary: result.summary,
     reconHash,
     generatedAt: new Date().toISOString(),
   };
   writeReconReport(opts.outDir, report);
   return report;
+}
+
+/** Anchor recon's repo-relative paths to the scanned tree (see path-anchor.ts). */
+function anchorNotableDirs(notableDirs: string[], opts: RunReconOptions): string[] {
+  if (notableDirs.length === 0) return notableDirs;
+  // File size never decides whether a path exists.
+  const files = collectAllFiles(opts.rootDir, {
+    excludePatterns: opts.excludePatterns,
+    includePatterns: opts.includePatterns,
+    maxFileSizeBytes: Number.POSITIVE_INFINITY,
+  });
+  const anchor = createPathAnchor(files);
+  return notableDirs.map((d) => anchor.text(d));
 }
 
 /**

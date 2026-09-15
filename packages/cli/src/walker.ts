@@ -1,7 +1,7 @@
 import { readdirSync, statSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import type { Agent } from "@agentgg/core";
-import { minimatch } from "minimatch";
+import { Minimatch, minimatch } from "minimatch";
 
 /**
  * Shared default exclude set. NOT hardcoded walker policy — it's data the
@@ -191,11 +191,21 @@ function collectFiles(root: string, dir: string, cfg: WalkConfig): string[] {
  * stripped, so both `**​/vendor` and `vendor/**` prune the `vendor` dir.
  */
 function isExcludedDir(relDir: string, patterns: string[]): boolean {
-  return patterns.some((p) => {
-    if (minimatch(relDir, p, { dot: true })) return true;
-    const base = p.replace(/\/\*\*?$/, "").replace(/\/+$/, "");
-    return base !== p && minimatch(relDir, base, { dot: true });
-  });
+  return patterns.some((p) => excludeMatcher(p).dir(relDir));
+}
+
+/** One exclude glob compiled once, with the walk's directory and file rules. */
+export function excludeMatcher(pattern: string): {
+  dir: (relDir: string) => boolean;
+  file: (relFile: string) => boolean;
+} {
+  const full = new Minimatch(pattern, { dot: true });
+  const base = pattern.replace(/\/\*\*?$/, "").replace(/\/+$/, "");
+  const stripped = base !== pattern ? new Minimatch(base, { dot: true }) : null;
+  return {
+    dir: (relDir) => full.match(relDir) || (stripped?.match(relDir) ?? false),
+    file: (relFile) => full.match(relFile),
+  };
 }
 
 function toPosix(p: string): string {
