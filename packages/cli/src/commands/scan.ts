@@ -53,7 +53,7 @@ import { runSmartExclude } from "../smart-exclude.js";
 import { resolveTemplates } from "../template.js";
 import { createUsageMeter, type UsageMeter } from "../usage-meter.js";
 import { DEFAULT_VIEWER_PORT, openBrowser, startViewer } from "../viewer-server.js";
-import { DEFAULT_EXCLUDES, type WalkConfig, walkForAgents } from "../walker.js";
+import { DEFAULT_EXCLUDES, pathMatches, type WalkConfig, walkForAgents } from "../walker.js";
 import { buildInvocation } from "./invocation.js";
 import { printReady } from "./view.js";
 
@@ -888,6 +888,20 @@ export async function runScan(
       }
       return allRecordsCache;
     };
+    // Prior FileRecords by agent, for per-file resume. Loaded once and never
+    // invalidated: pass 2 reads what earlier runs wrote, before any batch runs.
+    let priorRecordsBySlug: Map<string, FileRecord[]> | null = null;
+    const priorRecordsFor = (slug: string): FileRecord[] => {
+      if (priorRecordsBySlug === null) {
+        priorRecordsBySlug = new Map();
+        for (const rec of loadAllFileRecords(outDir)) {
+          const list = priorRecordsBySlug.get(rec.agentSlug) ?? [];
+          list.push(rec);
+          priorRecordsBySlug.set(rec.agentSlug, list);
+        }
+      }
+      return priorRecordsBySlug.get(slug) ?? [];
+    };
     // -------- run queued agents --------
     // One unified path: every agent is a tool-enabled investigation. An
     // agent with a file scope resolves `where` to seeded candidate files
@@ -1241,6 +1255,34 @@ export async function runScan(
             continue;
           }
           todo.push(c);
+        }
+        // A finding in a file the model read on its own has no shard, so the
+        // loop above never reaches it. Lift it here, or validation, scoring and
+        // the report never see it.
+        const candidatePaths = new Set(candidates.map((c) => c.filePath.replace(/\\/g, "/")));
+        for (const rec of priorRecordsFor(agent.slug)) {
+          if (rec.findings.length === 0 || candidatePaths.has(rec.filePath)) continue;
+          if (rec.reconHash !== recon.reconHash) continue;
+          if (agentExcludes.some((p) => pathMatches(rec.filePath, p))) continue;
+          if (
+            includePatterns.length > 0 &&
+            !includePatterns.some((p) => pathMatches(rec.filePath, p))
+          ) {
+            continue;
+          }
+          let content: string;
+          try {
+            content = readFileSync(resolve(root, rec.filePath), "utf8");
+          } catch {
+            continue;
+          }
+          if (rec.contentHash !== hashContent(content)) continue;
+          analyzedFiles.add(rec.filePath);
+          byAgent[agent.slug] = (byAgent[agent.slug] ?? 0) + addFindings(rec.findings);
+          for (const f of rec.findings) {
+            if (f.filePath && f.filePath !== "(unknown)") touchedFiles.add(f.filePath);
+          }
+          resumedFindings += rec.findings.length;
         }
         if (resumedShards > 0) {
           const shardNote =

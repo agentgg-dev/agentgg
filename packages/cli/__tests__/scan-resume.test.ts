@@ -390,6 +390,56 @@ describe("scan resume — per-file (interrupted agent)", () => {
     // --rescan bypasses the per-file skip; server.js (already on disk) re-runs.
     expect(ranFiles().sort()).toEqual(["server.js", "util.js"]);
   });
+
+  // The model can report a finding in a file it read on its own. That file is
+  // no candidate, so no shard marks it done and resume never reached it.
+  async function interruptedScanWithOffCandidateFinding() {
+    // Not a .js file, so never a candidate for this agent.
+    writeFileSync(join(projectRoot, "notes.txt"), "admin password: hunter2", "utf8");
+    detectorMock.runAgent.mockImplementation(async ({ agent, candidates }) => {
+      if (candidates.some((c) => c.filePath === "util.js")) {
+        throw new Error("simulated interruption");
+      }
+      return [
+        ...candidates.map((c) => mockFinding(agent.slug, c.filePath)),
+        mockFinding(agent.slug, "notes.txt"),
+      ];
+    });
+    await runScan(projectRoot, { template: [agentA], output: outputDir, maxFilesPerBatch: 1 }, env);
+    expect(readFileRecord(outputDir, "test-detector-a", "notes.txt")?.findings).toHaveLength(1);
+    detectorMock.runAgent.mockImplementation(async ({ agent, candidates }) =>
+      candidates.map((c) => mockFinding(agent.slug, c.filePath)),
+    );
+  }
+
+  it("keeps a finding the agent reported on a file outside its candidates", async () => {
+    suppressLogs();
+    await interruptedScanWithOffCandidateFinding();
+
+    await runScan(
+      projectRoot,
+      { template: [agentA], output: outputDir, maxFilesPerBatch: 1, validate: true },
+      env,
+    );
+
+    const record = readFileRecord(outputDir, "test-detector-a", "notes.txt");
+    expect(record?.findings[0]?.validation?.verdict).toBe("confirmed");
+  });
+
+  it("does not keep that finding once its file changed", async () => {
+    suppressLogs();
+    await interruptedScanWithOffCandidateFinding();
+    writeFileSync(join(projectRoot, "notes.txt"), "nothing to see", "utf8");
+
+    await runScan(
+      projectRoot,
+      { template: [agentA], output: outputDir, maxFilesPerBatch: 1, validate: true },
+      env,
+    );
+
+    const record = readFileRecord(outputDir, "test-detector-a", "notes.txt");
+    expect(record?.findings[0]?.validation).toBeUndefined();
+  });
 });
 
 describe("scan resume — validation phase", () => {
