@@ -41,7 +41,7 @@ import {
   SuggestExcludesResult,
   type UnverifiedExcerpt,
 } from "../detect.js";
-import { ExpectedDetectorError } from "../diagnostics.js";
+import { ExpectedDetectorError, isInFlightCreditError } from "../diagnostics.js";
 import { logError, logInfo, logWarn } from "../log.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import type { CallUsage, UsageMeter } from "../usage-meter.js";
@@ -208,6 +208,12 @@ const JITTER_FRACTION = 0.2; // ±20%
 const TRANSIENT_BACKOFF_MS = 2_000;
 const TRANSIENT_BACKOFF_MAX_MS = 15_000;
 
+/** Wait for OpenRouter's in-flight credit check (isInFlightCreditError). It
+ *  clears when open calls finish, which can take minutes, so it starts at a
+ *  rate-limit window and doubles up to CREDIT_WAIT_MAX_MS. */
+const CREDIT_WAIT_MS = 30_000;
+const CREDIT_WAIT_MAX_MS = 120_000;
+
 /** Apply ±20% jitter around the base. Critical when N callers all 429 at the
  *  same instant — without jitter they'd all wake at exactly the same moment
  *  and re-trip the limit in lockstep. */
@@ -234,7 +240,7 @@ function jitter(baseMs: number): number {
  * the Vercel SDK (~7s exponential backoff) and give up, instead of waiting
  * out the window here. Broadened the matcher to catch those.
  */
-async function withTpmRetry<T>(
+export async function withTpmRetry<T>(
   fn: () => Promise<T>,
   signal?: AbortSignal,
   maxAttempts = 4,
@@ -251,11 +257,17 @@ async function withTpmRetry<T>(
       if (isContextLengthError(hay)) {
         throw new Error(`context length exceeded: ${firstErrorLine(hay)}`, { cause: err });
       }
-      const rateLimited = isRateLimitError(hay);
-      const transient = !rateLimited && isTransientUpstreamError(hay);
-      if ((!rateLimited && !transient) || attempt >= maxAttempts) throw err;
+      const creditWait = isInFlightCreditError(hay);
+      const rateLimited = !creditWait && isRateLimitError(hay);
+      const transient = !creditWait && !rateLimited && isTransientUpstreamError(hay);
+      if ((!creditWait && !rateLimited && !transient) || attempt >= maxAttempts) throw err;
       let waitMs: number;
-      if (rateLimited) {
+      if (creditWait) {
+        waitMs = jitter(Math.min(CREDIT_WAIT_MS * 2 ** (attempt - 1), CREDIT_WAIT_MAX_MS));
+        logWarn(
+          `[withTpmRetry] in-flight credit limit on attempt ${attempt}/${maxAttempts}, sleeping ${waitMs}ms`,
+        );
+      } else if (rateLimited) {
         // Honor a server-supplied delay precisely. Only jitter the blind default.
         const parsed = parseRetryAfterMs(hay);
         waitMs = parsed ?? jitter(DEFAULT_BACKOFF_MS);

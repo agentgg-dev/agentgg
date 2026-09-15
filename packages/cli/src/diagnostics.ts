@@ -44,6 +44,15 @@ export class FatalScanError extends Error {
 }
 
 /**
+ * OpenRouter rejects a call when its possible cost plus the calls still open
+ * exceeds the balance. It clears once those calls finish or credit is added,
+ * so it is a wait-and-retry, never exhausted credit.
+ */
+export function isInFlightCreditError(text: string): boolean {
+  return /given your current in-flight requests|in-flight requests settle/i.test(text);
+}
+
+/**
  * Ollama returns a partial response (`done:false`, missing eval counts) when
  * the model overflows its context window — special tokens like `<|im_start|>`
  * leak out and the Vercel SDK rejects the payload as "Invalid JSON response".
@@ -208,12 +217,17 @@ class QuotaExhausted extends ScanDiagnostic {
       .filter((v): v is string => typeof v === "string" && v.length > 0)
       .join("\n");
 
-    // OpenRouter: insufficient-credits path. A 402 whose body carries an
-    // openrouter.ai credits URL / "requires more credits" text. Must run
-    // before the generic 402 -> Anthropic branch below, else it mislabels it.
+    // OpenRouter's in-flight check clears once open requests finish, so it is
+    // not exhausted credit. withTpmRetry waits it out; a call that still hits
+    // it fails its batch, not the whole scan.
+    if (isInFlightCreditError(haystack)) return null;
+
+    // OpenRouter: insufficient-credits path. Must run before the generic
+    // 402 -> Anthropic branch below, else it mislabels it. A bare openrouter.ai
+    // link is not enough: other OpenRouter errors carry one too.
     if (
-      /openrouter\.ai/i.test(haystack) ||
-      /requires more credits, or fewer max_tokens/i.test(haystack)
+      /requires more credits, or fewer max_tokens/i.test(haystack) ||
+      (/openrouter/i.test(haystack) && (status === 402 || /insufficient credits/i.test(haystack)))
     ) {
       return new QuotaExhausted(
         "OpenRouter",

@@ -11,7 +11,12 @@
  * a plain `Error` plus the same decorations the SDKs attach.
  */
 import { describe, expect, it, vi } from "vitest";
-import { diagnoseScanError, FatalScanError, handleDetectorError } from "../src/diagnostics.js";
+import {
+  diagnoseScanError,
+  FatalScanError,
+  handleDetectorError,
+  isInFlightCreditError,
+} from "../src/diagnostics.js";
 
 /**
  * Build an Error decorated the way the Vercel AI SDK / Anthropic SDK /
@@ -96,6 +101,49 @@ describe("QuotaExhausted classifier", () => {
       expect(d?.format()).toMatch(/OpenRouter/);
       expect(d?.format()).toMatch(/openrouter\.ai\/settings\/credits/);
       expect(d?.format()).not.toMatch(/anthropic/i);
+    });
+
+    it("recognizes an insufficient-credits 402 that links to OpenRouter", () => {
+      const err = buildHttpError({
+        statusCode: 402,
+        responseBody: JSON.stringify({
+          error: {
+            code: 402,
+            message: "Insufficient credits. Add more using https://openrouter.ai/settings/credits",
+          },
+        }),
+      });
+      const d = diagnoseScanError(err);
+      expect(d?.fatal).toBe(true);
+      expect(d?.format()).toMatch(/OpenRouter/);
+    });
+
+    it("does NOT treat the in-flight credit limit as exhausted (it clears when requests settle)", () => {
+      const message =
+        "This request would exceed your available credits given your current in-flight requests. Retry after in-flight requests settle, or add credits.";
+      const err = buildHttpError({
+        statusCode: 402,
+        message,
+        responseBody: JSON.stringify({
+          error: { code: 402, message: `${message} https://openrouter.ai/settings/credits` },
+        }),
+      });
+      expect(diagnoseScanError(err)).toBeNull();
+      expect(isInFlightCreditError(message)).toBe(true);
+    });
+
+    it("does NOT treat an unrelated OpenRouter error that links to openrouter.ai as exhausted", () => {
+      const err = buildHttpError({
+        statusCode: 500,
+        message: "Internal Server Error",
+        responseBody: JSON.stringify({
+          error: {
+            code: 500,
+            message: "Internal Server Error. See https://openrouter.ai/docs/api-reference/errors",
+          },
+        }),
+      });
+      expect(diagnoseScanError(err)).toBeNull();
     });
   });
 

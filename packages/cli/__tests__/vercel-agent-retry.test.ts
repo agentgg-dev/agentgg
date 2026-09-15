@@ -8,13 +8,51 @@
  * because its 429 body says "Too Many Requests" with no TPM wording, so the
  * Vercel-fixture tests below are the regression guard.
  */
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   isContextLengthError,
   isRateLimitError,
   isTransientUpstreamError,
   parseRetryAfterMs,
+  withTpmRetry,
 } from "../src/detectors/vercel-agent.js";
+
+describe("withTpmRetry on the OpenRouter in-flight credit limit", () => {
+  const inFlight = Object.assign(
+    new Error(
+      "This request would exceed your available credits given your current in-flight requests. Retry after in-flight requests settle, or add credits.",
+    ),
+    { statusCode: 402 },
+  );
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("waits and retries instead of failing the call", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fn = vi.fn().mockRejectedValueOnce(inFlight).mockResolvedValueOnce("ok");
+    const result = withTpmRetry(fn);
+    await vi.advanceTimersByTimeAsync(40_000);
+    await expect(result).resolves.toBe("ok");
+    expect(fn).toHaveBeenCalledTimes(2);
+  });
+
+  it("gives up after the attempt limit", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fn = vi.fn().mockRejectedValue(inFlight);
+    const result = withTpmRetry(fn, undefined, 3);
+    const settled = expect(result).rejects.toBe(inFlight);
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    await settled;
+    expect(fn).toHaveBeenCalledTimes(3);
+  });
+});
 
 describe("isRateLimitError", () => {
   describe("matches known rate-limit errors", () => {
