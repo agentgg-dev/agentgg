@@ -213,7 +213,7 @@ export async function runScore(
     const scoredHere = record.findings.filter((f) => f.cvss);
     record.analysisHistory.push({
       runId: runMeta.runId,
-      phase: "detect",
+      phase: "score",
       ranAt: new Date().toISOString(),
       durationMs: 0,
       provider: detector.name,

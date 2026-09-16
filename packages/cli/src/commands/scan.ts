@@ -1805,7 +1805,7 @@ export async function runScan(
           });
           record.analysisHistory.push({
             runId: runMeta.runId,
-            phase: "detect",
+            phase: "score",
             ranAt: new Date().toISOString(),
             durationMs: 0,
             provider: detector.name,

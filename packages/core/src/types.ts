@@ -418,6 +418,25 @@ export const Finding = z.object({
        * of being coerced into a bogus verdict or silently dropped.
        */
       refused: z.boolean().optional(),
+      dynamic: z
+        .object({
+          verdict: z.enum(["confirmed", "not-reproduced"]),
+          reasoning: z.string(),
+          refused: z.boolean().optional(),
+          baseUrl: z.string().optional(),
+          evidence: z
+            .object({
+              trace: z.string().optional(),
+              video: z.string().optional(),
+              screenshots: z.array(z.string()).default([]),
+              har: z.string().optional(),
+              script: z
+                .object({ path: z.string(), executed: z.boolean(), passed: z.boolean() })
+                .optional(),
+            })
+            .optional(),
+        })
+        .optional(),
     })
     .optional(),
   /**
@@ -459,7 +478,7 @@ export type Finding = z.infer<typeof Finding>;
 
 export const AnalysisRun = z.object({
   runId: z.string(),
-  phase: z.enum(["detect", "validate", "dedup"]),
+  phase: z.enum(["detect", "validate", "dedup", "score", "reproduce"]),
   ranAt: z.string(),
   durationMs: z.number().int().nonnegative().default(0),
   provider: z.string(),
