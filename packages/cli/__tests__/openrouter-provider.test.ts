@@ -28,7 +28,6 @@ afterEach(() => {
 });
 
 describe("buildProviderRouting", () => {
-  // Production routes by price (Terraform `openrouter_sort`); the CLI matches it.
   it("defaults to fp8 + require_parameters + price sort", () => {
     const r = buildProviderRouting();
     expect(r.quantizations).toEqual(["fp8"]);
@@ -279,11 +278,11 @@ describe("createRoutingFetch and streamed responses", () => {
 });
 
 /**
- * Output caps. Two prod incidents (2026-09-08, 2026-09-12) ended with
- * `finishReason=length` after 207,432 and 132,763 completion tokens, with no
- * text and no tool call: the model spent its whole generation on reasoning we
- * never see. Nothing capped it, because `providerOptionsArg()` returns
- * undefined for OpenRouter and no `maxTokens` is set anywhere.
+ * Output caps. Without one, a generation can end at `finishReason=length` with
+ * six figures of completion tokens, no text and no tool call: the model spends
+ * the whole generation on reasoning the caller never sees. Nothing caps it,
+ * because `providerOptionsArg()` returns undefined for OpenRouter and no
+ * `maxTokens` is set anywhere.
  *
  * Both halves are needed. The reasoning cap bounds the thinking; the total cap
  * bounds the runaway. The total must stay the larger of the two, or a session
@@ -305,10 +304,9 @@ describe("createRoutingFetch output caps", () => {
     expect((await send({})).max_tokens).toBe(64_000);
   });
 
-  // Run A (2026-09-12) hit the old 32k cap eight times with textChars=0: the
-  // model spends its whole output budget on reasoning and writes nothing. One
-  // of those became the run's only failed batch. The cap has to leave room for
-  // an answer AFTER a long think, not squeeze the think.
+  // Set the cap too low and the model spends its whole output budget on
+  // reasoning and writes nothing, which fails the batch. The cap has to leave
+  // room for an answer AFTER a long think, not squeeze the think.
   it("leaves room for an answer after a long reasoning spend", async () => {
     expect((await send({})).max_tokens).toBeGreaterThan(2 * 32_000 - 1);
   });

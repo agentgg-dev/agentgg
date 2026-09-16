@@ -1,10 +1,10 @@
 /**
- * Tests for the two recovery helpers added after the 2026-08-26 staging scan,
- * where GLM-5.2 reached the right verdict, broke the JSON delimiters, then
- * repeated the object until the parser gave up.
+ * Tests for the two recovery helpers that cover a model which reaches the right
+ * verdict, breaks the JSON delimiters, then repeats the object until the parser
+ * gives up.
  *
  * Both helpers are pure string functions, so no LLM call is involved. The
- * degenerate fixture below is shaped like the real staging response.
+ * degenerate fixture below is shaped like a real response.
  */
 
 import { describe, expect, it } from "vitest";

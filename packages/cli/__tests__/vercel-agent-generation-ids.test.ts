@@ -101,8 +101,8 @@ describe("formatErrorIds", () => {
     expect(out).toContain("reqId=req_both");
   });
 
-  // Header shapes below were measured against the live OpenRouter API on
-  // 2026-08-28, not guessed. OpenRouter sends the GENERATION id as a header
+  // Header shapes below were measured against the live OpenRouter API, not
+  // guessed. OpenRouter sends the GENERATION id as a header
   // (X-Generation-Id, same value as the body's `id`) and does NOT send
   // x-request-id at all; the only request-ish header is Cloudflare's CF-RAY.
   // That inverts the original assumption that headers carry request ids only.
@@ -136,7 +136,7 @@ describe("formatErrorIds", () => {
     });
   });
 
-  // Shapes below were measured against each live API on 2026-08-28.
+  // Shapes below were measured against each live API.
   describe("the other providers that reach this code", () => {
     it("takes OpenAI's x-request-id, the id its dashboard indexes", () => {
       const out = formatErrorIds(

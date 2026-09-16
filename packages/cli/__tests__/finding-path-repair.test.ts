@@ -1,14 +1,13 @@
 /**
  * Tests for `resolveCandidatePath` in detect.ts.
  *
- * A tool-loop model that read `data/static/codefixes/loginJim.ts` often reports
- * the finding against the bare basename `loginJim.ts`. That path resolves to
- * nothing under the scan root, so scan.ts's invented-path filter discarded the
- * finding as a hallucination and the batch recorded a clean zero.
+ * A tool-loop model that read a nested path often reports the finding against
+ * the bare basename. That path resolves to nothing under the scan root, so
+ * scan.ts's invented-path filter discarded the finding as a hallucination and
+ * the batch recorded a clean zero.
  *
- * Measured on juice-shop 2026-08-29: the SAME five `data/static/codefixes/*`
- * files produced one finding each on one run and zero on the next, purely on
- * how the model spelled the path. Five real SQL injections lost to formatting.
+ * The same file then produces a finding on one run and nothing on the next,
+ * purely on how the model spelled the path: a real issue lost to formatting.
  *
  * The repair is deliberately conservative, because `hydrateFinding` hashes the
  * path into the finding id, and that id carries a person's triage status on the

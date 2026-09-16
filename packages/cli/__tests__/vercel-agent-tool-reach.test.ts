@@ -1,8 +1,8 @@
 /**
- * Read and Grep must reach the whole repository. Prod 2026-09-08: detect loops
- * repeated one call to the turn cap because Grep silently walked only the first
- * 500 matching files and Read returned only a file's first 80 KB with no way to
- * ask for more. Driven through the real tool objects, as the SDK calls them.
+ * Read and Grep must reach the whole repository. When Grep silently walks only
+ * the first 500 matching files, and Read returns only a file's first 80 KB with
+ * no way to ask for more, a detect loop repeats one call to the turn cap.
+ * Driven through the real tool objects, as the SDK calls them.
  */
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

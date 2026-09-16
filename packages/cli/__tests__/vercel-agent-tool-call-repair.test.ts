@@ -6,11 +6,11 @@
  * tool NAME rather than the arguments. The Vercel AI SDK can't match the name,
  * throws `AI_NoSuchToolError` out of `generateText`, and the batch dies. A dead
  * batch sets `rt.failed`, which suppresses the agent's resume sidecar, which
- * makes the platform mark the WHOLE agent failed — so one bad turn cost three
- * agents on prod scan 764dbd1d (2026-08-18).
+ * makes the platform mark the WHOLE agent failed — so one bad turn can cost
+ * several agents.
  *
- * Every `mangled` string below is a real tool name copied from that scan's
- * Cloud Logging output. Pure-function tests — no LLM calls.
+ * Every `mangled` string below is a real tool name a model emitted, not an
+ * invented one. Pure-function tests — no LLM calls.
  */
 import { describe, expect, it } from "vitest";
 import { resolveMangledToolName } from "../src/detectors/vercel-agent.js";
@@ -24,7 +24,6 @@ describe("resolveMangledToolName", () => {
   });
 
   it("recovers the tool when arg markup is appended to the name", () => {
-    // scan 764dbd1d, slug missing-access-control, 13:03:59Z
     expect(
       resolveMangledToolName(
         "Grep<arg_value>pattern</arg_key><arg_value>get_owned_provider_account_or_404</arg_value>",

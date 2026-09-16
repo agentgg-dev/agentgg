@@ -1,11 +1,10 @@
 /**
  * Tests for the repeated-tool-call guard in detectors/vercel-agent.ts.
  *
- * A stalled tool loop re-issues the same call forever: on 2026-08-10 a
- * validator ran `Grep authenticateAdminApi` 41 times over nine minutes, burned
- * its whole turn budget, and answered with nothing. Each repeat cost a real
- * search and real bytes off the loop's output budget, and nothing in the logs
- * said it was happening.
+ * A stalled tool loop re-issues the same call forever: a validator can run one
+ * Grep dozens of times, burn its whole turn budget, and answer with nothing.
+ * Each repeat cost a real search and real bytes off the loop's output budget,
+ * and nothing in the logs said it was happening.
  *
  * A repeat now short-circuits: no execution, no bytes charged, an actionable
  * notice back, and a warn line per occurrence. This does not by itself end the
@@ -16,7 +15,7 @@
  * and deliberately does NOT offer to finalize: on turn 3 of a 200-turn agent
  * that offer is how a healthy session ends with an empty answer. Once the loop
  * looks stuck — one call three times, or five repeats across the loop — it
- * says to stop and answer, which is the exit the 2026-08-10 case needed.
+ * says to stop and answer, which is the exit a stalled loop needs.
  *
  * Driven through the real tool objects rather than a mock, so the signature
  * logic is exercised exactly as the SDK invokes it.
@@ -196,12 +195,11 @@ describe("visibility and cost", () => {
 /**
  * A repeated Grep must name a way forward.
  *
- * Run A (2026-09-12) had 26 stalls from a repeated Grep against 12 from a
- * repeated Read, because Read's notice names the next unread line and Grep's
- * named nothing. One of those cost a CRITICAL verdict: the validator for
- * `FilterToSqlHelper.constructEquality` was tracing reachability, re-ran
- * `Grep jsonArrayContains` three times, stalled, lost its tools, and recorded
- * `uncertain` saying reachability "is not fully verified in this codebase".
+ * A repeated Grep stalls a loop far more often than a repeated Read, because
+ * Read's notice names the next unread line and Grep's named nothing. That costs
+ * real verdicts: a validator tracing reachability re-runs one Grep, stalls,
+ * loses its tools, and records `uncertain` saying reachability is not fully
+ * verified.
  *
  * The files the first search matched are the concrete next move, so the notice
  * carries them.

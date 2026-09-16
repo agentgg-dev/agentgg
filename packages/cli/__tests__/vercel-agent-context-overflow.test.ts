@@ -6,8 +6,7 @@
  * long agent run on a big repo can blow the model's context window mid-batch. That
  * throws out of `generateText`, which fails the batch, which sets `rt.failed`,
  * which suppresses the agent's resume sidecar — and the platform then marks the
- * whole agent failed. Prod scan 764dbd1d lost `missing-access-control` this way
- * on 2026-08-18 (1,241,542 tokens requested against a 1,048,576 limit).
+ * whole agent failed, losing every finding it had already reported.
  *
  * Re-sending the same request can't work, which is why `withTpmRetry` refuses
  * to retry it. A SMALLER loop can, so `runAgent` retries once at half the read
@@ -30,7 +29,7 @@ function emptyResult() {
   return { text: '{"findings": []}', steps: [], usage: {} };
 }
 
-/** The overflow the provider actually returned on scan 764dbd1d. */
+/** The overflow shape a provider actually returns. */
 function contextOverflow() {
   return new Error(
     "This endpoint's maximum context length is 1048576 tokens. However, you " +

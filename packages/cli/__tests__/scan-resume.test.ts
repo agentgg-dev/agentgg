@@ -191,8 +191,8 @@ function ranFiles(): string[] {
 // analyzed. The closing line counts analyzed files, not candidates: while an
 // empty batch was laundered into `{findings: []}` every candidate got a record
 // either way, so counting candidates was harmless. Once an empty batch started
-// failing honestly, that count began overstating the work done. Observed on
-// juice-shop: "3 finding(s) across 13 file(s)" when only 3 files had records.
+// failing honestly, that count began overstating the work done: the closing
+// line named far more files than actually had records.
 describe("a failed batch is not counted as analyzed", () => {
   it("reports only the files that actually got a record", async () => {
     suppressLogs();
@@ -229,9 +229,9 @@ describe("a failed batch is not counted as analyzed", () => {
 
   // Regression: a resumed file has a record but persistDetection is never
   // called for it, so counting only this run's writes undercounts the files
-  // that have records and overcounts the ones said to re-run. Seen on
-  // juice-shop: "across 5 file(s)" with 8 records on disk, and "8 candidate
-  // file(s) were not analyzed" when only 5 were.
+  // that have records and overcounts the ones said to re-run: the closing line
+  // names fewer files than there are records on disk, and claims files were not
+  // analyzed when they were.
   it("counts files reused from a prior run as analyzed", async () => {
     suppressLogs();
     // Run 1: analyze one of the two files, fail the batch holding the other.

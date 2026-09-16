@@ -2,11 +2,10 @@
  * Range-aware Read repeat detection.
  *
  * The exact-signature guard keys on `(path, offset, limit)`, so every window of
- * a file is a distinct call and a re-read is invisible. In the failing session
- * of 2026-09-12 the model read `FilterToSqlHelper.java` 41 times: it paged
- * 690-1349, filled in 230-689, then crawled the region it already held in
- * 20-line windows. About 29 of 41 reads returned content it already had, yet
- * `stalls` stayed 0 and the loop ran to step 61.
+ * a file is a distinct call and a re-read is invisible. A stalled model reads
+ * one file dozens of times: it pages forward, fills in the gap behind it, then
+ * crawls the region it already holds in small windows. Most of those reads
+ * return content it already had, yet `stalls` stays 0 and the loop runs on.
  *
  * Coverage is per path, as merged line intervals. A read already inside them is
  * a repeat. A read that reaches past them is progress and must stay allowed.
@@ -144,11 +143,11 @@ describe("Read tool, range aware", () => {
 /**
  * Where to go next after a covered read.
  *
- * In test 1 (2026-09-12) session #4 swept PostGISDialect.java in order, 1-50
- * through 550-599, and at 600 met a region it had read earlier while tracing
- * `escapeName`. The notice said "read a part of the file you have not seen" and
- * named none, so the model retried the same window three times, stalled, and
- * lost its tools mid-sweep. A block that names no way forward is a dead end.
+ * A session that sweeps a file in order, 1-50 through 550-599, can meet at 600
+ * a region it read earlier while tracing a helper. A notice that says "read a
+ * part of the file you have not seen" and names none leaves the model retrying
+ * the same window until it stalls and loses its tools mid-sweep. A block that
+ * names no way forward is a dead end.
  */
 describe("read coverage, next unread line", () => {
   it("points past the covered region the read landed in", () => {
@@ -222,8 +221,8 @@ describe("covered-read notice names the way forward", () => {
   it("names the next unread line so an orderly sweep can resume", async () => {
     writeFile("a.java", 1558);
     const t = tools();
-    // The trace that broke session #4: a scattered read first, then a sweep
-    // that walks into it.
+    // The trace that breaks a sweep: a scattered read first, then an orderly
+    // sweep that walks into it.
     await read(t.Read, { path: "a.java", offset: 600, limit: 50 });
 
     const blocked = await read(t.Read, { path: "a.java", offset: 610, limit: 40 });

@@ -3,9 +3,9 @@
  *
  * `generateObject` parses its own response and throws, so the raw text never
  * reaches `extractJSON` — even though that function handles every corruption
- * Makora produced. The fixtures below are the real strings from the local scan
- * on 2026-08-28 (run 20260828071048) and from the pinned-provider probe that
- * identified Makora: makora 1/8 valid, baseten 8/8, streamlake 8/8, ambient 8/8.
+ * seen in the wild. The fixtures below are real strings a provider returned,
+ * not invented ones: some serving stacks corrupt structured output far more
+ * often than others, and the pinned-provider knob exists for that.
  *
  * No LLM call is involved: the helper reads `err.text`, which is already paid for.
  */
@@ -85,8 +85,7 @@ describe("recoverFromError — validation verdicts", () => {
   it("hands a mid-object delimiter break down to salvageVerdict", () => {
     // A break BETWEEN fields is not recoverable this way: the only slice that
     // parses starts after the corruption, so `verdict` is already gone and the
-    // schema rejects what is left. This is the staging shape from 2026-08-26,
-    // and salvageVerdict is the layer that covers it.
+    // schema rejects what is left. salvageVerdict is the layer that covers it.
     const text = `{"verdict":"out-of-scope","{"reasoning":"Test fixtures are excluded.","confidence":0.7}`;
     expect(recoverFromError(LlmValidation, noObjectGenerated(text))).toBeNull();
     expect(salvageVerdict(text)).toBe("out-of-scope");

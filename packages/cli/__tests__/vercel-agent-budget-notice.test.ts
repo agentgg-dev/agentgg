@@ -11,8 +11,8 @@
  *
  *   - "findings JSON" is meaningless to the validator, recon, and agent-spec
  *     passes. Those emit a verdict, a brief, and a spec respectively.
- *   - "do not read more files" did not cover the stall actually observed on
- *     2026-08-10, which was 41 repeated Grep calls. A grep is not a file read.
+ *   - "do not read more files" does not cover a stall built out of repeated
+ *     Grep calls. A grep is not a file read.
  *   - "Error:" framed a normal limit as a fault, inviting a retry.
  *
  * Pure-function tests — no LLM calls.

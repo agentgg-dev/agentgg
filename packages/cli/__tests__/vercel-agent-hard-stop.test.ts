@@ -1,8 +1,8 @@
 /**
  * The hard stop: a loop that repeats a call, or reaches its last turn, loses
- * its tools so the model has to answer. A notice alone never ended a loop in
- * prod (2026-09-08: one call sent 49 times, then an empty answer and a failed
- * batch). Real generateText, mocked model only.
+ * its tools so the model has to answer. A notice alone never ends a stalled
+ * loop: the model re-sends one call until the steps run out, then returns an
+ * empty answer and the batch fails. Real generateText, mocked model only.
  */
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -96,9 +96,9 @@ describe("hard stop in the agent tool loop", () => {
   });
 
   it("still gets an answer from a model that ignores tool_choice", async () => {
-    // GLM-5.2, prod 2026-09-11: the stop fired on the last turn and the model
-    // called a tool anyway, so the batch failed. A request with no tools at all
-    // is the one thing it cannot ignore.
+    // Some models ignore tool_choice: the stop fires on the last turn and the
+    // model calls a tool anyway, so the batch fails. A request with no tools at
+    // all is the one thing it cannot ignore.
     const calls: Call[] = [];
     const root = await makeRepo();
     const model = new MockLanguageModelV1({

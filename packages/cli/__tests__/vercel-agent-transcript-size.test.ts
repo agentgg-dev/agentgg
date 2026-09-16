@@ -5,9 +5,9 @@
  * so it grows with the step count and says nothing about how close the
  * transcript came to the context window. The last step's own prompt is the
  * peak, and a peak near the model's limit is its own failure cause: the
- * provider truncates and the model answers with nothing. Two runs in the
- * 2026-09-12 handoff ended with no text and no tool call, and neither log
- * could tell a runaway generation from an overfull transcript.
+ * provider truncates and the model answers with nothing. Without the peak, a
+ * log of a run that ended with no text and no tool call cannot tell a runaway
+ * generation from an overfull transcript.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { logUnparseableGeneration } from "../src/detectors/vercel-agent.js";

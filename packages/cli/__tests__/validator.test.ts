@@ -188,9 +188,9 @@ describe("buildValidatePrompt", () => {
     expect(out).toContain("instanceof");
   });
 
-  // One home per case. The scope document sent trusted input to out-of-scope,
-  // these rules sent it to uncertain, and 9 of 10 verdicts that changed on
-  // revalidate (2026-09-13) were that case.
+  // One home per case. The scope document sent trusted input to out-of-scope
+  // while these rules sent it to uncertain, and that overlap is what makes a
+  // verdict flip between one validation and the next.
   it("does not send a trusted or privileged actor to uncertain", () => {
     const out = buildValidatePrompt({
       finding: makeFinding(),

@@ -8,9 +8,9 @@
  * obliged:
  *
  *   - detection  -> `{findings: []}`, a fabricated all-clear indistinguishable
- *                   from real code review. Observed 2026-08-11 on `z-ai/glm-5.2`:
- *                   the xss agent hit its turn cap, wrote nothing, and the two
- *                   real findings from the prior run silently vanished.
+ *                   from real code review. An agent that hits its turn cap and
+ *                   writes nothing silently drops the real findings an earlier
+ *                   run reported.
  *   - validation -> `uncertain` + "No validation content or finding was
  *                   provided to analyze", which read like a real judgement.
  *
@@ -179,10 +179,9 @@ describe("validateFinding (tool-enabled) — empty completion", () => {
  * The forced answer, schema-constrained.
  *
  * When a tool loop ends with no text, `answerWithoutTools` re-asks with the
- * transcript and no tools. As free text that request can be answered with
- * nothing, and on 2026-09-12 it was: "asked again with no tools and still got
- * nothing". A request carrying the findings schema is much harder to answer
- * with nothing, and it is the last chance before the batch fails.
+ * transcript and no tools. As free text that request can still be answered with
+ * nothing. A request carrying the findings schema is much harder to answer with
+ * nothing, and it is the last chance before the batch fails.
  */
 describe("runAgent — forced answer carries the schema", () => {
   /** Records the `mode` of every request so the retry shape can be asserted. */
@@ -255,10 +254,10 @@ describe("runAgent — forced answer carries the schema", () => {
  *
  * Detection re-asks with the transcript, no tools, and the findings schema when
  * its loop ends with no text. Validation had no retry at all: an empty loop fell
- * straight through to `uncertain` + cut-short. Test 2 (2026-09-12) made that the
- * bottleneck: 5 validate sessions lost their tools to stalled repeats, one hit
- * the 60-turn cap, and 9 findings came back unresolved. The verdict schema is
- * small, so a schema-constrained retry is very likely to land.
+ * straight through to `uncertain` + cut-short. Once the detect loop is guarded,
+ * validation becomes the bottleneck instead, and findings come back unresolved
+ * for no better reason. The verdict schema is small, so a schema-constrained
+ * retry is very likely to land.
  */
 describe("validateFinding — forced answer carries the verdict schema", () => {
   /** Replies in order, recording the `mode` and tool presence of each request. */
@@ -331,9 +330,9 @@ describe("validateFinding — forced answer carries the verdict schema", () => {
  *
  * The retry only ran on EMPTY text, so a loop that hit the turn cap and wrote
  * something else fell through to the reformat step, which sees only that text.
- * new1b (2026-09-13) recorded "No finding description... only a file read
- * command" as a real `uncertain`. GLM ignores `toolChoice: "none"`, so the
- * reserved last turn often carries a tool call written as prose.
+ * That records prose such as "only a file read command" as a real `uncertain`.
+ * A model that ignores `toolChoice: "none"` often spends the reserved last turn
+ * on a tool call written as prose.
  */
 describe("validateFinding - cut-off loop with a non-verdict message", () => {
   const VERDICT = JSON.stringify({

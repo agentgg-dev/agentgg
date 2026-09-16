@@ -6,9 +6,8 @@
  * model that took the simpler reading and called `Grep({pattern})` had the call
  * rejected outright with `AI_InvalidToolArgumentsError`, and one that reached
  * for `path` (the sibling Read tool's parameter name) was rejected too. Both
- * shapes were observed in prod on Ghost-6.57.0 — 17 rejections in one 2h scan,
- * 13 in another — and each one burns a turn out of the batch budget while
- * returning nothing.
+ * shapes show up many times in a single long scan, and each one burns a turn
+ * out of the batch budget while returning nothing.
  *
  * The schema then went the other way and broke OpenAI: `.optional()` drops the
  * key from `required`, which OpenAI's strict function schemas forbid, so every

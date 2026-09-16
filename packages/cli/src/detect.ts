@@ -815,12 +815,11 @@ ${hitsBlock}`;
  * Map a path the model reported onto the batch candidate it actually means, or
  * `undefined` when no single candidate matches.
  *
- * A tool-loop model that read `data/static/codefixes/loginJim.ts` frequently
- * reports the finding against the bare basename. That resolves to nothing under
- * the scan root, so scan.ts's invented-path filter treated a formatting slip as
- * a hallucination and dropped a real finding. Measured on juice-shop
- * 2026-08-29: the same five files yielded one finding each on one run and zero
- * on the next, purely on how the model spelled the path.
+ * A tool-loop model that read a nested path frequently reports the finding
+ * against the bare basename. That resolves to nothing under the scan root, so
+ * scan.ts's invented-path filter treated a formatting slip as a hallucination
+ * and dropped a real finding. The same file can then yield a finding on one
+ * run and nothing on the next, purely on how the model spelled the path.
  *
  * CALLERS MUST TRY THE RAW PATH ON DISK FIRST and only fall back to this. That
  * ordering is what keeps the repair strictly additive: `hydrateFinding` hashes
@@ -944,8 +943,8 @@ export interface UnverifiedExcerpt {
 
 /**
  * Fenced blocks in `details` with a line found in none of `sources`, nor by
- * `existsElsewhere` (the repository) when given. About 1
- * finding in 9 quoted invented code (geotools, 2026-09-13). A block tagged with
+ * `existsElsewhere` (the repository) when given. Models quote invented or
+ * paraphrased code often enough to need this check. A block tagged with
  * another language is example output, not source, so it is skipped.
  */
 export function findUnverifiedExcerpts(

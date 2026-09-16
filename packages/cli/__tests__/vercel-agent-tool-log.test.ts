@@ -1,6 +1,6 @@
 /**
- * The tool call log. Prod passes no --verbose, so until now its logs held no
- * tool line at all: you saw repeat warnings and never the answers that caused
+ * The tool call log. The platform passes no --verbose, so until now its logs
+ * held no tool line at all: you saw repeat warnings and never the answers that caused
  * them, and a "(no matches)" loop looked normal. One ungated line per call now
  * carries the arguments the dedupe key sees plus a summary of the result.
  */
@@ -27,7 +27,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-/** verbose:false — the prod shape. */
+/** verbose:false — the shape the platform runs with. */
 function tools() {
   return buildTools({
     cwd: root,
@@ -128,9 +128,9 @@ describe("summarizeToolResult", () => {
 });
 
 /**
- * Five concurrent batches of one agent all logged as `runAgent:<slug>`, so a
- * warning could not be tied to the session that raised it. Every per-cause
- * split in the 2026-09-12 handoff came from counts, not from one session.
+ * Concurrent batches of one agent all logged as `runAgent:<slug>`, so a warning
+ * could not be tied to the session that raised it, and a per-cause breakdown
+ * could only be read out of aggregate counts.
  */
 describe("session label", () => {
   it("gives two sessions of the same agent distinct labels", () => {

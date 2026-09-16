@@ -104,7 +104,7 @@ export function isRateLimitError(message: string): boolean {
  * short backoff — distinct from a rate-limit (handled above) and from a
  * deterministic request error like context overflow (never retried).
  *
- * These are the Vertex MaaS gateway / network flakes seen in production: the
+ * These are the Vertex MaaS gateway / network flakes: the
  * gateway returns HTTP 200 with a plain-text `upstream request timeout` body
  * (which the OpenAI-compatible parser rejects as "Invalid JSON response"),
  * drops the connection ("Headers Timeout", "Cannot connect to API"), or 5xxs.
@@ -371,8 +371,8 @@ const SKIP_DIRS = new Set([
 
 const GLOB_MAX_RESULTS = 500;
 const GREP_MAX_MATCHES = 200;
-/** Files one Grep will search. Well above a large repo (geotools: 8.6k .java),
- *  so it only bounds a pathological tree, and hitting it adds a notice. */
+/** Files one Grep will search. Well above what a large repo holds, so it only
+ *  bounds a pathological tree, and hitting it adds a notice. */
 const GREP_MAX_FILES = 20_000;
 /** Longest matching line Grep returns. A longer one (minified code, data)
  *  becomes a marker with its length and keeps its file:line. */
@@ -387,8 +387,7 @@ const GREP_READ_CHUNK = 12;
 
 /** Per-session cumulative cap on bytes returned by Read/Glob/Grep. The agent
  *  tool-loop transcript (mostly file contents) is what blows the model's
- *  context window: GLM-5's is 202,752 tokens, and we saw 207k-token overflows
- *  on large repos. ~400 KB of tool output is roughly 110-130k tokens of code,
+ *  context window: GLM-5's is 202,752 tokens, and a large repo overflows it. ~400 KB of tool output is roughly 110-130k tokens of code,
  *  leaving headroom for the prompt, reasoning, and the JSON answer. Past the
  *  cap, further tool calls return a notice telling the model to finalize. */
 const TOOL_OUTPUT_BUDGET_BYTES = 400_000;
@@ -555,7 +554,7 @@ export function sessionLabel(base: string): string {
 /**
  * Hard stop for a tool loop. A stalled model ignores the finalize notice and
  * spends every remaining step on tools, so the loop ends with no answer and the
- * batch fails (prod 2026-09-08: one call sent 49 times in 51 steps). Removing
+ * batch fails: nearly every step goes to re-sending one call. Removing
  * the tools leaves one move: answer from what it already read. It also reserves
  * the last allowed step, so a loop that never repeats still answers.
  */
@@ -711,7 +710,6 @@ export class VercelAgentDetector implements Detector {
    * batch, which sets `rt.failed`, which means the agent never gets its resume
    * sidecar — so the platform marks the WHOLE agent failed even though its
    * other batches found real issues. One bad turn should not cost an agent.
-   * Prod scan 764dbd1d lost three agents this way.
    *
    * Two steps, cheapest first:
    *   1. Name. `NoSuchToolError` means the name itself is garbage; the real one
@@ -869,9 +867,9 @@ export class VercelAgentDetector implements Detector {
   /**
    * Last resort for a tool loop that ended on a tool call: ask once more with
    * the transcript and NO tools, so the only thing the model can return is its
-   * answer. `toolChoice: "none"` is not enough — GLM-5.2 ignored it in prod on
-   * 2026-09-11 and called a tool on the step where the hard stop fired, which
-   * failed the batch. Taking the tools out of the request is the one thing a
+   * answer. `toolChoice: "none"` is not enough — some models ignore it and call
+   * a tool on the step where the hard stop fires, which fails the batch.
+   * Taking the tools out of the request is the one thing a
    * model cannot ignore. Costs one call, and only for a batch that would
    * otherwise produce nothing.
    */
@@ -894,8 +892,7 @@ export class VercelAgentDetector implements Detector {
           "based on what you have already examined.",
       },
     ];
-    // Schema first. As free text this request can be answered with nothing, and
-    // on 2026-09-12 it was ("asked again with no tools and still got nothing"):
+    // Schema first. As free text this request can be answered with nothing:
     // the model returns empty text even with the tools removed. A request
     // carrying the findings schema is far harder to answer with nothing, and
     // this is the last call before the batch fails.
@@ -1010,9 +1007,8 @@ export class VercelAgentDetector implements Detector {
       // parseOrReformat below it becomes an empty findings list: the reformat
       // prompt carries only this text, so from a blank page the model dutifully
       // answers "no findings", and that all-clear is indistinguishable from
-      // real code review. Seen 2026-08-11: the xss agent hit its turn cap,
-      // wrote nothing, and the two real findings it had reported on the
-      // previous run silently disappeared.
+      // real code review. An agent that hits its turn cap and writes nothing
+      // would silently drop the real findings an earlier run reported.
       //
       // Throwing is the documented contract for a non-refusal parse failure. It
       // sets `rt.failed` in scan.ts, which suppresses the agent sidecar so the
@@ -1247,10 +1243,10 @@ export class VercelAgentDetector implements Detector {
       let answer = gen.text;
       if (!answer.trim()) {
         logUnparseableGeneration(label, gen);
-        // Same last chance detection gets. Test 2 (2026-09-12) moved the stall
-        // here: 5 validate sessions lost their tools to repeats and one hit the
-        // turn cap, and every one of those was recorded `uncertain` without a
-        // second ask. The verdict schema is small, so this usually lands.
+        // Same last chance detection gets. Guarding the detect loop moves the
+        // stall here instead: a validate session loses its tools to repeats or
+        // hits the turn cap, and is then recorded `uncertain` without a second
+        // ask. The verdict schema is small, so this usually lands.
         answer = await this.answerWithoutTools(
           label,
           prompt,
@@ -1267,7 +1263,7 @@ export class VercelAgentDetector implements Detector {
       ) {
         // GLM ignores `toolChoice: "none"`, so a capped loop often spends its
         // reserved turn on a tool call written as prose. Reformatting that text
-        // invents a verdict from a non-answer (new1b, 2026-09-13).
+        // invents a verdict from a non-answer.
         logWarn(
           `[${label}] the loop was cut short and its last message is not a verdict; asking again with no tools`,
         );
@@ -1692,9 +1688,9 @@ export function buildTools(opts: ToolLoopOpts) {
 
   // Repeated identical tool calls are the signature of a stalled loop: the
   // model re-issues the same search, gets the same bytes back, and never
-  // advances. Observed 2026-08-10, when one validator ran the same Grep 41
-  // times over nine minutes, spent its whole turn budget, and answered with
-  // nothing. A repeat re-executes nothing and is not charged to the byte
+  // advances. A validator can run the same Grep dozens of times, spend its
+  // whole turn budget, and answer with nothing.
+  // A repeat re-executes nothing and is not charged to the byte
   // budget, so the loop becomes cheap; the warn makes it visible.
   //
   // Keyed on what actually EXECUTES rather than the raw arguments: Grep's
@@ -1743,8 +1739,8 @@ export function buildTools(opts: ToolLoopOpts) {
 
   // What each Grep signature matched the first time. A repeat is told which
   // files to open next; without that the notice is a dead end and the model
-  // retries the same query until it stalls. Run A (2026-09-12): 26 stalls from
-  // a repeated Grep against 12 from a repeated Read, which has a redirect.
+  // retries the same query until it stalls. A repeated Grep stalls far more
+  // often than a repeated Read, which already has a redirect.
   const grepHits = new Map<string, string[]>();
 
   return {
@@ -1936,8 +1932,8 @@ export function toSearchGlob(path: string): string {
  * false` is a slip: the model already holds the bytes and only needs to
  * advance, so the notice must NOT offer to finalize — on turn 3 of 200 that
  * invites the empty answer this guard exists to prevent. `stalled: true` is
- * the 2026-08-10 case (one Grep run 41 times, whole turn budget spent, no
- * answer), where finalizing IS the way out.
+ * the case where one call runs dozens of times and the whole turn budget goes
+ * with no answer, and finalizing IS the way out.
  */
 export function repeatNotice(toolName: string, phase: ToolLoopPhase, stalled = false): string {
   const head =
@@ -2010,10 +2006,10 @@ export function coveredReadNotice(
       `output your final ${ARTIFACT[phase]} now, based on what you have already examined.`
     );
   }
-  // A block that names no next move is a dead end. Test 1 (2026-09-12) watched
-  // session #4 sweep this file in order, meet a region it had read while
-  // tracing a helper, then retry the SAME window three times until its tools
-  // were taken away. Naming the line it has not seen is what lets a sweep
+  // A block that names no next move is a dead end. A session that sweeps a
+  // file in order can meet a region it already read while tracing a helper,
+  // then retry the SAME window until its tools are taken away.
+  // Naming the line it has not seen is what lets a sweep
   // resume instead of stall.
   if (nextUnread === null) {
     return (
@@ -2312,9 +2308,9 @@ const INDEX_READ_BATCH = 12;
 
 /**
  * Normalized text of every `language` source file under `rootDir`, for the
- * excerpt check. A correct quote can come from a file outside the batch:
- * JDBCDataStore quoted SQLDialect.getNameEscape (2026-09-13). Same skip rules,
- * excludes and file cap as Grep.
+ * excerpt check. A correct quote can come from a file outside the batch: one
+ * class often quotes a method another file defines. Same skip rules, excludes
+ * and file cap as Grep.
  */
 async function buildSourceIndex(
   rootDir: string,
@@ -2685,8 +2681,8 @@ const ERROR_ID_HEADERS = [
  * in the provider dashboard, where a request id or a `cf-ray` does not.
  * Checked before the request-id headers so the better id wins when both exist.
  *
- * What each provider actually exposes, measured against the live APIs on
- * 2026-08-28 rather than assumed. Only these five reach this code; `anthropic`
+ * What each provider actually exposes, measured against the live APIs rather
+ * than assumed. Only these five reach this code; `anthropic`
  * routes to ClaudeAgentDetector and never calls `metered`.
  *
  *   openrouter  X-Generation-Id header + body `id`. No x-request-id, ever.
@@ -2884,7 +2880,7 @@ export function warnIfTurnCapped(label: string, result: unknown, maxTurns: numbe
  *                         this SDK version doesn't read.
  *   - "tool-calls"        ended mid tool-loop (cross-check steps vs maxTurns).
  *
- * Always logs (not gated on AGENTGG_DEBUG) — capturing this in production is
+ * Always logs (not gated on AGENTGG_DEBUG) — capturing this on a real scan is
  * the whole point. Reads every field defensively so a provider that omits one
  * degrades to a 0/"unknown" rather than throwing inside the error path.
  */

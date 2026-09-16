@@ -148,7 +148,7 @@ it("does not treat a context overflow as transient", () => {
 describe("isContextLengthError", () => {
   describe("matches context-overflow rejections across providers", () => {
     it.each([
-      // Vertex / GLM-5 MaaS (the production case).
+      // Vertex MaaS.
       ["The input (207058 tokens) is longer than the model's context length (202752 tokens)."],
       // OpenAI.
       ["context_length_exceeded: maximum context length is 128000 tokens"],

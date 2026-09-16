@@ -1,17 +1,14 @@
 /**
  * Quoted code in a finding must exist in the source it cites.
  *
- * A detector sometimes writes a plausible excerpt that is not in the file.
- * Across 105 findings with a code block in seven geotools runs (2026-09-13), 17
- * quoted lines were invented or paraphrased: about 1 finding in 9. Run B's
- * `constructEquality` finding quoted two lines that exist nowhere in the
- * repository, and its validator rightly refused to confirm a write-up it could
- * not reproduce.
+ * A detector sometimes writes a plausible excerpt that is not in the file. A
+ * finding can quote lines that exist nowhere in the repository, and a validator
+ * then refuses to confirm a write-up it cannot reproduce.
  *
- * The match rule follows that data. Exact line matching missed 65 of 505 lines,
- * and 44 of those were correct Java reflowed onto one line, so whitespace
- * (newlines included) and // comments are ignored. A block tagged with another
- * language is not source, so it is skipped rather than flagged.
+ * Exact line matching is too strict on its own: correct code reflowed onto one
+ * line misses, so whitespace (newlines included) and // comments are ignored. A
+ * block tagged with another language is not source, so it is skipped rather
+ * than flagged.
  */
 
 import type { Finding } from "@agentgg/core";
@@ -48,7 +45,7 @@ describe("findUnverifiedExcerpts", () => {
     expect(findUnverifiedExcerpts(d, [SOURCE], "java")).toEqual([]);
   });
 
-  it("flags invented lines, as in Run B", () => {
+  it("flags invented lines", () => {
     const d = details(
       `${F}java`,
       "// line ~782",
@@ -219,10 +216,10 @@ describe("repairFindingExcerpts", () => {
 });
 
 /**
- * Corrections from the audit of 105 real findings (2026-09-13). Lines under 20
- * characters matched by chance, lines shortened with "..." are abbreviations of
- * real code, and correct quotes from files outside the batch were flagged:
- * `JDBCDataStore` quoted `SQLDialect.getNameEscape`, which was not in its batch.
+ * Corrections found by auditing real findings. Lines under 20 characters match
+ * by chance, lines shortened with "..." are abbreviations of real code, and a
+ * correct quote can come from a file outside the batch, because one class
+ * routinely quotes a method another file defines.
  */
 describe("excerpt check, audit corrections", () => {
   const elsewhere = (needle: string) => needle.includes("getNameEscape");

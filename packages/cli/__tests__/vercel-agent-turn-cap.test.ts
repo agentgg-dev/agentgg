@@ -6,12 +6,11 @@
  * Why this exists: a capped session produces no JSON, the reformat fallback
  * turns that into a valid-looking result, and the session is recorded as a
  * clean success. Without this warning a model that degenerated into repeating
- * one Grep is indistinguishable from real work. Observed in prod on
- * `z-ai/glm-5.2` (scan e43ed580, 2026-08-08): 31 step-groups against a 30-turn
- * cap, 0 findings; the identical rerun found 6. Again on scan e537b214
- * (2026-08-10), this time in the VALIDATOR — 41 identical greps, no verdict,
- * and the reformat invented one. Hence the first arg being a caller-supplied
- * label rather than an agent slug: detection and validation both use this.
+ * one Grep is indistinguishable from real work: a capped run reports 0 findings
+ * where an identical rerun reports several. The same happens in the VALIDATOR,
+ * where a capped loop produces no verdict and the reformat invents one. Hence
+ * the first arg being a caller-supplied label rather than an agent slug:
+ * detection and validation both use this.
  *
  * `generateText` is called with `maxSteps = maxTurns + 1`, so the cap is hit
  * when `steps.length` reaches that ceiling. Warn-only by design. Pure-function

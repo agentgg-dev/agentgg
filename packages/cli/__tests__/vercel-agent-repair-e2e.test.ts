@@ -6,8 +6,8 @@
  * except the model itself: the REAL `generateText` runs, the REAL SDK raises
  * `AI_NoSuchToolError` on the mangled name, the REAL repair hook fires, and the
  * REAL Grep tool executes against a temp repo. That is the whole point — the
- * bug on prod scan 764dbd1d was not a broken helper, it was an unhandled error
- * class escaping `generateText`, so the test has to exercise that path.
+ * bug was never a broken helper, it was an unhandled error class escaping
+ * `generateText`, so the test has to exercise that path.
  *
  * The model is an `ai/test` MockLanguageModelV1 that answers three calls:
  *   1. `regular` mode  → a tool call whose NAME carries leaked arg markup
@@ -21,7 +21,7 @@ import { MockLanguageModelV1 } from "ai/test";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { VercelAgentDetector } from "../src/detectors/vercel-agent.js";
 
-/** The exact tool name GLM-5 emitted on scan 764dbd1d, slug missing-access-control. */
+/** A real mangled tool name a model emitted, with its arg markup leaked in. */
 const MANGLED =
   "Grep<arg_value>pattern</arg_key><arg_value>get_owned_provider_account_or_404</arg_value>";
 

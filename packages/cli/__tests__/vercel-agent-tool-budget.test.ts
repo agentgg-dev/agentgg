@@ -10,8 +10,8 @@
  *     validation embeds one plus the finding and scope), so the room left for
  *     tool output differs too;
  *   - exhausting it now warns. Before, tools silently began returning the
- *     finalize notice, which is why "the budget caused the 2026-08-10 stall"
- *     could never be confirmed or ruled out from the logs.
+ *     finalize notice, so "the budget caused this stall" could never be
+ *     confirmed or ruled out from the logs.
  *
  * The defaults are deliberately uniform until that warning produces data — see
  * the comment on `toolOutputBudgetBytes`.
