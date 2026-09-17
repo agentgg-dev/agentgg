@@ -52,6 +52,9 @@ import { getSemgrepRulesDir, isSemgrepSuppressed, runSemgrepProject } from "../s
 import { runSmartExclude } from "../smart-exclude.js";
 import { resolveTemplates } from "../template.js";
 import { createUsageMeter, type UsageMeter } from "../usage-meter.js";
+import { runReproducePhase } from "../validation/reproduce.js";
+import { DEFAULT_SANDBOX_IMAGE } from "../validation/sandbox.js";
+import { parseTargetAuth } from "../validation/target-auth.js";
 import { DEFAULT_VIEWER_PORT, openBrowser, startViewer } from "../viewer-server.js";
 import { DEFAULT_EXCLUDES, pathMatches, type WalkConfig, walkForAgents } from "../walker.js";
 import { buildInvocation } from "./invocation.js";
@@ -239,6 +242,28 @@ interface ScanOpts {
    * `true` when the bare flag is passed.
    */
   serve?: boolean | string;
+  /**
+   * Opt-in live-validation sub-phase. After dedup, reproduce PRIMARY
+   * web-reachable findings against a running target inside a Docker
+   * sandbox. Requires `--target-url`. Off by default.
+   */
+  validateLive?: boolean;
+  /** Root URL of the running application the sandbox reaches (external mode). */
+  targetUrl?: string;
+  /** `user:pass` or `@file.json` login credentials for the target. */
+  targetCredentials?: string;
+  /** Extra request headers for the target: `Name: value`. Repeatable. */
+  targetHeader?: string[];
+  /** Free-form scope/context notes folded into the reproduce prompt. */
+  targetContext?: string;
+  /** Sandbox image tag. Defaults to the pinned `DEFAULT_SANDBOX_IMAGE`. */
+  targetImage?: string;
+  /** Per-finding reproduction timeout in seconds (default 120). */
+  reproduceTimeout?: number;
+  /** Whole-phase reproduction budget in seconds (default 1800). */
+  reproduceBudget?: number;
+  /** Max findings to reproduce in one run (default 50). */
+  reproduceMax?: number;
 }
 
 /**
@@ -1955,6 +1980,26 @@ export async function runScan(
       }
     }
 
+    // Opt-in live validation: reproduce web-reachable findings against a
+    // running target. Runs after dedup so it only touches primaries.
+    if (opts.validateLive) {
+      if (!opts.targetUrl) throw new Error("--validate-live requires --target-url");
+      console.log("\nLive validation");
+      await runReproducePhase({
+        findings,
+        detector,
+        outDir,
+        targetUrl: opts.targetUrl,
+        auth: parseTargetAuth(opts),
+        context: opts.targetContext,
+        image: opts.targetImage ?? DEFAULT_SANDBOX_IMAGE,
+        timeoutMs: Number(opts.reproduceTimeout ?? 120) * 1000,
+        budgetMs: Number(opts.reproduceBudget ?? 1800) * 1000,
+        max: Number(opts.reproduceMax ?? 50),
+        signal: scanAbortController.signal,
+      });
+    }
+
     const completedAt = new Date();
 
     // `--no-summary` skips the report render entirely. Findings are already
@@ -2325,6 +2370,50 @@ export function registerScanCommand(program: Command): void {
     .option(
       "--no-auto-exclude",
       "don't let the model pick folders to skip (auto-exclude runs by default). The whole tree is scanned except your explicit --exclude paths.",
+    )
+    .option(
+      "--validate-live",
+      "After dedup, reproduce PRIMARY web-reachable findings against a running target inside a Docker sandbox (external mode). Runs the reproduce agent per finding, executes its generated Playwright script once, and records a dynamic verdict + evidence. Off by default; requires --target-url and a reachable Docker daemon.",
+    )
+    .option(
+      "--target-url <url>",
+      "Root URL of the already-running application to validate against. Required with --validate-live.",
+    )
+    .option(
+      "--target-credentials <cred>",
+      "Login for the target: `user:pass`, or `@path/to/creds.json` ({ username, password, headers }). Redacted from any stored reasoning.",
+    )
+    .option(
+      "--target-header <h>",
+      "Extra request header for the target, `Name: value`. Repeatable. Values are redacted from stored reasoning.",
+      collect,
+      [] as string[],
+    )
+    .option(
+      "--target-context <ctx>",
+      "Free-form scope/context notes folded into the reproduce prompt (e.g. which flows are in scope).",
+    )
+    .option(
+      "--target-image <ref>",
+      `Sandbox image tag hosting Playwright + the MCP server. Defaults to the pinned ${DEFAULT_SANDBOX_IMAGE}.`,
+    )
+    .option(
+      "--reproduce-timeout <s>",
+      "Per-finding reproduction timeout in seconds (default 120).",
+      (v) => parseInt(v, 10),
+      120,
+    )
+    .option(
+      "--reproduce-budget <s>",
+      "Whole-phase reproduction budget in seconds; the phase stops cleanly once exceeded (default 1800).",
+      (v) => parseInt(v, 10),
+      1800,
+    )
+    .option(
+      "--reproduce-max <n>",
+      "Max findings to reproduce in one run (default 50).",
+      (v) => parseInt(v, 10),
+      50,
     )
     .option("-v, --verbose", "verbose output")
     .action(async (path: string, opts: ScanOpts) => {
