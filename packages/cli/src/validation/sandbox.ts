@@ -10,7 +10,8 @@ const pexec = promisify(execFile);
 // Keep in sync with the tag in sandbox.Dockerfile's build comment.
 export const DEFAULT_SANDBOX_IMAGE = "agentgg/live-sandbox:pw1.56.0-mcp0.0.41";
 
-// Container port the Playwright MCP server binds; published to a random host port.
+// Container port the Playwright MCP server binds; published 1:1 on the host so
+// the Host header the MCP client sends matches what the server allows.
 const MCP_PORT = "8931";
 const READY_TIMEOUT_MS = 30_000;
 const DEFAULT_EXEC_TIMEOUT_MS = 120_000;
@@ -25,6 +26,7 @@ export interface Sandbox {
   browserEndpoint(): string;
   writeFile(path: string, bytes: Buffer | string): Promise<void>;
   readFile(path: string): Promise<Buffer>;
+  logs(): Promise<string>;
   dispose(): Promise<void>;
 }
 
@@ -49,13 +51,22 @@ export async function startLocalDockerSandbox(opts: { image: string }): Promise<
       "-d",
       "--rm",
       "--add-host=host.docker.internal:host-gateway",
+      // Publish 1:1 (not a random host port): the MCP client connects to
+      // localhost:8931, matching the server's own host check. A remapped port
+      // makes the Host header localhost:<random>, which the server rejects.
       "-p",
-      `0:${MCP_PORT}`,
+      `${MCP_PORT}:${MCP_PORT}`,
       image,
     ]);
     id = stdout.trim();
   } catch (err) {
     const msg = errText(err);
+    if (/port is already allocated|address already in use|bind for .* failed/i.test(msg)) {
+      throw new Error(
+        `Sandbox port ${MCP_PORT} is already in use. Stop whatever holds it ` +
+          `(a leftover sandbox: docker ps, then docker rm -f <id>) and retry.`,
+      );
+    }
     // Do not auto-build: point the caller at the exact build command instead.
     if (
       /no such image|manifest unknown|unable to find image|pull access denied|not found/i.test(msg)
@@ -68,20 +79,9 @@ export async function startLocalDockerSandbox(opts: { image: string }): Promise<
     throw new Error(`Failed to start sandbox container from "${image}": ${msg}`);
   }
 
-  let hostPort: string;
-  try {
-    const { stdout } = await pexec("docker", ["port", id, MCP_PORT]);
-    hostPort = parseHostPort(stdout);
-  } catch (err) {
-    await forceRemove(id);
-    throw new Error(
-      `Could not read the published MCP port for sandbox ${short(id)}: ${errText(err)}`,
-    );
-  }
-
   // Readiness probe hits /sse. Any HTTP response (even a 403/400 to a bare probe
   // GET) proves the server is listening; the agent connects over the same port.
-  const endpoint = `http://localhost:${hostPort}/sse`;
+  const endpoint = `http://localhost:${MCP_PORT}/sse`;
   try {
     await waitForSse(endpoint, READY_TIMEOUT_MS);
   } catch (err) {
@@ -135,6 +135,17 @@ export async function startLocalDockerSandbox(opts: { image: string }): Promise<
       return stdout as Buffer;
     },
 
+    async logs() {
+      try {
+        const { stdout, stderr } = await pexec("docker", ["logs", "--tail", "40", id], {
+          maxBuffer: EXEC_MAX_BUFFER,
+        });
+        return `${String(stdout)}${String(stderr)}`.trim();
+      } catch (err) {
+        return `(could not read sandbox logs: ${errText(err)})`;
+      }
+    },
+
     async dispose() {
       await forceRemove(id);
     },
@@ -180,18 +191,6 @@ async function waitForSse(url: string, timeoutMs: number): Promise<void> {
   throw lastErr ?? new Error("readiness timeout");
 }
 
-function parseHostPort(portOutput: string): string {
-  // `docker port <id> 8931` prints one line per binding, e.g. "0.0.0.0:49153" and "[::]:49153".
-  const line = portOutput
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .find(Boolean);
-  const port = line?.split(":").pop() ?? "";
-  if (!/^\d+$/.test(port))
-    throw new Error(`could not parse host port from: ${JSON.stringify(portOutput)}`);
-  return port;
-}
-
 async function forceRemove(id: string): Promise<void> {
   try {
     await pexec("docker", ["rm", "-f", id]);
@@ -202,10 +201,6 @@ async function forceRemove(id: string): Promise<void> {
 
 function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
-}
-
-function short(id: string): string {
-  return id.slice(0, 12);
 }
 
 function errText(err: unknown): string {

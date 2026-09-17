@@ -96,6 +96,7 @@ export async function runReproducePhase(args: {
 
   const phaseStart = Date.now();
   let done = 0;
+  let confirmed = 0;
   try {
     for (const finding of work) {
       if (signal.aborted) break;
@@ -151,6 +152,7 @@ export async function runReproducePhase(args: {
           dynamic,
         };
         persistFinding(outDir, finding, detector.name, runId);
+        if (res.verdict === "confirmed") confirmed++;
         console.log(`    ${finding.id}: ${res.verdict}`);
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
@@ -178,6 +180,14 @@ export async function runReproducePhase(args: {
         clearTimeout(timer);
         signal.removeEventListener("abort", onAbort);
       }
+    }
+    if (confirmed === 0 && done > 0) {
+      const tail = (await sandbox.logs())
+        .split("\n")
+        .map((l) => `    ${l}`)
+        .join("\n");
+      console.log("  live validation: 0 reproduced. Sandbox MCP server logs (tail):");
+      console.log(tail);
     }
   } catch (err) {
     // An infrastructure failure that escaped the per-finding handler (docker or
