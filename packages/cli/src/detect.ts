@@ -701,18 +701,6 @@ If the target requires login, sign in first with:
 `
       : "";
 
-  // Header injection is not wired in phase 1: @playwright/mcp 0.0.41 has no
-  // flag to set extra HTTP headers on the browser's requests. --target-header
-  // is still parsed (forward-compat), so name the headers but do not claim
-  // they are applied.
-  const headerNames = auth?.headers ? Object.keys(auth.headers) : [];
-  const headerBlock =
-    headerNames.length > 0
-      ? `
-Note: request headers (${headerNames.join(", ")}) cannot be injected into the browser session in this release, so do not assume they are present. Rely on the username and password above to log in through the application's own UI.
-`
-      : "";
-
   const contextBlock = context ? `\n## Additional context\n\n${context}\n` : "";
 
   return `You are live-testing a security finding against a running
@@ -722,7 +710,7 @@ application.
 
 ## Target
 Base URL: ${baseUrl}
-${credBlock}${headerBlock}${contextBlock}
+${credBlock}${contextBlock}
 ## The finding to reproduce
 
 **Title:** ${finding.title}

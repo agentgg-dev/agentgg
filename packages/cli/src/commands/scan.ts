@@ -247,13 +247,11 @@ interface ScanOpts {
    * web-reachable findings against a running target inside a Docker
    * sandbox. Requires `--target-url`. Off by default.
    */
-  validateLive?: boolean;
+  liveValidate?: boolean;
   /** Root URL of the running application the sandbox reaches (external mode). */
   targetUrl?: string;
   /** `user:pass` or `@file.json` login credentials for the target. */
   targetCredentials?: string;
-  /** Extra request headers for the target: `Name: value`. Repeatable. */
-  targetHeader?: string[];
   /** Free-form scope/context notes folded into the reproduce prompt. */
   targetContext?: string;
   /** Sandbox image tag. Defaults to the pinned `DEFAULT_SANDBOX_IMAGE`. */
@@ -310,8 +308,8 @@ export async function runScan(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
   // Fail fast on a flag typo before any scan work runs.
-  if (opts.validateLive && !opts.targetUrl) {
-    throw new Error("--validate-live requires --target-url");
+  if (opts.liveValidate && !opts.targetUrl) {
+    throw new Error("--live-validate requires --target-url");
   }
 
   const root = resolve(rootArg);
@@ -1987,8 +1985,8 @@ export async function runScan(
 
     // Opt-in live validation: reproduce web-reachable findings against a
     // running target. Runs after dedup so it only touches primaries.
-    if (opts.validateLive) {
-      if (!opts.targetUrl) throw new Error("--validate-live requires --target-url");
+    if (opts.liveValidate) {
+      if (!opts.targetUrl) throw new Error("--live-validate requires --target-url");
       console.log("\nLive validation");
       await runReproducePhase({
         findings,
@@ -2377,22 +2375,16 @@ export function registerScanCommand(program: Command): void {
       "don't let the model pick folders to skip (auto-exclude runs by default). The whole tree is scanned except your explicit --exclude paths.",
     )
     .option(
-      "--validate-live",
+      "--live-validate",
       "After dedup, reproduce PRIMARY web-reachable findings against a running target inside a Docker sandbox (external mode). Runs the reproduce agent per finding, executes its generated Playwright script once, and records a dynamic verdict + evidence. Off by default; requires --target-url and a reachable Docker daemon.",
     )
     .option(
       "--target-url <url>",
-      "Root URL of the already-running application to validate against. Required with --validate-live.",
+      "Root URL of the already-running application to validate against. Required with --live-validate.",
     )
     .option(
       "--target-credentials <cred>",
-      "Login for the target: `user:pass`, or `@path/to/creds.json` ({ username, password, headers }). Redacted from any stored reasoning.",
-    )
-    .option(
-      "--target-header <h>",
-      "Extra request header for the target, `Name: value`. Repeatable. Values are redacted from stored reasoning.",
-      collect,
-      [] as string[],
+      "Login for the target: `user:pass`, or `@path/to/creds.json` ({ username, password }). Redacted from any stored reasoning.",
     )
     .option(
       "--target-context <ctx>",

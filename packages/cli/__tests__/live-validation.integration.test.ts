@@ -61,7 +61,7 @@ describe.runIf(url)("live validation e2e (external mode)", () => {
       detector,
       outDir,
       targetUrl: url as string,
-      auth: { headers: {} },
+      auth: {},
       image: DEFAULT_SANDBOX_IMAGE,
       timeoutMs: 120_000,
       budgetMs: 180_000,
