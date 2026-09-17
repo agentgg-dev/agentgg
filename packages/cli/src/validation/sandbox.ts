@@ -13,6 +13,9 @@ export const DEFAULT_SANDBOX_IMAGE = "agentgg/live-sandbox:pw1.56.0-mcp0.0.41";
 // Container port the Playwright MCP server binds; published 1:1 on the host so
 // the Host header the MCP client sends matches what the server allows.
 const MCP_PORT = "8931";
+// Label on every sandbox container so a stale one (left by an aborted run, where
+// dispose never ran) can be found and removed before the next start.
+const SANDBOX_LABEL = "agentgg.live-sandbox=1";
 const READY_TIMEOUT_MS = 30_000;
 const DEFAULT_EXEC_TIMEOUT_MS = 120_000;
 const EXEC_MAX_BUFFER = 64 * 1024 * 1024;
@@ -42,6 +45,10 @@ export async function dockerAvailable(): Promise<boolean> {
 export async function startLocalDockerSandbox(opts: { image: string }): Promise<Sandbox> {
   const image = opts.image;
 
+  // A run aborted with Ctrl+C leaves its --rm container up (dispose never ran),
+  // holding the fixed port. Remove any stale sandbox before starting.
+  await removeStaleSandboxes();
+
   let id: string;
   try {
     // --add-host: lets the containerized browser reach a target the host
@@ -50,6 +57,8 @@ export async function startLocalDockerSandbox(opts: { image: string }): Promise<
       "run",
       "-d",
       "--rm",
+      "--label",
+      SANDBOX_LABEL,
       "--add-host=host.docker.internal:host-gateway",
       // Publish 1:1 (not a random host port): the MCP client connects to
       // localhost:8931, matching the server's own host check. A remapped port
@@ -189,6 +198,15 @@ async function waitForSse(url: string, timeoutMs: number): Promise<void> {
     await delay(300);
   }
   throw lastErr ?? new Error("readiness timeout");
+}
+
+async function removeStaleSandboxes(): Promise<void> {
+  try {
+    const { stdout } = await pexec("docker", ["ps", "-aq", "--filter", `label=${SANDBOX_LABEL}`]);
+    await Promise.all(stdout.split(/\s+/).filter(Boolean).map(forceRemove));
+  } catch {
+    // Best effort: if docker is unusable we fail later with a clear error.
+  }
 }
 
 async function forceRemove(id: string): Promise<void> {
