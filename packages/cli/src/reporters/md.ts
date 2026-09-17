@@ -1,6 +1,7 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { Finding, Severity } from "@agentgg/core";
+import { effectiveVerdict } from "@agentgg/core";
 
 /**
  * Sort order for rendered findings: severity bucket descending, then
@@ -167,7 +168,8 @@ export function renderFindingMd(f: Finding, duplicates?: ReadonlyArray<Finding>)
     meta.push(`**CVSS:** ${f.cvss.baseScore.toFixed(1)} (\`${f.cvss.vector}\`)`);
   }
   if (f.validation) {
-    meta.push(`**Validation:** \`${f.validation.verdict}\``);
+    const verdict = f.validation.dynamic ? effectiveVerdict(f) : f.validation.verdict;
+    meta.push(`**Validation:** \`${verdict}\``);
   } else {
     meta.push("**Validation:** _not run_");
   }
@@ -180,6 +182,24 @@ export function renderFindingMd(f: Finding, duplicates?: ReadonlyArray<Finding>)
     lines.push("");
     lines.push(f.validation.reasoning);
     lines.push("");
+  }
+
+  const dyn = f.validation?.dynamic;
+  if (dyn) {
+    lines.push("### Live validation");
+    lines.push(`**Result:** \`${dyn.verdict}\``);
+    lines.push("");
+    lines.push(dyn.reasoning);
+    lines.push("");
+    const ev = dyn.evidence;
+    if (ev) {
+      if (ev.script) lines.push(`- Reproduction script: \`${ev.script.path}\` (${ev.script.passed ? "replays" : "unverified"})`);
+      if (ev.trace) lines.push(`- Trace: \`${ev.trace}\``);
+      if (ev.video) lines.push(`- Video: \`${ev.video}\``);
+      if (ev.har) lines.push(`- HAR: \`${ev.har}\``);
+      if (ev.screenshots?.length) lines.push(`- Screenshots: ${ev.screenshots.length}`);
+      lines.push("");
+    }
   }
 
   // De-duplication folded other findings into this one as the canonical
