@@ -12,8 +12,9 @@ import type { Finding } from "@agentgg/core";
 import { getEvidenceDir, readFileRecord, writeFileRecord } from "@agentgg/core";
 import type { Detector } from "../detect.js";
 import { logWarn } from "../log.js";
+import { ensureSandboxImage } from "./image.js";
 import { runReproScript } from "./repro-script.js";
-import { dockerAvailable, type Sandbox, startLocalDockerSandbox } from "./sandbox.js";
+import { type Sandbox, startLocalDockerSandbox } from "./sandbox.js";
 import { redact, type TargetAuth } from "./target-auth.js";
 import { logSkips, selectWebReachable } from "./web-reachable.js";
 
@@ -49,11 +50,6 @@ export async function runReproducePhase(args: {
 }): Promise<void> {
   const { findings, detector, outDir, targetUrl, auth, context, image, signal } = args;
 
-  if (!(await dockerAvailable())) {
-    console.log("  live validation: Docker not found, skipping (keeping static verdicts)");
-    return;
-  }
-
   // Duplicates are collapsed out of the report, so exclude them here too; the
   // live-validation counts then reconcile with the findings/ directory.
   const primaries = findings.filter((f) => !f.dedup);
@@ -81,15 +77,22 @@ export async function runReproducePhase(args: {
   // host-side URL; the agent (and the recorded baseUrl) gets the container one.
   const agentBaseUrl = toContainerBaseUrl(targetUrl);
 
+  // Preflight Docker and the image here, not at phase entry: a target that
+  // never answered should not cost a multi-minute image build.
+  const preflight = await ensureSandboxImage(image);
+  if (!preflight.ok) {
+    console.log(`  live validation: skipping, keeping static verdicts.\n  ${preflight.reason}`);
+    return;
+  }
+
   const runId = `reproduce-${randomUUID()}`;
   let sandbox: Sandbox;
   try {
     sandbox = await startLocalDockerSandbox({ image });
   } catch (err) {
-    // Missing image (the common first run, since the image is not auto-built)
-    // or any docker/port/SSE failure: keep every static verdict and let the
-    // scan finish and render its report. startLocalDockerSandbox's message
-    // already carries the `docker build ...` command for the missing-image case.
+    // The preflight above already built a missing image, so this now catches
+    // port conflicts or other docker/SSE failures. Keep static verdicts and
+    // let the scan finish rather than aborting.
     const msg = err instanceof Error ? err.message : String(err);
     console.log(
       `  live validation: could not start the sandbox, keeping static verdicts.\n  ${msg}`,
