@@ -54,8 +54,11 @@ export async function runReproducePhase(args: {
     return;
   }
 
-  const work = selectForReproduce(findings, args.force ?? false);
-  logSkips(selectWebReachable(findings).skipped);
+  // Duplicates are collapsed out of the report, so exclude them here too; the
+  // live-validation counts then reconcile with the findings/ directory.
+  const primaries = findings.filter((f) => !f.dedup);
+  const work = selectForReproduce(primaries, args.force ?? false);
+  logSkips(selectWebReachable(primaries).skipped);
   if (work.length === 0) {
     console.log("  live validation: no web-reachable findings to reproduce");
     return;
