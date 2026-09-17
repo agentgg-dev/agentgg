@@ -292,7 +292,7 @@ export interface Detector {
 
   /**
    * Live-validation reproduce pass — optional. Drives a real browser
-   * against `baseUrl` (via the Playwright MCP server the Task 5 sandbox
+   * against `baseUrl` (via the Playwright MCP server the sandbox
    * hosts at `browserEndpoint`, an SSE URL) to confirm or refute one
    * finding's `poc`, then returns a verdict and, when confirmed, a
    * generated Playwright test that replays it. The session gets ONLY the
@@ -701,11 +701,15 @@ If the target requires login, sign in first with:
 `
       : "";
 
+  // Header injection is not wired in phase 1: @playwright/mcp 0.0.41 has no
+  // flag to set extra HTTP headers on the browser's requests. --target-header
+  // is still parsed (forward-compat), so name the headers but do not claim
+  // they are applied.
   const headerNames = auth?.headers ? Object.keys(auth.headers) : [];
   const headerBlock =
     headerNames.length > 0
       ? `
-The target also expects these request headers, already applied to requests you make through the browser: ${headerNames.join(", ")}.
+Note: request headers (${headerNames.join(", ")}) cannot be injected into the browser session in this release, so do not assume they are present. Rely on the username and password above to log in through the application's own UI.
 `
       : "";
 

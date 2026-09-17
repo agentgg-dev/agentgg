@@ -68,8 +68,27 @@ export async function runReproducePhase(args: {
 
   console.log(`  live validation: reproducing ${work.length} finding(s) against ${targetUrl}`);
 
+  // The browser runs inside the container, so a target the host publishes on
+  // localhost must be reached via host.docker.internal. Probing stays on the
+  // host-side URL; the agent (and the recorded baseUrl) gets the container one.
+  const agentBaseUrl = toContainerBaseUrl(targetUrl);
+
   const runId = `reproduce-${randomUUID()}`;
-  const sandbox = await startLocalDockerSandbox({ image });
+  let sandbox: Sandbox;
+  try {
+    sandbox = await startLocalDockerSandbox({ image });
+  } catch (err) {
+    // Missing image (the common first run, since the image is not auto-built)
+    // or any docker/port/SSE failure: keep every static verdict and let the
+    // scan finish and render its report. startLocalDockerSandbox's message
+    // already carries the `docker build ...` command for the missing-image case.
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(
+      `  live validation: could not start the sandbox, keeping static verdicts.\n  ${msg}`,
+    );
+    return;
+  }
+
   const phaseStart = Date.now();
   let done = 0;
   try {
@@ -93,7 +112,7 @@ export async function runReproducePhase(args: {
       try {
         const res = await detector.reproduceFinding({
           finding,
-          baseUrl: targetUrl,
+          baseUrl: agentBaseUrl,
           auth,
           browserEndpoint: sandbox.browserEndpoint(),
           context,
@@ -103,10 +122,12 @@ export async function runReproducePhase(args: {
         let evidence: Evidence | undefined;
         if (res.verdict === "confirmed" && res.script) {
           const script = await runReproScript(sandbox, res.script);
-          evidence = await copyEvidence(
-            sandbox,
-            getEvidenceDir(outDir, finding.agentSlug, finding.id),
-          );
+          const evidenceDir = getEvidenceDir(outDir, finding.agentSlug, finding.id);
+          evidence = await copyEvidence(sandbox, evidenceDir);
+          // Save the generated script next to the trace/video so the report's
+          // evidence.script.path link resolves.
+          mkdirSync(evidenceDir, { recursive: true });
+          writeFileSync(join(evidenceDir, "repro.spec.ts"), res.script);
           evidence.script = { path: script.path, executed: script.executed, passed: script.passed };
         }
 
@@ -114,7 +135,7 @@ export async function runReproducePhase(args: {
           verdict: res.verdict,
           reasoning: redact(res.reasoning, auth),
           ...(res.refused ? { refused: true } : {}),
-          baseUrl: targetUrl,
+          baseUrl: agentBaseUrl,
           ...(evidence ? { evidence } : {}),
         };
         finding.validation = {
@@ -140,7 +161,7 @@ export async function runReproducePhase(args: {
           dynamic: {
             verdict: "not-reproduced",
             reasoning: redact(reason, auth),
-            baseUrl: targetUrl,
+            baseUrl: agentBaseUrl,
           },
         };
         try {
@@ -153,8 +174,30 @@ export async function runReproducePhase(args: {
         signal.removeEventListener("abort", onAbort);
       }
     }
+  } catch (err) {
+    // An infrastructure failure that escaped the per-finding handler (docker or
+    // the SSE server going away mid-run): keep static verdicts and let the scan
+    // finish rather than aborting after detect/validate/score/dedup succeeded.
+    const msg = err instanceof Error ? err.message : String(err);
+    logWarn(`live validation: stopped early, keeping static verdicts: ${redact(msg, auth)}`);
   } finally {
     await sandbox.dispose();
+  }
+}
+
+/** Rewrite a host-local target URL to the container-facing host.docker.internal
+ *  so the browser inside the sandbox can reach a target the host publishes on
+ *  localhost. Non-local URLs (and anything unparseable) pass through unchanged. */
+export function toContainerBaseUrl(targetUrl: string): string {
+  try {
+    const u = new URL(targetUrl);
+    if (u.hostname === "localhost" || u.hostname === "127.0.0.1" || u.hostname === "::1") {
+      u.hostname = "host.docker.internal";
+      return u.toString();
+    }
+    return targetUrl;
+  } catch {
+    return targetUrl;
   }
 }
 
@@ -216,9 +259,19 @@ async function copyEvidence(sandbox: Sandbox, evidenceDir: string): Promise<Evid
  *  client-mirrored surface. */
 function persistFinding(outDir: string, finding: Finding, provider: string, runId: string): void {
   const filePath = finding.filePath.replace(/\\/g, "/");
-  if (isAbsolute(filePath)) return;
+  if (isAbsolute(filePath)) {
+    logWarn(
+      `[reproduce:${finding.id}] dynamic result not persisted (non-relative filePath "${finding.filePath}"); it will re-run next scan`,
+    );
+    return;
+  }
   const record = readFileRecord(outDir, finding.agentSlug, filePath);
-  if (!record) return;
+  if (!record) {
+    logWarn(
+      `[reproduce:${finding.id}] dynamic result not persisted (no file record for "${filePath}"); it will re-run next scan`,
+    );
+    return;
+  }
   record.findings = record.findings.map((rec) => (rec.id === finding.id ? finding : rec));
   record.analysisHistory.push({
     runId,

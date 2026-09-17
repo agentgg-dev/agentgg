@@ -309,6 +309,11 @@ export async function runScan(
   opts: ScanOpts,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
+  // Fail fast on a flag typo before any scan work runs.
+  if (opts.validateLive && !opts.targetUrl) {
+    throw new Error("--validate-live requires --target-url");
+  }
+
   const root = resolve(rootArg);
   const outDir = resolve(opts.output ?? "./scan-results/");
   // Resume identity: compared by the sidecar scope, reconHash, and the plan's

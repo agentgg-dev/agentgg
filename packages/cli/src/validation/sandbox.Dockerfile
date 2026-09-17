@@ -2,10 +2,10 @@
 # Build from the repo root (tag must match DEFAULT_SANDBOX_IMAGE in sandbox.ts):
 #   docker build -f packages/cli/src/validation/sandbox.Dockerfile -t agentgg/live-sandbox:pw1.56.0-mcp0.0.41 .
 #
-# Verified 2026-09-16 against the published packages:
-#   @playwright/mcp@0.0.41 CLI flags: --port --host --headless --isolated --no-sandbox --save-trace --save-video --output-dir
-#   endpoints on --port: /mcp (streamable HTTP, primary) and /sse (legacy SSE, used for readiness/connect)
-#   0.0.41 depends on playwright 1.56.0-alpha; the v1.56.0 base image supplies the OS deps.
+# @playwright/mcp 0.0.41 pinned: it depends on playwright 1.56.0-alpha, so the
+# image installs that exact playwright and its matching chromium on top of the
+# v1.56.0 base (which supplies the OS deps). Serves /mcp (streamable HTTP) and
+# /sse (legacy SSE, used for readiness/connect) on --port.
 FROM mcr.microsoft.com/playwright:v1.56.0-noble
 
 WORKDIR /srv

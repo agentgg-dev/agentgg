@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 
 const pexec = promisify(execFile);
 
-// Pinned image tag. Task 9 imports this as the default for its --target-image flag.
+// Pinned image tag; the scan command's default sandbox image for --target-image.
 // Keep in sync with the tag in sandbox.Dockerfile's build comment.
 export const DEFAULT_SANDBOX_IMAGE = "agentgg/live-sandbox:pw1.56.0-mcp0.0.41";
 
@@ -42,7 +42,17 @@ export async function startLocalDockerSandbox(opts: { image: string }): Promise<
 
   let id: string;
   try {
-    const { stdout } = await pexec("docker", ["run", "-d", "--rm", "-p", `0:${MCP_PORT}`, image]);
+    // --add-host: lets the containerized browser reach a target the host
+    // publishes on localhost via http://host.docker.internal.
+    const { stdout } = await pexec("docker", [
+      "run",
+      "-d",
+      "--rm",
+      "--add-host=host.docker.internal:host-gateway",
+      "-p",
+      `0:${MCP_PORT}`,
+      image,
+    ]);
     id = stdout.trim();
   } catch (err) {
     const msg = errText(err);

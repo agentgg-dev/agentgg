@@ -1,12 +1,23 @@
 import { readFileSync } from "node:fs";
 export type TargetAuth = { username?: string; password?: string; headers: Record<string, string> };
 
-export function parseTargetAuth(opts: { targetCredentials?: string; targetHeader?: string[] }): TargetAuth {
+export function parseTargetAuth(opts: {
+  targetCredentials?: string;
+  targetHeader?: string[];
+}): TargetAuth {
   const auth: TargetAuth = { headers: {} };
   const cred = opts.targetCredentials;
   if (cred?.startsWith("@")) {
-    const j = JSON.parse(readFileSync(cred.slice(1), "utf8"));
-    auth.username = j.username; auth.password = j.password;
+    const path = cred.slice(1);
+    let j: { username?: string; password?: string; headers?: Record<string, string> };
+    try {
+      j = JSON.parse(readFileSync(path, "utf8"));
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      throw new Error(`could not read --target-credentials file ${path}: ${reason}`);
+    }
+    auth.username = j.username;
+    auth.password = j.password;
     Object.assign(auth.headers, j.headers ?? {});
   } else if (cred) {
     const i = cred.indexOf(":");
