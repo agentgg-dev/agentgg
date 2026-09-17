@@ -79,8 +79,8 @@ export async function startLocalDockerSandbox(opts: { image: string }): Promise<
     );
   }
 
-  // /sse (legacy SSE) answers a plain GET with 200; /mcp (streamable HTTP) is
-  // also served on this port but rejects a bare GET, so /sse is the readiness probe.
+  // Readiness probe hits /sse. Any HTTP response (even a 403/400 to a bare probe
+  // GET) proves the server is listening; the agent connects over the same port.
   const endpoint = `http://localhost:${hostPort}/sse`;
   try {
     await waitForSse(endpoint, READY_TIMEOUT_MS);
@@ -167,10 +167,9 @@ async function waitForSse(url: string, timeoutMs: number): Promise<void> {
     const ac = new AbortController();
     const t = setTimeout(() => ac.abort(), 2_000);
     try {
-      const res = await fetch(url, { signal: ac.signal, headers: { accept: "text/event-stream" } });
+      await fetch(url, { signal: ac.signal, headers: { accept: "text/event-stream" } });
       ac.abort(); // stop reading the open event stream
-      if (res.status >= 200 && res.status < 300) return;
-      lastErr = new Error(`status ${res.status}`);
+      return; // any HTTP response means the server is listening
     } catch (e) {
       lastErr = e;
     } finally {

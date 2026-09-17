@@ -50,6 +50,6 @@ export function logSkips(skipped: Finding[]): void {
   if (skipped.length === 0) return;
   const slugs = [...new Set(skipped.map((f) => f.vulnSlug))].sort();
   console.log(
-    `  live validation: skipped ${skipped.length} finding(s) not reachable over the web (${slugs.join(", ")})`,
+    `  live validation: skipped ${skipped.length} finding(s) (not web-reachable or duplicate): ${slugs.join(", ")}`,
   );
 }
