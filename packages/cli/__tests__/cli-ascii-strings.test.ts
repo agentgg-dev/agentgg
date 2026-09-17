@@ -16,7 +16,7 @@ describe.each(FILES)("%s", (rel) => {
     const offenders = stripComments(src)
       .split("\n")
       .map((line, i) => ({ line, n: i + 1 }))
-      .filter(({ line }) => /[—–…]/.test(line))
+      .filter(({ line }) => /[\u2014\u2013\u2026]/.test(line))
       .map((o) => `${o.n}: ${o.line.trim()}`);
     expect(offenders).toEqual([]);
   });
