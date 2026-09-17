@@ -3,6 +3,7 @@ import { join, relative, resolve } from "node:path";
 import type { CvssScore, Finding, ReconReport } from "@agentgg/core";
 import {
   type CoreMessage,
+  experimental_createMCPClient,
   generateObject,
   generateText,
   type LanguageModelV1,
@@ -22,6 +23,7 @@ import {
   buildExcludePrompt,
   buildPreconditionPrompt,
   buildReconPrompt,
+  buildReproducePrompt,
   type CreateAgentArgs,
   DetectionResult,
   type DetectionResult as DetectionResultType,
@@ -32,8 +34,10 @@ import {
   normalizeCode,
   PreconditionCheck,
   type PreconditionCheckArgs,
+  REPRODUCE_CUT_SHORT,
   type ReconArgs,
   ReconResult,
+  ReproduceFindingResult,
   type RunAgentArgs,
   repairFindingExcerpts,
   repairFindingPath,
@@ -45,6 +49,7 @@ import { ExpectedDetectorError, isInFlightCreditError } from "../diagnostics.js"
 import { logError, logInfo, logWarn } from "../log.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import type { CallUsage, UsageMeter } from "../usage-meter.js";
+import type { TargetAuth } from "../validation/target-auth.js";
 import {
   asValidationField,
   buildScopeValidatePrompt,
@@ -330,6 +335,9 @@ export interface VercelAgentDetectorOpts {
    *  from the `--validate-max-turns` CLI flag (same knob the claude detector
    *  uses); defaults to 50 when unset. */
   validateMaxTurns?: number;
+  /** Turn cap for one live-validation reproduce session. Higher than
+   *  validation's: driving a browser costs a turn per click. */
+  reproduceMaxTurns?: number;
   /** Model used to re-shape malformed final JSON from a tool-loop into the
    *  target schema (via strict `generateObject`). Defaults to the primary model
    *  when unset, so every provider recovers from a weak model's schema slip
@@ -394,7 +402,7 @@ const TOOL_OUTPUT_BUDGET_BYTES = 400_000;
 
 /** Which pass owns this tool loop. Selects the artifact the model is told to
  *  emit when the budget runs out, and when a call repeats. See ARTIFACT. */
-export type ToolLoopPhase = "detect" | "validate" | "recon" | "create-agent";
+export type ToolLoopPhase = "detect" | "validate" | "recon" | "create-agent" | "reproduce";
 
 /**
  * What each phase must output, worded to match that phase's own `## Output
@@ -410,6 +418,7 @@ const ARTIFACT: Record<ToolLoopPhase, string> = {
   validate: "verdict JSON",
   recon: "brief JSON",
   "create-agent": "agent spec JSON",
+  reproduce: "reproduction verdict JSON",
 };
 
 /** Env suffix per phase for the budget override below. */
@@ -418,6 +427,7 @@ const BUDGET_ENV_SUFFIX: Record<ToolLoopPhase, string> = {
   validate: "VALIDATE",
   recon: "RECON",
   "create-agent": "CREATE_AGENT",
+  reproduce: "REPRODUCE",
 };
 
 /**
@@ -624,6 +634,7 @@ export class VercelAgentDetector implements Detector {
   private readonly thinking?: Thinking;
   private readonly verbose: boolean;
   private readonly validateMaxTurns: number;
+  private readonly reproduceMaxTurns: number;
   /** Object-generation mode for `generateObject`. Bedrock's SDK only supports
    *  tool-mode; every other provider we drive supports json mode. */
   private readonly objectMode: "json" | "tool";
@@ -646,6 +657,7 @@ export class VercelAgentDetector implements Detector {
     this.thinking = opts.thinking;
     this.verbose = opts.verbose ?? false;
     this.validateMaxTurns = opts.validateMaxTurns ?? 50;
+    this.reproduceMaxTurns = opts.reproduceMaxTurns ?? 30;
     this.costSource = opts.costSource;
   }
 
@@ -1306,6 +1318,80 @@ export class VercelAgentDetector implements Detector {
     }
   }
 
+  async reproduceFinding(args: {
+    finding: Finding;
+    baseUrl: string;
+    auth?: TargetAuth;
+    browserEndpoint: string;
+    context?: string;
+    signal?: AbortSignal;
+  }): Promise<{
+    verdict: "confirmed" | "not-reproduced";
+    reasoning: string;
+    refused?: boolean;
+    script?: string;
+  }> {
+    const label = sessionLabel(`reproduce:${args.finding.id}`);
+    const prompt = `${buildReproducePrompt(
+      args.finding,
+      args.baseUrl,
+      args.auth,
+      args.context,
+    )}\n\n${reproduceJsonInstruction()}`;
+    // Tools come only from the sandbox's Playwright MCP server: no Read/Glob/
+    // Grep, so the session works against the live target and nothing else.
+    // hardStop's stall counter is fed by buildTools, which is absent here, so
+    // only its reserved last turn applies.
+    let client: Awaited<ReturnType<typeof experimental_createMCPClient>> | undefined;
+    try {
+      client = await experimental_createMCPClient({
+        transport: { type: "sse", url: args.browserEndpoint },
+      });
+      const tools = await client.tools();
+      const stop = hardStop(label, this.reproduceMaxTurns + 1);
+      const gen = await this.metered(
+        () =>
+          generateText({
+            model: this.model,
+            prompt,
+            tools,
+            maxSteps: this.reproduceMaxTurns + 1,
+            experimental_prepareStep: stop.prepareStep,
+            experimental_repairToolCall: this.toolCallRepair(label),
+            providerOptions: this.providerOptionsArg(),
+            abortSignal: args.signal,
+          }),
+        { label, signal: args.signal },
+      );
+      warnIfTurnCapped(label, gen, this.reproduceMaxTurns);
+      let answer = gen.text;
+      if (!answer.trim()) {
+        logUnparseableGeneration(label, gen);
+        answer = await this.answerWithoutTools(
+          label,
+          prompt,
+          gen,
+          "reproduce",
+          ReproduceFindingResult,
+          (o) => `verdict ${o.verdict}`,
+          args.signal,
+        );
+      }
+      return await this.parseReproduce(answer, args.finding.id, args.signal);
+    } catch (err) {
+      debugLog("VercelAgentDetector.reproduceFinding", err);
+      throw err;
+    } finally {
+      // The caller disposes the sandbox either way; closing here releases the
+      // SSE stream between findings.
+      try {
+        await client?.close();
+      } catch {
+        // already gone
+      }
+    }
+  }
+
   async scoreFinding(args: {
     finding: Finding;
     fileContent: string;
@@ -1472,6 +1558,63 @@ export class VercelAgentDetector implements Detector {
           verdict: salvaged,
           reasoning: "Recovered from an unparseable model response; the reasoning text was lost.",
         };
+      }
+    }
+  }
+
+  private async parseReproduce(
+    text: string,
+    findingId: string,
+    signal?: AbortSignal,
+  ): Promise<{
+    verdict: "confirmed" | "not-reproduced";
+    reasoning: string;
+    refused?: boolean;
+    script?: string;
+  }> {
+    // Same guard as parseValidation: the reformat prompt carries only this
+    // text, so an empty answer would be reformatted into an invented verdict.
+    if (!text.trim()) {
+      logWarn(
+        `[reproduce:${findingId}] the reproduce loop stopped before it reported a verdict; recording not-reproduced`,
+      );
+      return { verdict: "not-reproduced", reasoning: REPRODUCE_CUT_SHORT };
+    }
+    try {
+      return asReproduceField(ReproduceFindingResult.parse(extractJSON(text)));
+    } catch (extractErr) {
+      if (looksLikeRefusal(text)) {
+        logWarn(
+          `[reproduce:${findingId}] model refused to reproduce; recording not-reproduced+refused`,
+        );
+        return {
+          verdict: "not-reproduced",
+          reasoning: "Model declined to reproduce this finding (refusal).",
+          refused: true,
+        };
+      }
+      if (!this.structuredModel) throw extractErr;
+      try {
+        const reformat = await generateObject({
+          model: this.structuredModel,
+          schema: ReproduceFindingResult,
+          mode: this.objectMode,
+          prompt: `The following is a completed live reproduction attempt against a running application. Extract the verdict into structured JSON.\n\n${forReformat(text)}\n\n${reproduceJsonInstruction()}`,
+          abortSignal: signal,
+        });
+        this.meter?.record(extractCallUsage(reformat), this.structuredModel.modelId);
+        logGenerationIds(`reproduce:${findingId}:reformat`, reformat);
+        return asReproduceField(reformat.object);
+      } catch (reformatErr) {
+        if (signal?.aborted) throw reformatErr;
+        this.meter?.record(extractCallUsage(reformatErr), this.structuredModel.modelId);
+        logFailedCallIds(`reproduce:${findingId}:reformat`, reformatErr, signal);
+        const recovered = recoverFromError(ReproduceFindingResult, reformatErr);
+        if (recovered) {
+          logWarn(`[reproduce:${findingId}] reformat failed; recovered the verdict from its text`);
+          return asReproduceField(recovered);
+        }
+        throw reformatErr;
       }
     }
   }
@@ -2413,6 +2556,28 @@ After tracing the finding across the code, output your verdict as a single JSON 
 {"verdict":"confirmed","reasoning":"Short reasoning citing a specific code element.","confidence":0.9}
 
 \`verdict\` MUST be one of "confirmed", "false-positive", "out-of-scope", or "uncertain". \`confidence\` is a decimal 0.0–1.0 (not a percentage).`;
+}
+
+function reproduceJsonInstruction(): string {
+  return `## Output format
+
+After you finish in the browser, output your verdict as a single JSON object matching EXACTLY this shape - no prose, no markdown fences, no trailing text:
+
+{"verdict":"confirmed","reasoning":"What you did in the browser and what you observed.","script":"import { test, expect } from '@playwright/test';\\n\\ntest('repro', async ({ page }) => {\\n  await page.goto('/');\\n});\\n"}
+
+\`verdict\` MUST be "confirmed" or "not-reproduced". \`script\` is the full source of a self-contained Playwright test that replays every step, written as ONE JSON string with newlines escaped as \\n. Include \`script\` only when the verdict is "confirmed"; omit the field entirely otherwise.`;
+}
+
+/** Drop `script` unless the verdict is `confirmed`. The caller only runs a
+ *  script for a confirmation, and a script attached to a non-reproduction
+ *  would be replayed as if it proved something. */
+export function asReproduceField(o: ReproduceFindingResult): {
+  verdict: "confirmed" | "not-reproduced";
+  reasoning: string;
+  script?: string;
+} {
+  if (o.verdict !== "confirmed") return { verdict: o.verdict, reasoning: o.reasoning };
+  return { verdict: o.verdict, reasoning: o.reasoning, ...(o.script ? { script: o.script } : {}) };
 }
 
 function jsonOutputInstruction(multiAgent: boolean): string {

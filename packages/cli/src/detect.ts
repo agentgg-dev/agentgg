@@ -673,6 +673,12 @@ project doesn't use), answer false. When genuinely unsure, answer true
 — skipping a relevant agent is worse than running an unnecessary one.`;
 }
 
+/** Recorded as the reasoning when the reproduce loop ends with no verdict.
+ *  Says the attempt was cut short rather than impersonating an analysis that
+ *  never ran. */
+export const REPRODUCE_CUT_SHORT =
+  "The live reproduction was cut short: the model stopped before it reported a verdict, so this finding was not tested against the running application.";
+
 /**
  * Build the reproduce-finding prompt. The model drives a real browser
  * (via the Playwright MCP tools attached to this session — no Read/Glob/
