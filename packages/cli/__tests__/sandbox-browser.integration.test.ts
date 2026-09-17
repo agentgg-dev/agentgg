@@ -60,12 +60,11 @@ describe("sandbox browser", () => {
         },
         OPTS,
       );
-      // (No `.not.toContain("MISSING")` check: mcp-server-playwright echoes the
-      // called function's own source in every response, so that literal is
-      // always present regardless of outcome. `toContain(url)` below is the
-      // real assertion: it only holds if the banner element exists and its
-      // text is the live page URL, not the fallback.
-      expect(asText(res)).toContain(url);
+      // The response echoes the called function's source and a "### Page state"
+      // block that repeats the URL, so assert on the returned value alone.
+      const result = asText(res).split("### Ran Playwright code")[0];
+      expect(result).toContain(url);
+      expect(result).not.toContain("MISSING");
     });
   }, 180_000);
 });
