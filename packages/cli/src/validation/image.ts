@@ -88,9 +88,10 @@ export function validationDir(baseUrl: string = import.meta.url): string {
 /**
  * Run `docker build` with the Dockerfile's own directory as the context (it
  * COPYs url-banner.js from there), streaming every line so a multi-minute build
- * is never a silent wait.
+ * is never a silent wait. Exported so the integration suite can drive a real
+ * build directly, bypassing the auto-build policy in preflightSandboxImage.
  */
-function buildSandboxImage(image: string): Promise<void> {
+export function buildSandboxImage(image: string): Promise<void> {
   const context = validationDir();
   const dockerfile = join(context, "sandbox.Dockerfile");
   console.log(`  live validation: building the sandbox image ${image}`);
