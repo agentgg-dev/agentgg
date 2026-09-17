@@ -2,13 +2,13 @@
 // toy-vulnerable-app. Docker- and network-gated: `describe.runIf` no-ops
 // unless TOY_APP_URL is set, and the test itself skips again if Docker is
 // unavailable. Excluded from the default `pnpm test` run (see
-// vitest.config.ts) — this is a manual/CI-only check.
+// vitest.config.ts); collected only by `pnpm test:integration`
+// (vitest.integration.config.ts) — this is a manual/CI-only check.
 //
-// Manual run:
+// Manual run (from the repo root):
 //   docker build -f packages/cli/src/validation/sandbox.Dockerfile -t agentgg/live-sandbox:pw1.56.0-mcp0.0.41 .
 //   cd ../toy-vulnerable-app && npm install && npm start
-//   ANTHROPIC_API_KEY=sk-... TOY_APP_URL=http://localhost:3000 \
-//     pnpm --filter @agentgg/cli exec vitest run live-validation.integration
+//   ANTHROPIC_API_KEY=sk-... TOY_APP_URL=http://localhost:3000 pnpm test:integration
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
