@@ -1,7 +1,7 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { Finding, Severity } from "@agentgg/core";
-import { effectiveVerdict } from "@agentgg/core";
+import { effectiveVerdict, getEvidenceDir } from "@agentgg/core";
 
 /**
  * Sort order for rendered findings: severity bucket descending, then
@@ -109,7 +109,18 @@ export function writeMarkdownReport(input: ScanReportInput): ScanReportOutput {
   const findingPaths: string[] = [];
   for (const f of renderable) {
     const fullPath = join(findingsDir, findingFilename(f));
-    writeFileSync(fullPath, renderFindingMd(f, duplicatesByPrimary.get(f.id)), "utf8");
+    // Evidence lives under state/ so a rerun cleans it up with the rest of the
+    // slice. Copy it beside the .md too: nobody browsing the report will find
+    // it otherwise. `findings/` was just cleared, so this cannot go stale.
+    let evidenceDir: string | undefined;
+    if (f.validation?.dynamic?.evidence) {
+      const src = getEvidenceDir(outDir, f.agentSlug, f.id);
+      if (existsSync(src)) {
+        evidenceDir = evidenceDirName(f);
+        cpSync(src, join(findingsDir, evidenceDir), { recursive: true });
+      }
+    }
+    writeFileSync(fullPath, renderFindingMd(f, duplicatesByPrimary.get(f.id), evidenceDir), "utf8");
     findingPaths.push(fullPath);
   }
 
@@ -148,7 +159,22 @@ export function findingFilenameSlug(f: Finding): string {
   return `${f.agentSlug}-${titleSlug}-${f.id}.md`;
 }
 
-export function renderFindingMd(f: Finding, duplicates?: ReadonlyArray<Finding>): string {
+/**
+ * Directory carrying a finding's live-validation evidence inside `findings/`.
+ * Same basename as the finding's `.md`, so the two sort together and a link
+ * from the `.md` is a plain relative path.
+ */
+export function evidenceDirName(f: Finding): string {
+  return findingFilename(f).replace(/\.md$/, "");
+}
+
+export function renderFindingMd(
+  f: Finding,
+  duplicates?: ReadonlyArray<Finding>,
+  /** Relative directory holding the copied evidence. Absent when nothing was
+   *  copied, in which case the artifacts are named but not linked. */
+  evidenceDir?: string,
+): string {
   const lines: string[] = [];
   lines.push(`# ${f.title}`);
   lines.push("");
@@ -193,14 +219,16 @@ export function renderFindingMd(f: Finding, duplicates?: ReadonlyArray<Finding>)
     lines.push("");
     const ev = dyn.evidence;
     if (ev) {
+      const link = (name: string) =>
+        evidenceDir ? `[${name}](${evidenceDir}/${name})` : `\`${name}\``;
       if (ev.script)
         lines.push(
-          `- Reproduction script: \`${ev.script.path}\` (${ev.script.passed ? "replays" : "unverified"})`,
+          `- Reproduction script: ${link(ev.script.path)} (${ev.script.passed ? "replays" : "unverified"})`,
         );
-      if (ev.trace) lines.push(`- Trace: \`${ev.trace}\``);
-      if (ev.video) lines.push(`- Video: \`${ev.video}\``);
-      if (ev.har) lines.push(`- HAR: \`${ev.har}\``);
-      if (ev.screenshots?.length) lines.push(`- Screenshots: ${ev.screenshots.length}`);
+      if (ev.trace) lines.push(`- Trace: ${link(ev.trace)}`);
+      if (ev.video) lines.push(`- Video: ${link(ev.video)}`);
+      if (ev.har) lines.push(`- HAR: ${link(ev.har)}`);
+      for (const s of ev.screenshots ?? []) lines.push(`- Screenshot: ${link(s)}`);
       lines.push("");
     }
   }
@@ -353,6 +381,30 @@ export function renderSummaryMd(
       if (unscored > 0) lines.push(`- _unscored_: ${unscored}`);
       lines.push("");
     }
+  }
+
+  const liveValidated = renderedList.filter((f) => f.validation?.dynamic);
+  if (liveValidated.length > 0) {
+    lines.push("## Live validation");
+    lines.push("");
+    lines.push("| Finding | Result | Evidence |");
+    lines.push("| --- | --- | --- |");
+    for (const f of liveValidated) {
+      const dyn = f.validation?.dynamic;
+      const dir = evidenceDirName(f);
+      const ev = dyn?.evidence;
+      const parts: string[] = [];
+      if (ev?.video) parts.push(`[video](findings/${dir}/${ev.video})`);
+      if (ev?.trace) parts.push(`[trace](findings/${dir}/${ev.trace})`);
+      if (ev?.script) parts.push(`[script](findings/${dir}/${ev.script.path})`);
+      if (ev?.screenshots?.length) parts.push(`${ev.screenshots.length} screenshot(s)`);
+      lines.push(
+        `| [${f.title}](findings/${findingFilename(f)}) | \`${dyn?.verdict}\` | ${
+          parts.length > 0 ? parts.join(", ") : "none"
+        } |`,
+      );
+    }
+    lines.push("");
   }
 
   if (renderedList.length > 0) {
