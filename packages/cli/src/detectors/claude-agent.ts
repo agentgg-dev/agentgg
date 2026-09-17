@@ -292,8 +292,10 @@ export class ClaudeAgentDetector implements Detector {
     script?: string;
   }> {
     const prompt = buildReproducePrompt(args.finding, args.baseUrl, args.auth, args.context);
-    // No built-in tools (no Read/Glob/Grep) — this session works only against
+    // No built-in tools (no Read/Glob/Grep); this session works only against
     // the live target through the Playwright MCP server the sandbox hosts.
+    // settingSources: [] isolates it from the user's ~/.claude settings and
+    // CLAUDE.md, so their rules cannot disable the MCP tools or forbid browsing.
     try {
       const result = await this.runStructured({
         prompt,
@@ -303,6 +305,7 @@ export class ClaudeAgentDetector implements Detector {
         signal: args.signal,
         mcpServers: { playwright: { type: "sse", url: args.browserEndpoint } },
         allowedTools: ["mcp__playwright__*"],
+        settingSources: [],
       });
       return result.verdict === "confirmed"
         ? { verdict: result.verdict, reasoning: result.reasoning, script: result.script }
@@ -422,6 +425,12 @@ export class ClaudeAgentDetector implements Detector {
      * `mcpServers` is set.
      */
     allowedTools?: string[];
+    /**
+     * Filesystem setting sources for the SDK to load. Pass `[]` for isolation:
+     * skip the user's ~/.claude settings and CLAUDE.md. Omitted by every pass
+     * except reproduceFinding, so the others keep the SDK's load-all default.
+     */
+    settingSources?: ("user" | "project" | "local")[];
   }): Promise<z.infer<T>> {
     const jsonSchema = zodToJsonSchema(opts.schema) as Record<string, unknown>;
     // Bridge: parent gives us a signal, SDK wants a controller. Make a
@@ -462,6 +471,7 @@ export class ClaudeAgentDetector implements Detector {
           tools: opts.tools,
           ...(opts.mcpServers ? { mcpServers: opts.mcpServers } : {}),
           ...(opts.allowedTools ? { allowedTools: opts.allowedTools } : {}),
+          ...(opts.settingSources !== undefined ? { settingSources: opts.settingSources } : {}),
           permissionMode: "bypassPermissions",
           maxTurns: opts.maxTurns,
           model: this.model,
