@@ -1,13 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import { runReproScript } from "../src/validation/repro-script";
 
-const fakeSandbox = (code: number) => ({
-  writeFile: vi.fn(async () => {}),
-  exec: vi.fn(async () => ({ code, stdout: "", stderr: "" })),
-  readFile: vi.fn(),
-  browserEndpoint: () => "",
-  dispose: vi.fn(),
-}) as any;
+const fakeSandbox = (code: number) =>
+  ({
+    writeFile: vi.fn(async () => {}),
+    exec: vi.fn(async () => ({ code, stdout: "", stderr: "" })),
+    readFile: vi.fn(),
+    browserEndpoint: () => "",
+    dispose: vi.fn(),
+  }) as any;
 
 describe("runReproScript", () => {
   it("marks passed when playwright exits 0", async () => {

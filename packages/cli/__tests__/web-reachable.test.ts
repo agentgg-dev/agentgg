@@ -1,10 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { isWebReachable, normalizeVulnSlug, selectWebReachable } from "../src/validation/web-reachable";
-const f = (vulnSlug: string, extra: object = {}) => ({
-  id: vulnSlug, agentSlug: "x", title: "t", vulnSlug, filePath: "p",
-  summary: "s", details: "d", poc: "p", impact: "i", references: [], confidence: 0.5,
-  notifications: [], ...extra,
-}) as any;
+import { normalizeVulnSlug, selectWebReachable } from "../src/validation/web-reachable";
+
+const f = (vulnSlug: string, extra: object = {}) =>
+  ({
+    id: vulnSlug,
+    agentSlug: "x",
+    title: "t",
+    vulnSlug,
+    filePath: "p",
+    summary: "s",
+    details: "d",
+    poc: "p",
+    impact: "i",
+    references: [],
+    confidence: 0.5,
+    notifications: [],
+    ...extra,
+  }) as any;
 
 describe("web-reachable gating", () => {
   it("folds sqli into sql-injection", () => {
@@ -16,7 +28,9 @@ describe("web-reachable gating", () => {
     expect(skipped.map((x) => x.vulnSlug)).toEqual(["hardcoded-secret"]);
   });
   it("excludes duplicates", () => {
-    const { selected } = selectWebReachable([f("xss", { dedup: { duplicateOf: "y", reasoning: "r" } })]);
+    const { selected } = selectWebReachable([
+      f("xss", { dedup: { duplicateOf: "y", reasoning: "r" } }),
+    ]);
     expect(selected).toHaveLength(0);
   });
 });

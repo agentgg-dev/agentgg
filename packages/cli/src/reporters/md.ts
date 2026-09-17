@@ -193,7 +193,10 @@ export function renderFindingMd(f: Finding, duplicates?: ReadonlyArray<Finding>)
     lines.push("");
     const ev = dyn.evidence;
     if (ev) {
-      if (ev.script) lines.push(`- Reproduction script: \`${ev.script.path}\` (${ev.script.passed ? "replays" : "unverified"})`);
+      if (ev.script)
+        lines.push(
+          `- Reproduction script: \`${ev.script.path}\` (${ev.script.passed ? "replays" : "unverified"})`,
+        );
       if (ev.trace) lines.push(`- Trace: \`${ev.trace}\``);
       if (ev.video) lines.push(`- Video: \`${ev.video}\``);
       if (ev.har) lines.push(`- HAR: \`${ev.har}\``);

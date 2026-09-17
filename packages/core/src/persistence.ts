@@ -44,7 +44,7 @@ import {
 import {
   AgentRun,
   FileRecord,
-  Finding,
+  type Finding,
   ReconReport,
   RunMeta,
   ScanMeta,
@@ -365,11 +365,7 @@ export function stateDirHasFiles(outputDir: string): boolean {
  * Derive the evidence directory for browser validation screenshots + artifacts.
  * Lives inside the per-slug state slice so rerun cleanup removes it.
  */
-export function getEvidenceDir(
-  outputDir: string,
-  agentSlug: string,
-  findingId: string,
-): string {
+export function getEvidenceDir(outputDir: string, agentSlug: string, findingId: string): string {
   return join(outputDir, "state", "files", agentSlug, "_evidence", findingId);
 }
 
