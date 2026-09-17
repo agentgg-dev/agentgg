@@ -1,4 +1,5 @@
 import type { CvssScore, Finding, ReconReport } from "@agentgg/core";
+import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
@@ -10,6 +11,7 @@ import {
   buildExcludePrompt,
   buildPreconditionPrompt,
   buildReconPrompt,
+  buildReproducePrompt,
   type CreateAgentArgs,
   DetectionResult,
   type Detector,
@@ -18,6 +20,7 @@ import {
   type PreconditionCheckArgs,
   type ReconArgs,
   ReconResult,
+  ReproduceFindingResult,
   type RunAgentArgs,
   repairFindingPath,
   type SuggestExcludesArgs,
@@ -26,6 +29,7 @@ import {
 import { logError, logWarn } from "../log.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import type { CallUsage, UsageMeter } from "../usage-meter.js";
+import type { TargetAuth } from "../validation/target-auth.js";
 import {
   asValidationField,
   buildScopeValidatePrompt,
@@ -84,6 +88,7 @@ export class ClaudeAgentDetector implements Detector {
   private readonly model: string;
   private readonly verbose: boolean;
   private readonly validateMaxTurns: number;
+  private readonly reproduceMaxTurns: number;
   private readonly effort?: "low" | "medium" | "high" | "max";
   private readonly thinking?: "off" | "adaptive" | "enabled";
   private meter?: UsageMeter;
@@ -96,6 +101,8 @@ export class ClaudeAgentDetector implements Detector {
     verbose?: boolean;
     /** Turn cap for the validator's single-finding call. Default 50. */
     validateMaxTurns?: number;
+    /** Turn cap for the reproduce-finding browser session. Default 30. */
+    reproduceMaxTurns?: number;
     /** SDK `effort` passed on every tool-using call. */
     effort?: "low" | "medium" | "high" | "max";
     /** SDK `thinking` mode. `adaptive` matches Claude Code interactive — the model decides per call. */
@@ -109,6 +116,7 @@ export class ClaudeAgentDetector implements Detector {
     this.model = opts.model;
     this.verbose = opts.verbose ?? false;
     this.validateMaxTurns = opts.validateMaxTurns ?? 50;
+    this.reproduceMaxTurns = opts.reproduceMaxTurns ?? 30;
     this.effort = opts.effort;
     this.thinking = opts.thinking;
     this.name = opts.oauthToken ? "anthropic-oauth" : "anthropic-api";
@@ -270,6 +278,52 @@ export class ClaudeAgentDetector implements Detector {
     }
   }
 
+  async reproduceFinding(args: {
+    finding: Finding;
+    baseUrl: string;
+    auth?: TargetAuth;
+    browserEndpoint: string;
+    context?: string;
+    signal?: AbortSignal;
+  }): Promise<{
+    verdict: "confirmed" | "not-reproduced";
+    reasoning: string;
+    refused?: boolean;
+    script?: string;
+  }> {
+    const prompt = buildReproducePrompt(args.finding, args.baseUrl, args.auth, args.context);
+    // No built-in tools (no Read/Glob/Grep) — this session works only against
+    // the live target through the Playwright MCP server the sandbox hosts.
+    try {
+      const result = await this.runStructured({
+        prompt,
+        tools: [],
+        maxTurns: this.reproduceMaxTurns,
+        schema: ReproduceFindingResult,
+        signal: args.signal,
+        mcpServers: { playwright: { type: "sse", url: args.browserEndpoint } },
+        allowedTools: ["mcp__playwright__*"],
+      });
+      return result.verdict === "confirmed"
+        ? { verdict: result.verdict, reasoning: result.reasoning, script: result.script }
+        : { verdict: result.verdict, reasoning: result.reasoning };
+    } catch (err) {
+      // Mirrors validateFinding: record the refusal instead of failing the
+      // reproduce pass outright.
+      if (err instanceof RefusalError) {
+        logWarn(
+          `[reproduce:${args.finding.id}] model refused to reproduce; recording not-reproduced+refused`,
+        );
+        return {
+          verdict: "not-reproduced",
+          reasoning: "Model declined to reproduce this finding (refusal).",
+          refused: true,
+        };
+      }
+      throw err;
+    }
+  }
+
   async validateFindingByScope(args: { finding: Finding; scope: string; signal?: AbortSignal }) {
     const prompt = buildScopeValidatePrompt(args);
     const validated = await this.runStructured({
@@ -352,6 +406,22 @@ export class ClaudeAgentDetector implements Detector {
      * cancelled immediately rather than waiting for the next message.
      */
     signal?: AbortSignal;
+    /**
+     * MCP servers to attach for this call only (e.g. the Playwright MCP
+     * server the live-validation sandbox hosts). Independent of `tools`:
+     * that option only bounds the built-in tool set, so an MCP server's
+     * tools are additive even when `tools` is `[]`. Omitted by every pass
+     * except `reproduceFinding`.
+     */
+    mcpServers?: Record<string, McpServerConfig>;
+    /**
+     * Explicit allow-list for MCP tool names/namespaces (e.g.
+     * `mcp__playwright__*`). `permissionMode: "bypassPermissions"` already
+     * skips permission prompts, so this is belt-and-suspenders, kept so the
+     * model's exposed tool set is documented at the call site whenever
+     * `mcpServers` is set.
+     */
+    allowedTools?: string[];
   }): Promise<z.infer<T>> {
     const jsonSchema = zodToJsonSchema(opts.schema) as Record<string, unknown>;
     // Bridge: parent gives us a signal, SDK wants a controller. Make a
@@ -390,6 +460,8 @@ export class ClaudeAgentDetector implements Detector {
             ? { thinking: { type: this.thinking } }
             : {}),
           tools: opts.tools,
+          ...(opts.mcpServers ? { mcpServers: opts.mcpServers } : {}),
+          ...(opts.allowedTools ? { allowedTools: opts.allowedTools } : {}),
           permissionMode: "bypassPermissions",
           maxTurns: opts.maxTurns,
           model: this.model,

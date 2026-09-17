@@ -6,6 +6,7 @@ import { z } from "zod";
 import type { AgentSpec } from "./agent-spec.js";
 import type { PreFilterHit, TaintStep } from "./pre-filter.js";
 import type { UsageMeter } from "./usage-meter.js";
+import type { TargetAuth } from "./validation/target-auth.js";
 
 /**
  * Subset of `Finding` the LLM is asked to produce. id/agentSlug/
@@ -146,6 +147,34 @@ export const SuggestExcludesResult = z.object({
 export type SuggestExcludesResult = z.infer<typeof SuggestExcludesResult>;
 
 /**
+ * What the reproduce pass returns — the LLM's verdict after driving a
+ * real browser (via Playwright MCP tools) against a live target to
+ * confirm or refute one finding. `script` is only meaningful when
+ * `verdict` is `confirmed`; the detector enforces that at the call site,
+ * not here, so a model that omits or over-populates the field still
+ * validates.
+ */
+export const ReproduceFindingResult = z.object({
+  verdict: z
+    .enum(["confirmed", "not-reproduced"])
+    .describe(
+      "'confirmed' = you drove the browser through the PoC and observed the vulnerable behavior. 'not-reproduced' = the PoC did not trigger it (fixed, blocked, or the described behavior did not occur).",
+    ),
+  reasoning: z
+    .string()
+    .describe(
+      "Short prose explaining what you did in the browser and what you observed, and why that supports the verdict.",
+    ),
+  script: z
+    .string()
+    .optional()
+    .describe(
+      "Self-contained Playwright test source (a repro.spec.ts) that replays every step you performed, including login. Required when verdict is 'confirmed'; omit otherwise.",
+    ),
+});
+export type ReproduceFindingResult = z.infer<typeof ReproduceFindingResult>;
+
+/**
  * Backend-agnostic contract. Each backend (Vercel AI SDK, Claude Agent
  * SDK) implements this. The orchestrator (scan.ts) doesn't care which
  * one it got — just that the contract holds.
@@ -259,6 +288,38 @@ export interface Detector {
      *  `uncertain`. The finding stays unvalidated, but the caller records the
      *  refusal instead of treating it as a genuine uncertain verdict. */
     refused?: boolean;
+  }>;
+
+  /**
+   * Live-validation reproduce pass — optional. Drives a real browser
+   * against `baseUrl` (via the Playwright MCP server the Task 5 sandbox
+   * hosts at `browserEndpoint`, an SSE URL) to confirm or refute one
+   * finding's `poc`, then returns a verdict and, when confirmed, a
+   * generated Playwright test that replays it. The session gets ONLY the
+   * Playwright MCP tools — no source-tree access — so it works entirely
+   * against the running application. Optional on the interface so a
+   * backend without tool-driven browser support can skip live validation
+   * entirely; callers invoke it as `detector.reproduceFinding?.(args)`.
+   */
+  reproduceFinding?(args: {
+    finding: Finding;
+    /** Root URL of the running target the sandbox can reach. */
+    baseUrl: string;
+    /** Login credentials / headers for the target, when provided. */
+    auth?: TargetAuth;
+    /** SSE URL of the Playwright MCP server hosted by the sandbox. */
+    browserEndpoint: string;
+    /** Extra free-form context to fold into the prompt (e.g. scope notes). */
+    context?: string;
+    signal?: AbortSignal;
+  }): Promise<{
+    verdict: "confirmed" | "not-reproduced";
+    reasoning: string;
+    /** True when the model declined to reproduce (refusal); `verdict` is
+     *  `not-reproduced`. Mirrors `validateFinding`'s refusal handling. */
+    refused?: boolean;
+    /** The generated `repro.spec.ts` source. Only present when confirmed. */
+    script?: string;
   }>;
 
   /**
@@ -610,6 +671,87 @@ Answer whether this agent should run. If the project clearly doesn't
 match the condition (e.g. the agent targets a framework or feature the
 project doesn't use), answer false. When genuinely unsure, answer true
 — skipping a relevant agent is worse than running an unnecessary one.`;
+}
+
+/**
+ * Build the reproduce-finding prompt. The model drives a real browser
+ * (via the Playwright MCP tools attached to this session — no Read/Glob/
+ * Grep) against a live target to confirm or refute one finding, then
+ * reports a verdict and, when confirmed, a Playwright test that replays
+ * it end to end.
+ */
+export function buildReproducePrompt(
+  finding: Finding,
+  baseUrl: string,
+  auth?: TargetAuth,
+  context?: string,
+): string {
+  const lineHint = finding.lineRange
+    ? `lines ${finding.lineRange[0]}–${finding.lineRange[1]}`
+    : "unspecified lines";
+
+  const credBlock =
+    auth?.username != null || auth?.password != null
+      ? `
+## Credentials
+
+If the target requires login, sign in first with:
+- Username: ${auth?.username ?? "(none)"}
+- Password: ${auth?.password ?? "(none)"}
+`
+      : "";
+
+  const headerNames = auth?.headers ? Object.keys(auth.headers) : [];
+  const headerBlock =
+    headerNames.length > 0
+      ? `
+The target also expects these request headers, already applied to requests you make through the browser: ${headerNames.join(", ")}.
+`
+      : "";
+
+  const contextBlock = context ? `\n## Additional context\n\n${context}\n` : "";
+
+  return `You are live-testing a security finding against a running
+application, using only the browser tools attached to this session.
+You have no access to the source code — work entirely against the live
+application.
+
+## Target
+Base URL: ${baseUrl}
+${credBlock}${headerBlock}${contextBlock}
+## The finding to reproduce
+
+**Title:** ${finding.title}
+**Vuln class:** ${finding.vulnSlug}
+**File:** ${finding.filePath} (${lineHint})
+
+### Summary
+${finding.summary}
+
+### PoC
+${finding.poc}
+
+### Impact
+${finding.impact}
+
+## Your task
+
+1. Navigate to ${baseUrl} and, if credentials were given above, log in.
+2. Reproduce the PoC above against the live application.
+3. At the point the vulnerable behavior would appear, take a screenshot
+   as proof, whether or not it reproduces.
+4. Decide a verdict:
+   - 'confirmed': you observed the described vulnerable behavior.
+   - 'not-reproduced': the PoC did not trigger it (fixed, blocked by a
+     guard, or the behavior described did not occur).
+5. When 'confirmed', also write a self-contained Playwright test (the
+   source for a \`repro.spec.ts\` file) that replays every step you just
+   performed, including login, so someone else can re-run it and see the
+   same result. Omit \`script\` when 'not-reproduced'.
+
+Be honest: a PoC that fails to reproduce is a valid, useful outcome. Do
+not confirm on a guess; only confirm what you actually observed in the
+browser.`;
 }
 
 /**
