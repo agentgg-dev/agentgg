@@ -303,7 +303,11 @@ export class ClaudeAgentDetector implements Detector {
         maxTurns: this.reproduceMaxTurns,
         schema: ReproduceFindingResult,
         signal: args.signal,
-        mcpServers: { playwright: { type: "sse", url: args.browserEndpoint } },
+        // @playwright/mcp serves streamable HTTP at /mcp; the legacy /sse
+        // transport did not attach tools, so connect over /mcp instead.
+        mcpServers: {
+          playwright: { type: "http", url: args.browserEndpoint.replace(/\/sse$/, "/mcp") },
+        },
         allowedTools: ["mcp__playwright__*"],
         settingSources: [],
       });
@@ -483,6 +487,12 @@ export class ClaudeAgentDetector implements Detector {
         const msg = message as Record<string, unknown>;
         if (this.verbose && msg.type === "assistant") {
           this.printToolUses(msg);
+        }
+        // Surface MCP server connection status so a live-validation run shows
+        // whether the browser tools actually attached (and why, if not).
+        if (opts.mcpServers && msg.type === "system" && msg.subtype === "init") {
+          const servers = (msg.mcp_servers as { name: string; status: string }[] | undefined) ?? [];
+          for (const s of servers) console.log(`  live validation: MCP ${s.name}: ${s.status}`);
         }
         // Capture the structured answer from any terminal `result` message,
         // not just `subtype: "success"`. When a session stops at its turn cap
