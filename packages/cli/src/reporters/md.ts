@@ -107,6 +107,11 @@ export function writeMarkdownReport(input: ScanReportInput): ScanReportOutput {
     .sort(compareForReport);
 
   const findingPaths: string[] = [];
+  // Findings whose evidence was actually copied to findings/, keyed by id.
+  // The summary table must use this same eligibility instead of
+  // re-deriving it, or it can link to a directory that was never written
+  // (metadata survives a rerun even after state/files/<agentSlug>/ is gone).
+  const evidenceDirs = new Map<string, string>();
   for (const f of renderable) {
     const fullPath = join(findingsDir, findingFilename(f));
     // Evidence lives under state/ so a rerun cleans it up with the rest of the
@@ -118,6 +123,7 @@ export function writeMarkdownReport(input: ScanReportInput): ScanReportOutput {
       if (existsSync(src)) {
         evidenceDir = evidenceDirName(f);
         cpSync(src, join(findingsDir, evidenceDir), { recursive: true });
+        evidenceDirs.set(f.id, evidenceDir);
       }
     }
     writeFileSync(fullPath, renderFindingMd(f, duplicatesByPrimary.get(f.id), evidenceDir), "utf8");
@@ -127,7 +133,7 @@ export function writeMarkdownReport(input: ScanReportInput): ScanReportOutput {
   const summaryPath = join(outDir, "summary.md");
   writeFileSync(
     summaryPath,
-    renderSummaryMd(input, findingPaths, renderable, duplicatesByPrimary),
+    renderSummaryMd(input, findingPaths, renderable, duplicatesByPrimary, evidenceDirs),
     "utf8",
   );
 
@@ -297,6 +303,10 @@ export function renderSummaryMd(
   rendered?: ReadonlyArray<Finding>,
   /** primary id → folded-in duplicates, for the collapsed-count line. */
   duplicatesByPrimary?: ReadonlyMap<string, ReadonlyArray<Finding>>,
+  /** finding id -> the relative directory its evidence was copied to. A
+   *  finding missing from the map had no evidence on disk, so its artifacts
+   *  are named but not linked. */
+  evidenceDirs?: ReadonlyMap<string, string>,
 ): string {
   const renderedList = rendered ?? input.findings;
   const durationMs = input.completedAt.getTime() - input.startedAt.getTime();
@@ -391,12 +401,18 @@ export function renderSummaryMd(
     lines.push("| --- | --- | --- |");
     for (const f of liveValidated) {
       const dyn = f.validation?.dynamic;
-      const dir = evidenceDirName(f);
+      // Only link when this finding's evidence was actually copied. A
+      // finding can carry evidence metadata with nothing on disk (e.g. a
+      // rerun cleaned up state/files/<agentSlug>/ after the fact), in which
+      // case linking would produce a dangling href.
+      const dir = evidenceDirs?.get(f.id);
       const ev = dyn?.evidence;
+      const link = (label: string, name: string) =>
+        dir ? `[${label}](findings/${dir}/${name})` : `${label} \`${name}\``;
       const parts: string[] = [];
-      if (ev?.video) parts.push(`[video](findings/${dir}/${ev.video})`);
-      if (ev?.trace) parts.push(`[trace](findings/${dir}/${ev.trace})`);
-      if (ev?.script) parts.push(`[script](findings/${dir}/${ev.script.path})`);
+      if (ev?.video) parts.push(link("video", ev.video));
+      if (ev?.trace) parts.push(link("trace", ev.trace));
+      if (ev?.script) parts.push(link("script", ev.script.path));
       if (ev?.screenshots?.length) parts.push(`${ev.screenshots.length} screenshot(s)`);
       lines.push(
         `| [${f.title}](findings/${findingFilename(f)}) | \`${dyn?.verdict}\` | ${

@@ -105,4 +105,25 @@ describe("evidence in the rendered report", () => {
     const summary = readFileSync(join(outDir, "summary.md"), "utf8");
     expect(summary).not.toContain("## Live validation");
   });
+
+  it("does not link evidence in the summary table when nothing was copied", () => {
+    // Metadata survives a rerun that deletes state/files/<agentSlug>/, so the
+    // evidence directory never gets created on disk. No render() helper here:
+    // it always seeds the source directory, which is exactly what this case
+    // must NOT have.
+    const f = finding();
+    writeMarkdownReport({
+      outDir,
+      root: "/repo",
+      startedAt: new Date(0),
+      completedAt: new Date(1000),
+      findings: [f],
+      filesScanned: 1,
+      byAgent: { "xss-agent": 1 },
+    });
+    const summary = readFileSync(join(outDir, "summary.md"), "utf8");
+    expect(summary).toContain("Reflected XSS in search");
+    expect(summary).toContain("`confirmed`");
+    expect(summary).not.toContain(`findings/${evidenceDirName(f)}/`);
+  });
 });
