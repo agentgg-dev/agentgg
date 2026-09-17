@@ -1,11 +1,14 @@
 // Preflight for the live-validation sandbox image: check Docker, then build the
-// image locally when it is absent. Never pulls: the image is not published, so a
-// pull would fail with a confusing registry error.
+// image locally when it is absent. Only ever builds our own DEFAULT_SANDBOX_IMAGE;
+// a custom --target-image is the user's, so we neither build nor pull it. Never
+// pulls at all: the image is not published, so a pull would fail with a
+// confusing registry error.
 import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { DEFAULT_SANDBOX_IMAGE } from "./sandbox.js";
 
 const pexec = promisify(execFile);
 
@@ -38,6 +41,17 @@ export async function preflightSandboxImage(
     return { ok: false, reason: "The Docker daemon is not responding. Start Docker and retry." };
   }
   if (await probes.present(image)) return { ok: true, built: false };
+  // Only auto-build our own pinned tag. A custom --target-image that is
+  // missing locally is the user's to provide; building our sandbox and
+  // tagging it with their ref would silently swap in the wrong image.
+  if (image !== DEFAULT_SANDBOX_IMAGE) {
+    return {
+      ok: false,
+      reason:
+        `Custom sandbox image "${image}" is not present locally. agentgg does not build or ` +
+        "pull a custom --target-image; build or pull it yourself, then retry.",
+    };
+  }
   try {
     await probes.build(image);
   } catch (err) {

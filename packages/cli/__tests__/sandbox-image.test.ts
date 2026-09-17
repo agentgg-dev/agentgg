@@ -4,6 +4,7 @@ import { join, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { type ImageProbes, preflightSandboxImage, validationDir } from "../src/validation/image.js";
+import { DEFAULT_SANDBOX_IMAGE } from "../src/validation/sandbox.js";
 
 const probes = (over: Partial<ImageProbes> = {}): ImageProbes => ({
   installed: async () => true,
@@ -21,11 +22,27 @@ describe("preflightSandboxImage", () => {
     expect(build).not.toHaveBeenCalled();
   });
 
-  it("builds the image when it is absent", async () => {
+  it("builds the default image when it is absent", async () => {
     const build = vi.fn(async () => {});
-    const r = await preflightSandboxImage("img", probes({ present: async () => false, build }));
+    const r = await preflightSandboxImage(
+      DEFAULT_SANDBOX_IMAGE,
+      probes({ present: async () => false, build }),
+    );
     expect(r).toEqual({ ok: true, built: true });
-    expect(build).toHaveBeenCalledWith("img");
+    expect(build).toHaveBeenCalledWith(DEFAULT_SANDBOX_IMAGE);
+  });
+
+  it("does not build a custom --target-image that is absent, and says so", async () => {
+    const build = vi.fn(async () => {});
+    const customImage = "ghcr.io/acme/my-sandbox:3";
+    const r = await preflightSandboxImage(
+      customImage,
+      probes({ present: async () => false, build }),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.ok === false && r.reason).toContain(customImage);
+    expect(r.ok === false && r.reason).toContain("--target-image");
+    expect(build).not.toHaveBeenCalled();
   });
 
   it("reports that Docker is not installed", async () => {
@@ -42,7 +59,7 @@ describe("preflightSandboxImage", () => {
 
   it("reports a build failure instead of throwing", async () => {
     const r = await preflightSandboxImage(
-      "img",
+      DEFAULT_SANDBOX_IMAGE,
       probes({
         present: async () => false,
         build: async () => {
