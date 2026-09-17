@@ -22,6 +22,7 @@ export function parseTargetAuth(opts: { targetCredentials?: string; targetHeader
 
 export function redact(text: string, auth: TargetAuth): string {
   const secrets = [auth.password, ...Object.values(auth.headers)].filter(Boolean) as string[];
+  secrets.sort((a, b) => b.length - a.length);
   let out = text;
   for (const s of secrets) out = out.split(s).join("***");
   return out;
