@@ -70,20 +70,22 @@ export async function runReproducePhase(args: {
     return;
   }
 
+  // Preflight Docker and the image here, not at phase entry: a target that
+  // never answered should not cost a multi-minute image build. Must also run
+  // before the "reproducing N finding(s)" log below, so a skip is never
+  // announced as work already under way.
+  const preflight = await ensureSandboxImage(image);
+  if (!preflight.ok) {
+    console.log(`  live validation: skipping, keeping static verdicts.\n  ${preflight.reason}`);
+    return;
+  }
+
   console.log(`  live validation: reproducing ${work.length} finding(s) against ${targetUrl}`);
 
   // The browser runs inside the container, so a target the host publishes on
   // localhost must be reached via host.docker.internal. Probing stays on the
   // host-side URL; the agent (and the recorded baseUrl) gets the container one.
   const agentBaseUrl = toContainerBaseUrl(targetUrl);
-
-  // Preflight Docker and the image here, not at phase entry: a target that
-  // never answered should not cost a multi-minute image build.
-  const preflight = await ensureSandboxImage(image);
-  if (!preflight.ok) {
-    console.log(`  live validation: skipping, keeping static verdicts.\n  ${preflight.reason}`);
-    return;
-  }
 
   const runId = `reproduce-${randomUUID()}`;
   let sandbox: Sandbox;
