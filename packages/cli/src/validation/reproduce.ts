@@ -113,7 +113,11 @@ export async function runReproducePhase(args: {
       // Per-finding timeout, linked to the scan-wide abort signal.
       const ac = new AbortController();
       const onAbort = () => ac.abort();
-      const timer = setTimeout(() => ac.abort(), args.timeoutMs);
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        ac.abort();
+      }, args.timeoutMs);
       signal.addEventListener("abort", onAbort);
       try {
         const res = await detector.reproduceFinding({
@@ -155,7 +159,12 @@ export async function runReproducePhase(args: {
         if (res.verdict === "confirmed") confirmed++;
         console.log(`    ${finding.id}: ${res.verdict}`);
       } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
+        let reason: string;
+        if (timedOut) {
+          reason = `reproduction timed out after ${Math.round(args.timeoutMs / 1000)}s`;
+        } else {
+          reason = err instanceof Error ? err.message : String(err);
+        }
         logWarn(`[reproduce:${finding.id}] ${redact(reason, auth)}`);
         if (signal.aborted) break;
         // A timeout or reproduction failure records not-reproduced rather than

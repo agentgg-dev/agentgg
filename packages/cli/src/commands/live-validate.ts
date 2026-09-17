@@ -98,7 +98,7 @@ export async function runLiveValidate(
     auth: parseTargetAuth(opts),
     context: opts.targetContext,
     image: opts.targetImage ?? DEFAULT_SANDBOX_IMAGE,
-    timeoutMs: Number(opts.reproduceTimeout ?? 120) * 1000,
+    timeoutMs: Number(opts.reproduceTimeout ?? 300) * 1000,
     budgetMs: Number(opts.reproduceBudget ?? 1800) * 1000,
     max: Number(opts.reproduceMax ?? 50),
     force: opts.force ?? false,
@@ -158,9 +158,9 @@ export function registerLiveValidateCommand(program: Command): void {
     )
     .option(
       "--reproduce-timeout <s>",
-      "Per-finding reproduction timeout in seconds (default 120).",
+      "Per-finding reproduction timeout in seconds (default 300).",
       (v) => parseInt(v, 10),
-      120,
+      300,
     )
     .option(
       "--reproduce-budget <s>",
