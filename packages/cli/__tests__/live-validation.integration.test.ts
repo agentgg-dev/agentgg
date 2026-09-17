@@ -6,7 +6,7 @@
 // (vitest.integration.config.ts) — this is a manual/CI-only check.
 //
 // Manual run (from the repo root):
-//   docker build -f packages/cli/src/validation/sandbox.Dockerfile -t agentgg/live-sandbox:pw1.56.0-mcp0.0.41 .
+//   docker build -f packages/cli/src/validation/sandbox.Dockerfile -t agentgg/live-sandbox:pw1.56.0-mcp0.0.41-2 packages/cli/src/validation
 //   cd ../toy-vulnerable-app && npm install && npm start
 //   ANTHROPIC_API_KEY=sk-... TOY_APP_URL=http://localhost:3000 pnpm test:integration
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";

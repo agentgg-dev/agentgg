@@ -1,6 +1,7 @@
 // Local Docker sandbox that hosts a Playwright MCP server for live validation.
-// The image is built from sandbox.Dockerfile:
-//   docker build -f packages/cli/src/validation/sandbox.Dockerfile -t <DEFAULT_SANDBOX_IMAGE> .
+// The image is built from sandbox.Dockerfile, with that file's own directory as
+// the build context:
+//   docker build -f packages/cli/src/validation/sandbox.Dockerfile -t <DEFAULT_SANDBOX_IMAGE> packages/cli/src/validation
 import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 
@@ -8,7 +9,7 @@ const pexec = promisify(execFile);
 
 // Pinned image tag; the scan command's default sandbox image for --target-image.
 // Keep in sync with the tag in sandbox.Dockerfile's build comment.
-export const DEFAULT_SANDBOX_IMAGE = "agentgg/live-sandbox:pw1.56.0-mcp0.0.41";
+export const DEFAULT_SANDBOX_IMAGE = "agentgg/live-sandbox:pw1.56.0-mcp0.0.41-2";
 
 // Container port the Playwright MCP server binds; published 1:1 on the host so
 // the Host header the MCP client sends matches what the server allows.
@@ -82,7 +83,7 @@ export async function startLocalDockerSandbox(opts: { image: string }): Promise<
     ) {
       throw new Error(
         `Sandbox image "${image}" is not available locally. Build it first:\n` +
-          `  docker build -f packages/cli/src/validation/sandbox.Dockerfile -t ${image} .`,
+          `  docker build -f packages/cli/src/validation/sandbox.Dockerfile -t ${image} packages/cli/src/validation`,
       );
     }
     throw new Error(`Failed to start sandbox container from "${image}": ${msg}`);
