@@ -90,9 +90,8 @@ export async function runReproducePhase(args: {
   try {
     sandbox = await startLocalDockerSandbox({ image });
   } catch (err) {
-    // The preflight above already built a missing image, so this now catches
-    // port conflicts or other docker/SSE failures. Keep static verdicts and
-    // let the scan finish rather than aborting.
+    // The preflight above already built a missing image, so this now only
+    // catches port conflicts or other docker/SSE failures.
     const msg = err instanceof Error ? err.message : String(err);
     console.log(
       `  live validation: could not start the sandbox, keeping static verdicts.\n  ${msg}`,

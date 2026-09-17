@@ -1,7 +1,5 @@
-// Docker-gated: proves the sandbox-image preflight talks to real Docker, not
-// just the fake ImageProbes in sandbox-image.test.ts. Case one recognizes the
-// already-built default image; case two builds a throwaway tag from scratch
-// and removes it after. Excluded from `pnpm test`; run with `pnpm test:integration`.
+// Docker-gated: proves the preflight talks to real Docker, not the fake
+// ImageProbes in sandbox-image.test.ts. Run with `pnpm test:integration`.
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";

@@ -64,13 +64,11 @@ async function ok(p: Promise<unknown>): Promise<boolean> {
   }
 }
 
-// esbuild flattens every module's import.meta.url to the bundled entry's URL,
-// so a path relative to *this* file's own location is only correct unbundled
-// (tsx). Try the bundled layout (dist/validation, next to dist/cli.js) first,
-// then fall back to this file's own directory for dev/tsx.
-function validationDir(): string {
-  const bundled = fileURLToPath(new URL("./validation/", import.meta.url));
-  return existsSync(bundled) ? bundled : fileURLToPath(new URL("./", import.meta.url));
+// esbuild collapses every module's import.meta.url to the bundle entry's, so
+// a self-relative path is only correct unbundled; try bundled first, then fall back.
+export function validationDir(baseUrl: string = import.meta.url): string {
+  const bundled = fileURLToPath(new URL("./validation/", baseUrl));
+  return existsSync(bundled) ? bundled : fileURLToPath(new URL("./", baseUrl));
 }
 
 /**

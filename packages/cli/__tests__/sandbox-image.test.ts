@@ -1,7 +1,9 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import { type ImageProbes, preflightSandboxImage } from "../src/validation/image.js";
+import { type ImageProbes, preflightSandboxImage, validationDir } from "../src/validation/image.js";
 
 const probes = (over: Partial<ImageProbes> = {}): ImageProbes => ({
   installed: async () => true,
@@ -59,18 +61,43 @@ describe("preflightSandboxImage", () => {
   });
 });
 
+describe("validationDir", () => {
+  function withTempDir(fn: (dir: string) => void): void {
+    const dir = mkdtempSync(join(tmpdir(), "agentgg-validation-dir-"));
+    try {
+      fn(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("returns the validation/ subdirectory when one exists (bundled layout)", () => {
+    withTempDir((dir) => {
+      mkdirSync(join(dir, "validation"));
+      const base = pathToFileURL(join(dir, "cli.js")).toString();
+      expect(validationDir(base)).toBe(join(dir, "validation") + sep);
+    });
+  });
+
+  it("falls back to its own directory when there is no validation/ (source layout)", () => {
+    withTempDir((dir) => {
+      const base = pathToFileURL(join(dir, "image.ts")).toString();
+      expect(validationDir(base)).toBe(dir + sep);
+    });
+  });
+});
+
 describe("bundled sandbox image path resolution", () => {
   it("finds the Dockerfile and banner the way the bundled CLI resolves them", () => {
-    const distCli = fileURLToPath(new URL("../dist/cli.js", import.meta.url));
-    if (!existsSync(distCli)) return; // fresh checkout, never built: nothing to check
+    const distDir = fileURLToPath(new URL("../dist/", import.meta.url));
+    // dist/agents/ is copied only by bundle-cli.mjs; tsc (the plain `pnpm build`)
+    // never creates it, so its presence proves the bundle step actually ran.
+    if (!existsSync(join(distDir, "agents"))) return;
 
-    // Mirrors validationDir() in image.ts: once bundled, every module's
-    // import.meta.url collapses to dist/cli.js's own URL, so resolve from there.
-    const base = pathToFileURL(distCli);
-    const dockerfile = fileURLToPath(new URL("./validation/sandbox.Dockerfile", base));
-    const banner = fileURLToPath(new URL("./validation/url-banner.js", base));
+    const base = pathToFileURL(join(distDir, "cli.js")).toString();
+    const dir = validationDir(base);
 
-    expect(existsSync(dockerfile)).toBe(true);
-    expect(existsSync(banner)).toBe(true);
+    expect(existsSync(join(dir, "sandbox.Dockerfile"))).toBe(true);
+    expect(existsSync(join(dir, "url-banner.js"))).toBe(true);
   });
 });
