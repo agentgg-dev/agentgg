@@ -25,8 +25,11 @@ type Evidence = NonNullable<NonNullable<Dynamic>["evidence"]>;
  * already carry a dynamic verdict. That last filter is the resume key — a
  * re-run skips findings a prior run already reproduced.
  */
-export function selectForReproduce(findings: Finding[]): Finding[] {
-  return selectWebReachable(findings).selected.filter((f) => !f.validation?.dynamic);
+export function selectForReproduce(findings: Finding[], force = false): Finding[] {
+  const reachable = selectWebReachable(findings).selected;
+  // Default resume key: skip findings that already carry a dynamic result.
+  // `force` re-reproduces every web-reachable primary (like revalidate --revalidate-all).
+  return force ? reachable : reachable.filter((f) => !f.validation?.dynamic);
 }
 
 export async function runReproducePhase(args: {
@@ -40,6 +43,8 @@ export async function runReproducePhase(args: {
   timeoutMs: number;
   budgetMs: number;
   max: number;
+  /** Re-reproduce web-reachable findings that already have a dynamic verdict. */
+  force?: boolean;
   signal: AbortSignal;
 }): Promise<void> {
   const { findings, detector, outDir, targetUrl, auth, context, image, signal } = args;
@@ -49,7 +54,7 @@ export async function runReproducePhase(args: {
     return;
   }
 
-  const work = selectForReproduce(findings);
+  const work = selectForReproduce(findings, args.force ?? false);
   logSkips(selectWebReachable(findings).skipped);
   if (work.length === 0) {
     console.log("  live validation: no web-reachable findings to reproduce");

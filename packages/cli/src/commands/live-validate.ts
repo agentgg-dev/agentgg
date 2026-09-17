@@ -29,6 +29,7 @@ interface LiveValidateOpts {
   reproduceTimeout?: number;
   reproduceBudget?: number;
   reproduceMax?: number;
+  force?: boolean;
   provider?: string;
   apiKey?: string;
   oauthToken?: string;
@@ -100,6 +101,7 @@ export async function runLiveValidate(
     timeoutMs: Number(opts.reproduceTimeout ?? 120) * 1000,
     budgetMs: Number(opts.reproduceBudget ?? 1800) * 1000,
     max: Number(opts.reproduceMax ?? 50),
+    force: opts.force ?? false,
     signal: abortController.signal,
   });
   const completedAt = new Date();
@@ -171,6 +173,10 @@ export function registerLiveValidateCommand(program: Command): void {
       "Max findings to reproduce in one run (default 50).",
       (v) => parseInt(v, 10),
       50,
+    )
+    .option(
+      "--force",
+      "Re-reproduce web-reachable findings that already have a live-validation verdict.",
     )
     .option(
       "--provider <name>",
