@@ -1,6 +1,5 @@
-// Guard for the recon command's user-visible strings: no em dash, en dash or
-// Unicode ellipsis in anything a user reads. Comments are stripped first, so
-// prose in the source is unaffected.
+// Guard: no em dash, en dash, or Unicode ellipsis in the recon command's
+// user-visible strings. Comments are stripped first, so prose is unaffected.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
