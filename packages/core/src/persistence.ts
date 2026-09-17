@@ -44,6 +44,7 @@ import {
 import {
   AgentRun,
   FileRecord,
+  Finding,
   ReconReport,
   RunMeta,
   ScanMeta,
@@ -354,4 +355,32 @@ export function stateDirHasFiles(outputDir: string): boolean {
   } catch {
     return false;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Evidence persistence and verdict logic
+// ---------------------------------------------------------------------------
+
+/**
+ * Derive the evidence directory for browser validation screenshots + artifacts.
+ * Lives inside the per-slug state slice so rerun cleanup removes it.
+ */
+export function getEvidenceDir(
+  outputDir: string,
+  agentSlug: string,
+  findingId: string,
+): string {
+  return join(outputDir, "state", "files", agentSlug, "_evidence", findingId);
+}
+
+/**
+ * Compute the effective verdict of a finding: dynamic verdict takes
+ * precedence over static when present and confirmed; dynamic
+ * not-reproduced never downgrades the static verdict.
+ */
+export function effectiveVerdict(
+  f: Finding,
+): "confirmed" | "false-positive" | "out-of-scope" | "uncertain" | undefined {
+  if (f.validation?.dynamic?.verdict === "confirmed") return "confirmed" as const;
+  return f.validation?.verdict;
 }
