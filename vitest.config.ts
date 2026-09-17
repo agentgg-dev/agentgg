@@ -3,7 +3,11 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     include: ["packages/**/__tests__/**/*.test.ts"],
-    exclude: ["**/node_modules/**", "**/dist/**"],
+    // Docker- and network-gated e2e tests (live-validation.integration.test.ts):
+    // require a running toy app + Docker, so they're excluded here the same
+    // way *.smoke.ts is kept out of the default run. Invoke them directly
+    // (see the test file's header) rather than through `pnpm test`.
+    exclude: ["**/node_modules/**", "**/dist/**", "**/*.integration.test.ts"],
     environment: "node",
     // 5s default is too tight on slower CI runners: the first test in a
     // file that triggers the official agent catalog auto-install pays a
