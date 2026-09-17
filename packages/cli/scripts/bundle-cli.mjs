@@ -89,6 +89,8 @@ try {
 
 // The live-validation sandbox image is built from these at runtime, resolved
 // relative to the bundle via import.meta.url — same explicit-copy reason as above.
+// Fatal (unlike the copies above): a missing Dockerfile only surfaces when a
+// user's first live-validation run tries `docker build` against it.
 const validationSrc = resolve(cliRoot, "src", "validation");
 const validationDest = resolve(cliRoot, "dist", "validation");
 try {
@@ -98,7 +100,8 @@ try {
   }
   log(`Copied sandbox build inputs → ${validationDest}`);
 } catch (err) {
-  log(`WARNING: failed to copy sandbox build inputs: ${err.message}`);
+  log(`ERROR: failed to copy sandbox build inputs: ${err.message}`);
+  throw err;
 }
 
 // chmod +x is a no-op on Windows but matters on macOS/Linux installs.
