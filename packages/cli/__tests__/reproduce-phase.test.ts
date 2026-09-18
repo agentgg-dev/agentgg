@@ -43,4 +43,25 @@ describe("selectForReproduce", () => {
     const list = [f("idor", { validation: { verdict: "confirmed", reasoning: "r" } })];
     expect(selectForReproduce(list).map((x) => x.vulnSlug)).toEqual(["idor"]);
   });
+
+  it("skips findings validation marked false-positive", () => {
+    const list = [f("xss", { validation: { verdict: "false-positive", reasoning: "r" } })];
+    expect(selectForReproduce(list)).toEqual([]);
+  });
+
+  it("skips findings validation marked out-of-scope", () => {
+    const list = [f("sqli", { validation: { verdict: "out-of-scope", reasoning: "r" } })];
+    expect(selectForReproduce(list)).toEqual([]);
+  });
+
+  it("keeps an uncertain finding, since live evidence resolves the uncertainty", () => {
+    const list = [f("idor", { validation: { verdict: "uncertain", reasoning: "r" } })];
+    expect(selectForReproduce(list).map((x) => x.vulnSlug)).toEqual(["idor"]);
+  });
+
+  it("keeps a finding with no static validation at all", () => {
+    expect(selectForReproduce([f("open-redirect")]).map((x) => x.vulnSlug)).toEqual([
+      "open-redirect",
+    ]);
+  });
 });

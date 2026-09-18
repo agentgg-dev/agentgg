@@ -23,13 +23,22 @@ import { logSkips, selectWebReachable } from "./web-reachable.js";
 type Dynamic = NonNullable<Finding["validation"]>["dynamic"];
 type Evidence = NonNullable<NonNullable<Dynamic>["evidence"]>;
 
+/** Findings validation already rejected. Reproducing one wastes a browser
+ *  session, and a blind live `confirmed` would override the static verdict.
+ *  `uncertain` is NOT rejected: live evidence is what resolves it. */
+export function isValidationRejected(f: Finding): boolean {
+  const v = f.validation?.verdict;
+  return v === "false-positive" || v === "out-of-scope";
+}
+
 /**
  * Findings eligible for reproduction: PRIMARY + web-reachable, minus any that
- * already carry a dynamic verdict. That last filter is the resume key — a
- * re-run skips findings a prior run already reproduced.
+ * validation rejected, minus any that already carry a dynamic verdict. That
+ * last filter is the resume key — a re-run skips findings a prior run already
+ * reproduced.
  */
 export function selectForReproduce(findings: Finding[], force = false): Finding[] {
-  const reachable = selectWebReachable(findings).selected;
+  const reachable = selectWebReachable(findings).selected.filter((f) => !isValidationRejected(f));
   // Default resume key: skip findings that already carry a dynamic result.
   // `force` re-reproduces every web-reachable primary (like revalidate --revalidate-all).
   return force ? reachable : reachable.filter((f) => !f.validation?.dynamic);
@@ -60,6 +69,12 @@ export async function runReproducePhase(args: {
   const primaries = findings.filter((f) => !f.dedup);
   const work = selectForReproduce(primaries, args.force ?? false);
   logSkips(selectWebReachable(primaries).skipped);
+  const rejected = selectWebReachable(primaries).selected.filter(isValidationRejected).length;
+  if (rejected > 0) {
+    console.log(
+      `  live validation: skipped ${rejected} finding(s) validation marked false-positive or out-of-scope`,
+    );
+  }
   if (work.length === 0) {
     console.log("  live validation: no web-reachable findings to reproduce");
     return;
