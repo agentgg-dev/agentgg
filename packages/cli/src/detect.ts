@@ -311,6 +311,9 @@ export interface Detector {
     browserEndpoint: string;
     /** Extra free-form context to fold into the prompt (e.g. scope notes). */
     context?: string;
+    /** Per-call turn cap. Overrides the detector's default when set, so a
+     *  complex target can be given more browser steps than a demo needs. */
+    maxTurns?: number;
     signal?: AbortSignal;
   }): Promise<{
     verdict: "confirmed" | "not-reproduced";

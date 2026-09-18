@@ -46,6 +46,9 @@ export async function runReproducePhase(args: {
   timeoutMs: number;
   budgetMs: number;
   max: number;
+  /** Per-finding browser turn cap. Threaded to the detector; when unset the
+   *  detector's own default applies. */
+  reproduceMaxTurns?: number;
   /** Re-reproduce web-reachable findings that already have a dynamic verdict. */
   force?: boolean;
   signal: AbortSignal;
@@ -141,6 +144,7 @@ export async function runReproducePhase(args: {
           auth,
           browserEndpoint: sandbox.browserEndpoint(),
           context,
+          maxTurns: args.reproduceMaxTurns,
           signal: ac.signal,
         });
 

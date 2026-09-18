@@ -127,4 +127,43 @@ describe("evidence isolation between findings", () => {
     expect(existsSync(join(dirB, "page-1.webm"))).toBe(false);
     expect(b.validation?.dynamic?.evidence?.video).toBe("page-2.webm");
   });
+
+  it("forwards the configured turn cap to the detector", async () => {
+    const a = finding("aaa", "agent-a");
+    writeFileRecord(outDir, {
+      agentSlug: a.agentSlug,
+      filePath: a.filePath,
+      contentHash: "h",
+      findings: [a],
+      analysisHistory: [],
+      candidates: [],
+      status: "analyzed",
+    } as never);
+
+    let seen: number | undefined;
+    const detector = {
+      name: "fake",
+      async reproduceFinding(args: { maxTurns?: number }) {
+        seen = args.maxTurns;
+        return { verdict: "not-reproduced" as const, reasoning: "r" };
+      },
+    };
+
+    await runReproducePhase({
+      findings: [a],
+      // biome-ignore lint/suspicious/noExplicitAny: only reproduceFinding is exercised
+      detector: detector as any,
+      outDir,
+      targetUrl: "http://localhost:3000",
+      auth: {},
+      image: "img",
+      timeoutMs: 30_000,
+      budgetMs: 60_000,
+      max: 10,
+      reproduceMaxTurns: 75,
+      signal: new AbortController().signal,
+    });
+
+    expect(seen).toBe(75);
+  });
 });

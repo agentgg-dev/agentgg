@@ -116,7 +116,7 @@ export class ClaudeAgentDetector implements Detector {
     this.model = opts.model;
     this.verbose = opts.verbose ?? false;
     this.validateMaxTurns = opts.validateMaxTurns ?? 50;
-    this.reproduceMaxTurns = opts.reproduceMaxTurns ?? 30;
+    this.reproduceMaxTurns = opts.reproduceMaxTurns ?? 50;
     this.effort = opts.effort;
     this.thinking = opts.thinking;
     this.name = opts.oauthToken ? "anthropic-oauth" : "anthropic-api";
@@ -284,6 +284,7 @@ export class ClaudeAgentDetector implements Detector {
     auth?: TargetAuth;
     browserEndpoint: string;
     context?: string;
+    maxTurns?: number;
     signal?: AbortSignal;
   }): Promise<{
     verdict: "confirmed" | "not-reproduced";
@@ -300,7 +301,7 @@ export class ClaudeAgentDetector implements Detector {
       const result = await this.runStructured({
         prompt,
         tools: [],
-        maxTurns: this.reproduceMaxTurns,
+        maxTurns: args.maxTurns ?? this.reproduceMaxTurns,
         schema: ReproduceFindingResult,
         signal: args.signal,
         // @playwright/mcp serves streamable HTTP at /mcp; the legacy /sse

@@ -657,7 +657,7 @@ export class VercelAgentDetector implements Detector {
     this.thinking = opts.thinking;
     this.verbose = opts.verbose ?? false;
     this.validateMaxTurns = opts.validateMaxTurns ?? 50;
-    this.reproduceMaxTurns = opts.reproduceMaxTurns ?? 30;
+    this.reproduceMaxTurns = opts.reproduceMaxTurns ?? 50;
     this.costSource = opts.costSource;
   }
 
@@ -1324,6 +1324,7 @@ export class VercelAgentDetector implements Detector {
     auth?: TargetAuth;
     browserEndpoint: string;
     context?: string;
+    maxTurns?: number;
     signal?: AbortSignal;
   }): Promise<{
     verdict: "confirmed" | "not-reproduced";
@@ -1351,14 +1352,15 @@ export class VercelAgentDetector implements Detector {
       // The Claude path gets an MCP status line from its SDK; this is the
       // equivalent signal that the browser tools actually attached.
       console.log(`  live validation: MCP playwright: ${Object.keys(tools).length} tool(s)`);
-      const stop = hardStop(label, this.reproduceMaxTurns + 1);
+      const maxTurns = args.maxTurns ?? this.reproduceMaxTurns;
+      const stop = hardStop(label, maxTurns + 1);
       const gen = await this.metered(
         () =>
           generateText({
             model: this.model,
             prompt,
             tools,
-            maxSteps: this.reproduceMaxTurns + 1,
+            maxSteps: maxTurns + 1,
             experimental_prepareStep: stop.prepareStep,
             experimental_repairToolCall: this.toolCallRepair(label),
             providerOptions: this.providerOptionsArg(),
@@ -1366,7 +1368,7 @@ export class VercelAgentDetector implements Detector {
           }),
         { label, signal: args.signal },
       );
-      warnIfTurnCapped(label, gen, this.reproduceMaxTurns);
+      warnIfTurnCapped(label, gen, maxTurns);
       let answer = gen.text;
       if (!answer.trim()) {
         logUnparseableGeneration(label, gen);

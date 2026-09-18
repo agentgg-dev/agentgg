@@ -29,6 +29,7 @@ interface LiveValidateOpts {
   reproduceTimeout?: number;
   reproduceBudget?: number;
   reproduceMax?: number;
+  reproduceMaxTurns?: number;
   force?: boolean;
   provider?: string;
   apiKey?: string;
@@ -101,6 +102,7 @@ export async function runLiveValidate(
     timeoutMs: Number(opts.reproduceTimeout ?? 300) * 1000,
     budgetMs: Number(opts.reproduceBudget ?? 1800) * 1000,
     max: Number(opts.reproduceMax ?? 50),
+    reproduceMaxTurns: Number(opts.reproduceMaxTurns ?? 50),
     force: opts.force ?? false,
     signal: abortController.signal,
   });
@@ -171,6 +173,12 @@ export function registerLiveValidateCommand(program: Command): void {
     .option(
       "--reproduce-max <n>",
       "Max findings to reproduce in one run (default 50).",
+      (v) => parseInt(v, 10),
+      50,
+    )
+    .option(
+      "--reproduce-max-turns <n>",
+      "Max browser steps per finding (default 50). Raise it for a target with multi-step flows.",
       (v) => parseInt(v, 10),
       50,
     )
