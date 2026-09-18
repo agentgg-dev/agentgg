@@ -118,6 +118,12 @@ export async function runReproducePhase(args: {
       }
       done++;
 
+      // Announce the finding BEFORE reproducing it, not only its verdict after,
+      // so a run that vanishes names the finding it died on.
+      console.log(
+        `    [${done}/${work.length}] ${finding.id} (${finding.vulnSlug}): reproducing...`,
+      );
+
       // Per-finding timeout, linked to the scan-wide abort signal.
       const ac = new AbortController();
       const onAbort = () => ac.abort();
