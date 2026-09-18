@@ -10,6 +10,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import type { Finding } from "@agentgg/core";
 import { getEvidenceDir, readFileRecord, writeFileRecord } from "@agentgg/core";
+import AdmZip from "adm-zip";
 import type { Detector } from "../detect.js";
 import { logWarn } from "../log.js";
 import { ensureSandboxImage } from "./image.js";
@@ -195,6 +196,14 @@ export async function runReproducePhase(args: {
       } finally {
         clearTimeout(timer);
         signal.removeEventListener("abort", onAbort);
+        // Every finding, not just the confirmed ones: /out is shared for the
+        // whole phase, so anything left behind lands in the next finding's
+        // evidence.
+        try {
+          await clearSandboxOut(sandbox);
+        } catch (clearErr) {
+          logWarn(`[reproduce:${finding.id}] could not clear /out: ${(clearErr as Error).message}`);
+        }
       }
     }
     if (confirmed === 0 && done > 0) {
@@ -247,41 +256,107 @@ async function probe(url: string, timeoutMs = 5_000): Promise<boolean> {
   }
 }
 
+/** How long to wait for Playwright to flush the session video. It writes the
+ *  file when the page closes, which can land after the agent's turn returns. */
+const VIDEO_WAIT_MS = 10_000;
+const VIDEO_POLL_MS = 250;
+
 /**
- * Copy every artifact the sandbox wrote under /out into the finding's local
- * evidence dir, classifying by extension. The exact /out filenames are set by
- * @playwright/mcp; this enumerates whatever is there rather than assuming
- * names. HAR is embedded in the Playwright trace, so `evidence.har` stays
- * unset. Per-file read failures are skipped so one bad artifact never drops
- * the whole confirmation.
+ * Copy the artifacts the sandbox wrote under /out into the finding's evidence
+ * dir, classifying by extension. Names come from @playwright/mcp, so this
+ * enumerates what is there rather than assuming them. Exported for the
+ * fake-sandbox tests.
  */
-async function copyEvidence(sandbox: Sandbox, evidenceDir: string): Promise<Evidence> {
+export async function copyEvidence(
+  sandbox: Sandbox,
+  evidenceDir: string,
+  opts: { videoWaitMs?: number; pollMs?: number } = {},
+): Promise<Evidence> {
   const evidence: Evidence = { screenshots: [] };
   mkdirSync(evidenceDir, { recursive: true });
-  const { code, stdout } = await sandbox.exec(["ls", "/out"]);
-  if (code !== 0) return evidence;
-  const names = stdout
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .filter(Boolean);
+
+  const names = await listOut(
+    sandbox,
+    opts.videoWaitMs ?? VIDEO_WAIT_MS,
+    opts.pollMs ?? VIDEO_POLL_MS,
+  );
   for (const name of names) {
+    let buf: Buffer;
     try {
-      const buf = await sandbox.readFile(`/out/${name}`);
-      writeFileSync(join(evidenceDir, name), buf);
+      buf = await sandbox.readFile(`/out/${name}`);
     } catch {
-      // Likely a subdirectory or unreadable entry; skip it.
+      // A subdirectory (traces/) or an unreadable entry; skip it.
       continue;
     }
+    writeFileSync(join(evidenceDir, name), buf);
     const lower = name.toLowerCase();
-    if (lower.endsWith(".zip")) {
-      evidence.trace ??= name;
-    } else if (lower.endsWith(".webm") || lower.endsWith(".mp4")) {
+    if (lower.endsWith(".webm") || lower.endsWith(".mp4")) {
+      // `ls -1t` is newest first, so this keeps THIS finding's recording even
+      // if an earlier one's file is still in /out.
       evidence.video ??= name;
     } else if (lower.endsWith(".png") || lower.endsWith(".jpg") || lower.endsWith(".jpeg")) {
       evidence.screenshots.push(name);
     }
   }
+
+  const trace = await copyTrace(sandbox, evidenceDir);
+  if (trace) evidence.trace = trace;
   return evidence;
+}
+
+/** Empty /out so the next finding cannot inherit these artifacts. /out itself
+ *  stays: it is the MCP server's configured output dir. */
+export async function clearSandboxOut(sandbox: Sandbox): Promise<void> {
+  await sandbox.exec(["sh", "-c", "rm -rf /out/* /out/.[!.]* 2>/dev/null || true"]);
+}
+
+/** List /out newest-first, waiting for a video to appear. */
+async function listOut(sandbox: Sandbox, waitMs: number, pollMs: number): Promise<string[]> {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    const { code, stdout } = await sandbox.exec(["ls", "-1t", "/out"]);
+    const names =
+      code === 0
+        ? stdout
+            .split(/\r?\n/)
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : [];
+    const hasVideo = names.some((n) => /\.(webm|mp4)$/i.test(n));
+    if (hasVideo || Date.now() >= deadline) return names;
+    await delay(pollMs);
+  }
+}
+
+/**
+ * Zip the Playwright trace. `--save-trace` writes a traces/ DIRECTORY
+ * (`*.trace`, `*.network`, `resources/`), not a zip, and the trace viewer
+ * takes a zip, so build one on the host.
+ */
+async function copyTrace(sandbox: Sandbox, evidenceDir: string): Promise<string | undefined> {
+  const { code, stdout } = await sandbox.exec(["sh", "-c", "find /out/traces -type f 2>/dev/null"]);
+  if (code !== 0) return undefined;
+  const paths = stdout
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (paths.length === 0) return undefined;
+
+  const prefix = "/out/traces/";
+  const zip = new AdmZip();
+  for (const path of paths) {
+    if (!path.startsWith(prefix)) continue;
+    try {
+      zip.addFile(path.slice(prefix.length), await sandbox.readFile(path));
+    } catch {}
+  }
+  if (zip.getEntries().length === 0) return undefined;
+  zip.writeZip(join(evidenceDir, "trace.zip"));
+  return "trace.zip";
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 /** Read the finding's FileRecord, replace the finding by id, append a
