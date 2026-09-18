@@ -2,6 +2,7 @@ import type { Finding } from "@agentgg/core";
 import { openai } from "@ai-sdk/openai";
 import { MockLanguageModelV1 } from "ai/test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { REPRODUCE_CUT_SHORT } from "../src/detect.js";
 import { ClaudeAgentDetector } from "../src/detectors/claude-agent.js";
 import { asReproduceField, VercelAgentDetector } from "../src/detectors/vercel-agent.js";
@@ -165,5 +166,33 @@ describe("VercelAgentDetector.reproduceFinding — parseReproduce branches", () 
     const result = await detector.reproduceFinding(reproduceArgs());
     expect(result.verdict).toBe("not-reproduced");
     expect(result.reasoning).toContain("allowlist");
+  });
+});
+
+describe("VercelAgentDetector.reproduceFinding MCP logging", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("reports how many browser tools attached, the way the claude path reports status", async () => {
+    const { experimental_createMCPClient } = await import("ai");
+    vi.mocked(experimental_createMCPClient).mockResolvedValueOnce({
+      tools: async () => {
+        const stub = { parameters: z.object({}), execute: async () => ({}) };
+        return { browser_navigate: stub, browser_click: stub, browser_evaluate: stub };
+      },
+      close: async () => {},
+    } as never);
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    const detector = new VercelAgentDetector(
+      "openrouter",
+      scriptedModel(['{"verdict":"not-reproduced","reasoning":"did not trigger"}']),
+    );
+    await detector.reproduceFinding({
+      finding: makeFinding(),
+      baseUrl: "http://host.docker.internal:3000",
+      browserEndpoint: "http://localhost:8931/sse",
+    });
+
+    expect(log.mock.calls.flat().join("\n")).toContain("MCP playwright: 3 tool(s)");
   });
 });

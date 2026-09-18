@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { normalizeVulnSlug, selectWebReachable } from "../src/validation/web-reachable";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { logSkips, normalizeVulnSlug, selectWebReachable } from "../src/validation/web-reachable";
 
 const f = (vulnSlug: string, extra: object = {}) =>
   ({
@@ -32,5 +32,23 @@ describe("web-reachable gating", () => {
       f("xss", { dedup: { duplicateOf: "y", reasoning: "r" } }),
     ]);
     expect(selected).toHaveLength(0);
+  });
+});
+
+describe("logSkips", () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it("does not blame duplicates, which the caller already filtered out", () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    logSkips([f("hardcoded-secret")]);
+    const line = log.mock.calls[0]?.[0] as string;
+    expect(line).toContain("not web-reachable");
+    expect(line).not.toContain("duplicate");
+  });
+
+  it("says nothing when every finding was reachable", () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    logSkips([]);
+    expect(log).not.toHaveBeenCalled();
   });
 });

@@ -1348,6 +1348,9 @@ export class VercelAgentDetector implements Detector {
         transport: { type: "sse", url: args.browserEndpoint },
       });
       const tools = await client.tools();
+      // The Claude path gets an MCP status line from its SDK; this is the
+      // equivalent signal that the browser tools actually attached.
+      console.log(`  live validation: MCP playwright: ${Object.keys(tools).length} tool(s)`);
       const stop = hardStop(label, this.reproduceMaxTurns + 1);
       const gen = await this.metered(
         () =>
