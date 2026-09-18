@@ -433,6 +433,14 @@ export const Finding = z.object({
               script: z
                 .object({ path: z.string(), executed: z.boolean(), passed: z.boolean() })
                 .optional(),
+              /** HTTP exchanges pulled from the trace, for the report's request
+               *  table. Method/url/status only; full headers live in the
+               *  linked `requestsFile`, off the mirrored record. */
+              requests: z
+                .array(z.object({ method: z.string(), url: z.string(), status: z.number() }))
+                .optional(),
+              /** Filename of the replayable `.http` dump beside the evidence. */
+              requestsFile: z.string().optional(),
             })
             .optional(),
         })

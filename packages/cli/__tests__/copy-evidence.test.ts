@@ -123,6 +123,42 @@ describe("copyEvidence", () => {
     expect(ev.video).toBeUndefined();
     expect(ev.screenshots).toEqual(["shot.png"]);
   });
+
+  it("pulls the HTTP exchanges out of the trace and writes a replayable dump", async () => {
+    const snap = JSON.stringify({
+      type: "resource-snapshot",
+      snapshot: {
+        request: {
+          method: "GET",
+          url: "http://app/notes/2",
+          headers: [{ name: "Cookie", value: "user=alice" }],
+        },
+        response: { status: 200, headers: [{ name: "Content-Type", value: "text/html" }] },
+      },
+    });
+    const sb = fakeSandbox(
+      new Map([
+        ["/out/page-a.webm", Buffer.from("vid")],
+        ["/out/traces/trace-1.trace", Buffer.from("t")],
+        ["/out/traces/trace-1.network", Buffer.from(snap)],
+      ]),
+    );
+    const ev = await copyEvidence(sb, dir, FAST);
+
+    expect(ev.requests).toEqual([{ method: "GET", url: "http://app/notes/2", status: 200 }]);
+    expect(ev.requestsFile).toBe("requests.http");
+    const http = readFileSync(join(dir, "requests.http"), "utf8");
+    expect(http).toContain("GET http://app/notes/2");
+    // "show everything": the real cookie is in the linked file.
+    expect(http).toContain("Cookie: user=alice");
+  });
+
+  it("leaves requests unset when the trace has no network data", async () => {
+    const sb = fakeSandbox(new Map([["/out/page-a.webm", Buffer.from("vid")]]));
+    const ev = await copyEvidence(sb, dir, FAST);
+    expect(ev.requests).toBeUndefined();
+    expect(ev.requestsFile).toBeUndefined();
+  });
 });
 
 describe("clearSandboxOut", () => {

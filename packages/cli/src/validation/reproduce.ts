@@ -17,6 +17,7 @@ import { ensureSandboxImage } from "./image.js";
 import { runReproScript } from "./repro-script.js";
 import { type Sandbox, startLocalDockerSandbox } from "./sandbox.js";
 import { redact, type TargetAuth } from "./target-auth.js";
+import { parseTraceRequests, renderRequestsHttp } from "./trace-requests.js";
 import { logSkips, selectWebReachable } from "./web-reachable.js";
 
 type Dynamic = NonNullable<Finding["validation"]>["dynamic"];
@@ -305,8 +306,16 @@ export async function copyEvidence(
     }
   }
 
-  const trace = await copyTrace(sandbox, evidenceDir);
-  if (trace) evidence.trace = trace;
+  const traced = await copyTrace(sandbox, evidenceDir);
+  if (traced?.trace) evidence.trace = traced.trace;
+  if (traced?.networkText) {
+    const requests = parseTraceRequests(traced.networkText);
+    if (requests.length > 0) {
+      writeFileSync(join(evidenceDir, "requests.http"), renderRequestsHttp(requests));
+      evidence.requests = requests.map((r) => ({ method: r.method, url: r.url, status: r.status }));
+      evidence.requestsFile = "requests.http";
+    }
+  }
   return evidence;
 }
 
@@ -339,7 +348,10 @@ async function listOut(sandbox: Sandbox, waitMs: number, pollMs: number): Promis
  * (`*.trace`, `*.network`, `resources/`), not a zip, and the trace viewer
  * takes a zip, so build one on the host.
  */
-async function copyTrace(sandbox: Sandbox, evidenceDir: string): Promise<string | undefined> {
+async function copyTrace(
+  sandbox: Sandbox,
+  evidenceDir: string,
+): Promise<{ trace?: string; networkText?: string } | undefined> {
   const { code, stdout } = await sandbox.exec(["sh", "-c", "find /out/traces -type f 2>/dev/null"]);
   if (code !== 0) return undefined;
   const paths = stdout
@@ -350,15 +362,22 @@ async function copyTrace(sandbox: Sandbox, evidenceDir: string): Promise<string 
 
   const prefix = "/out/traces/";
   const zip = new AdmZip();
+  let networkText: string | undefined;
   for (const path of paths) {
     if (!path.startsWith(prefix)) continue;
+    let buf: Buffer;
     try {
-      zip.addFile(path.slice(prefix.length), await sandbox.readFile(path));
-    } catch {}
+      buf = await sandbox.readFile(path);
+    } catch {
+      continue;
+    }
+    zip.addFile(path.slice(prefix.length), buf);
+    // The .network file carries the request/response snapshots for the report.
+    if (path.endsWith(".network")) networkText = buf.toString("utf8");
   }
   if (zip.getEntries().length === 0) return undefined;
   zip.writeZip(join(evidenceDir, "trace.zip"));
-  return "trace.zip";
+  return { trace: "trace.zip", networkText };
 }
 
 function delay(ms: number): Promise<void> {

@@ -235,7 +235,21 @@ export function renderFindingMd(
       if (ev.video) lines.push(`- Video: ${link(ev.video)}`);
       if (ev.har) lines.push(`- HAR: ${link(ev.har)}`);
       for (const s of ev.screenshots ?? []) lines.push(`- Screenshot: ${link(s)}`);
+      if (ev.requestsFile) lines.push(`- Requests: ${link(ev.requestsFile)}`);
       lines.push("");
+
+      // The request table is the protocol-level proof: it shows what was sent
+      // and the status it got back, which the video and screenshots cannot.
+      if (ev.requests && ev.requests.length > 0) {
+        lines.push("### Requests");
+        lines.push("");
+        lines.push("| Method | URL | Status |");
+        lines.push("| --- | --- | --- |");
+        for (const r of ev.requests) lines.push(`| ${r.method} | \`${r.url}\` | ${r.status} |`);
+        if (ev.requestsFile)
+          lines.push("", `Full request and response headers: ${link(ev.requestsFile)}.`);
+        lines.push("");
+      }
     }
   }
 
