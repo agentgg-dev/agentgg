@@ -1,6 +1,6 @@
 import type { Finding } from "@agentgg/core";
 import { describe, expect, it } from "vitest";
-import { buildDedupePrompt, resolveDedup } from "../src/deduper.js";
+import { buildDedupePrompt, dedupeCandidates, resolveDedup } from "../src/deduper.js";
 
 function makeFinding(id: string, overrides: Partial<Finding> = {}): Finding {
   return {
@@ -135,5 +135,30 @@ describe("buildDedupePrompt", () => {
     });
     expect(prompt).not.toContain("verdict:");
     expect(prompt).toContain("Confidence");
+  });
+});
+
+describe("dedupeCandidates", () => {
+  it("drops findings that already carry a marker", () => {
+    const list = [
+      makeFinding("solo"),
+      makeFinding("d1", { dedup: { duplicateOf: "elsewhere", reasoning: "same" } }),
+    ];
+    expect(dedupeCandidates(list).map((x) => x.id)).toEqual(["solo"]);
+  });
+
+  it("drops a finding another one already points at", () => {
+    // p1 is somebody's primary; comparing it again could chain d1 → p1 → n1.
+    const list = [
+      makeFinding("p1"),
+      makeFinding("d1", { dedup: { duplicateOf: "p1", reasoning: "same" } }),
+      makeFinding("n1"),
+    ];
+    expect(dedupeCandidates(list).map((x) => x.id)).toEqual(["n1"]);
+  });
+
+  it("keeps every finding when nothing is deduped yet", () => {
+    const list = [makeFinding("a"), makeFinding("b")];
+    expect(dedupeCandidates(list).map((x) => x.id)).toEqual(["a", "b"]);
   });
 });

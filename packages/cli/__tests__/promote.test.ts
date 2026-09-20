@@ -64,4 +64,23 @@ describe("promotion", () => {
     ];
     expect(promote(list, (x) => x.id === "never")).toEqual([]);
   });
+
+  it("leaves a marker chain alone instead of promoting into it", () => {
+    // d1 → p1 → n1: an older run marked d1 under p1, a later one marked p1
+    // under n1. p1 is not a primary any more, so its group is not a cluster.
+    const list = [
+      f("n1", { validation: { verdict: "confirmed", reasoning: "r" } }),
+      f("p1", {
+        dedup: { duplicateOf: "n1", reasoning: "same" },
+        validation: { verdict: "false-positive", reasoning: "r" },
+      }),
+      f("d1", {
+        dedup: { duplicateOf: "p1", reasoning: "same" },
+        validation: { verdict: "confirmed", reasoning: "r" },
+      }),
+    ];
+    expect(duplicatesOfRejected(list)).toEqual([]);
+    expect(promote(list, () => true)).toEqual([]);
+    expect(list[2].dedup?.duplicateOf).toBe("p1");
+  });
 });

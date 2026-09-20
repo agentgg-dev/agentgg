@@ -132,6 +132,21 @@ every finding above is distinct, return an empty \`clusters\` array.`;
 }
 
 /**
+ * The findings a dedupe run may compare. Two exclusions, both of which
+ * would otherwise chain markers across runs (`d1 → p1 → n1`):
+ *
+ *   - a finding that already carries a marker is represented by its primary
+ *   - a finding another one points at is already a primary
+ */
+export function dedupeCandidates(findings: Finding[]): Finding[] {
+  const primaryIds = new Set<string>();
+  for (const f of findings) {
+    if (f.dedup) primaryIds.add(f.dedup.duplicateOf);
+  }
+  return findings.filter((f) => !f.dedup && !primaryIds.has(f.id));
+}
+
+/**
  * One resolved duplicate assignment: this finding id is a duplicate of
  * `duplicateOf`, with the model's reasoning.
  */

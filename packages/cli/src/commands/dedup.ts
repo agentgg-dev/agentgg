@@ -11,10 +11,11 @@ import {
 } from "@agentgg/core";
 import type { Command } from "commander";
 import { runConcurrent } from "../concurrent.js";
-import { resolveDedup } from "../deduper.js";
+import { dedupeCandidates, resolveDedup } from "../deduper.js";
 import { handleDetectorError } from "../diagnostics.js";
 import { loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
 import { logError } from "../log.js";
+import { promote } from "../promote.js";
 import {
   buildCredentialsFromOpts,
   REGION_FLAG_HELP,
@@ -70,8 +71,13 @@ interface DedupOpts {
  *
  * By default a duplicate is only MARKED (kept on disk); `--delete-
  * duplicates` strips it from its FileRecord instead. A finding that
- * already carries a dedup marker is excluded from the candidate set (its
- * primary already represents it) unless `--force` clears markers first.
+ * already carries a dedup marker, or that another finding already points
+ * at, is excluded from the candidate set unless `--force` clears markers
+ * first.
+ *
+ * Findings reaching this command often already carry verdicts, so it ends
+ * with a promotion pass: a primary the validator rejected hands its place
+ * to the first duplicate a verdict kept.
  */
 export async function runDedup(
   outputArg: string,
@@ -109,14 +115,11 @@ export async function runDedup(
     return;
   }
 
-  // Index every finding by id → {finding, record}, and group the
-  // not-yet-deduped findings by source filePath (unioning across agent
-  // shards). A finding that already carries a dedup marker is excluded:
-  // its primary already represents it, so it is not compared again.
+  // Index every finding by id → {finding, record}, then group the
+  // comparable ones by source filePath (unioning across agent shards).
   const index = new Map<string, { finding: Finding; record: FileRecord }>();
-  const byFile = new Map<string, Finding[]>();
   const dirtyRecords = new Set<FileRecord>();
-  let alreadyMarked = 0;
+  const allFindings: Finding[] = [];
   for (const record of records) {
     for (const finding of record.findings) {
       index.set(finding.id, { finding, record });
@@ -125,14 +128,15 @@ export async function runDedup(
         finding.dedup = undefined;
         dirtyRecords.add(record);
       }
-      if (finding.dedup) {
-        alreadyMarked++;
-        continue;
-      }
-      const bucket = byFile.get(finding.filePath);
-      if (bucket) bucket.push(finding);
-      else byFile.set(finding.filePath, [finding]);
+      allFindings.push(finding);
     }
+  }
+  const alreadyMarked = allFindings.filter((f) => f.dedup).length;
+  const byFile = new Map<string, Finding[]>();
+  for (const finding of dedupeCandidates(allFindings)) {
+    const bucket = byFile.get(finding.filePath);
+    if (bucket) bucket.push(finding);
+    else byFile.set(finding.filePath, [finding]);
   }
 
   // Candidate files: 2+ findings not yet deduped.
@@ -145,7 +149,7 @@ export async function runDedup(
 
   if (tasks.length === 0) {
     console.log(
-      `Nothing to de-duplicate. ${byFile.size} file(s) with undeduped findings; none have 2+ to compare${
+      `Nothing to de-duplicate. ${byFile.size} file(s) still to compare; none have 2 or more findings${
         alreadyMarked > 0 ? ` (${alreadyMarked} finding(s) already de-duplicated)` : ""
       }.`,
     );
@@ -306,6 +310,42 @@ export async function runDedup(
       handleDetectorError(opts, `dedup:${filePath}`, err, dedupAbortController);
     }
   });
+
+  // Findings here usually arrive with a verdict already (the platform
+  // validates before it calls this command), so a rejected finding can end
+  // up the primary of a group that contains a real one. Hand the group to
+  // the first duplicate a verdict kept. This command owns every shard in
+  // the directory, so nothing is off limits.
+  const promoted = promote(
+    records.flatMap((r) => r.findings),
+    () => true,
+  );
+  if (promoted.length > 0) {
+    const promotedRecords = new Set<FileRecord>();
+    for (const finding of promoted) {
+      const entry = index.get(finding.id);
+      if (entry) promotedRecords.add(entry.record);
+    }
+    for (const record of promotedRecords) {
+      record.analysisHistory.push({
+        runId: runMeta.runId,
+        phase: "dedup",
+        ranAt: new Date().toISOString(),
+        durationMs: 0,
+        provider: detector.name,
+        agentSlugs: [record.agentSlug],
+        findingCount: record.findings.length,
+      });
+      dirtyRecords.add(record);
+      try {
+        writeFileRecord(outputDir, record);
+      } catch (err) {
+        logError(`persist (promotion) failed for ${record.filePath}: ${(err as Error).message}`);
+      }
+    }
+    const heirs = promoted.filter((f) => !f.dedup).length;
+    console.log(`  Promoted ${heirs} finding(s) whose primary was rejected.`);
+  }
 
   const completedAt = new Date();
   completeRun(outputDir, runMeta.runId, "done", {

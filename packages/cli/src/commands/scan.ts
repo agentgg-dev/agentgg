@@ -34,7 +34,7 @@ import { defaultAgentDirs, loadAllAgents } from "../agent-catalog.js";
 import { installOfficialAgents } from "../agents-install.js";
 import { anchorLoad, packBatches, shardCandidate, shardKeyOf } from "../anchors.js";
 import { runConcurrent } from "../concurrent.js";
-import { resolveDedup } from "../deduper.js";
+import { dedupeCandidates, resolveDedup } from "../deduper.js";
 import { loadDefaultScope } from "../default-scope.js";
 import type { AgentCandidate } from "../detect.js";
 import { FatalScanError, handleDetectorError } from "../diagnostics.js";
@@ -1592,10 +1592,8 @@ export async function runScan(
     // non-primary findings with a `dedup` field; `--delete-duplicates`
     // strips them instead. The report render below then collapses them.
     if (opts.dedup && findings.length > 0) {
-      // A finding that already carries a marker is represented by its
-      // primary, so it is not compared again.
-      const comparable = findings.filter(
-        (f) => f.filePath && f.filePath !== "(unknown)" && !f.dedup,
+      const comparable = dedupeCandidates(findings).filter(
+        (f) => f.filePath && f.filePath !== "(unknown)",
       );
       const byFile = new Map<string, Finding[]>();
       for (const f of comparable) {

@@ -11,7 +11,9 @@ function clusters(findings: Finding[]): Map<string, { primary: Finding; dupes: F
     const primaryId = f.dedup?.duplicateOf;
     if (!primaryId) continue;
     const primary = byId.get(primaryId);
-    if (!primary) continue;
+    // A "primary" that carries a marker of its own is a chain, not a
+    // cluster: leave it to the next dedupe run rather than promoting into it.
+    if (!primary || primary.dedup) continue;
     const entry = out.get(primaryId) ?? { primary, dupes: [] };
     entry.dupes.push(f);
     out.set(primaryId, entry);
