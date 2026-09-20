@@ -39,8 +39,9 @@ interface DedupOpts {
   force?: boolean;
   /**
    * Physically remove duplicate findings from their FileRecords instead of
-   * just marking them. Off by default — the safe default keeps every
-   * finding on disk and only adds the `dedup` marker.
+   * just marking them, once the promotion pass has run. Off by default —
+   * the safe default keeps every finding on disk and only adds the `dedup`
+   * marker.
    */
   deleteDuplicates?: boolean;
   verbose?: boolean;
@@ -269,22 +270,17 @@ export async function runDedup(
       for (const a of assignments) {
         const entry = index.get(a.id);
         if (!entry) continue;
-        if (opts.deleteDuplicates) {
-          entry.record.findings = entry.record.findings.filter((f) => f.id !== a.id);
-        } else {
-          entry.finding.dedup = {
-            duplicateOf: a.duplicateOf,
-            reasoning: a.reasoning,
-            runId: runMeta.runId,
-          };
-        }
+        entry.finding.dedup = {
+          duplicateOf: a.duplicateOf,
+          reasoning: a.reasoning,
+          runId: runMeta.runId,
+        };
         dirtyRecords.add(entry.record);
         localDirtyRecords.add(entry.record);
         totalDuplicates++;
       }
       if (opts.verbose) {
-        const verb = opts.deleteDuplicates ? "deleted" : "marked";
-        console.log(`  ${filePath}: ${verb} ${assignments.length} duplicate(s)`);
+        console.log(`  ${filePath}: marked ${assignments.length} duplicate(s)`);
       }
 
       // Per-task persistence: write each dirtied record now so SIGTERM
@@ -345,6 +341,23 @@ export async function runDedup(
     }
     const heirs = promoted.filter((f) => !f.dedup).length;
     console.log(`  Promoted ${heirs} finding(s) whose primary was rejected.`);
+  }
+
+  // `--delete-duplicates` strips this run's duplicates only now, after
+  // promotion: a duplicate may have just taken over from a rejected primary.
+  // Markers from earlier runs are left alone, as they were before.
+  if (opts.deleteDuplicates) {
+    for (const record of records) {
+      const kept = record.findings.filter((f) => f.dedup?.runId !== runMeta.runId);
+      if (kept.length === record.findings.length) continue;
+      record.findings = kept;
+      dirtyRecords.add(record);
+      try {
+        writeFileRecord(outputDir, record);
+      } catch (err) {
+        logError(`persist (delete) failed for ${record.filePath}: ${(err as Error).message}`);
+      }
+    }
   }
 
   const completedAt = new Date();
@@ -423,7 +436,7 @@ export function registerDedupCommand(program: Command): void {
     )
     .option(
       "--delete-duplicates",
-      "Physically remove duplicate findings from their FileRecords (default: keep them and only add a `dedup` marker).",
+      "Physically remove this run's duplicate findings from their FileRecords (default: keep them and only add a `dedup` marker). Removal happens after promotion, so a duplicate that takes over from a rejected primary is kept.",
     )
     .option(
       "--exclude-false-positives",

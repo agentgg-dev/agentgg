@@ -134,6 +134,25 @@ describe("agentgg dedup over findings that already carry verdicts", () => {
     expect(fp.validation?.verdict).toBe("false-positive");
   });
 
+  it("keeps the promoted finding under --delete-duplicates", async () => {
+    seed(
+      finding("fp-1", "alpha", {
+        validation: { verdict: "false-positive", reasoning: "not reachable" },
+      }),
+      finding("real-1", "beta", {
+        validation: { verdict: "confirmed", reasoning: "reachable" },
+      }),
+    );
+    detectorMock.dedupeFindings.mockImplementation(async () => [
+      { primaryId: "fp-1", duplicateIds: ["real-1"], reasoning: "same sink" },
+    ]);
+
+    await runDedup(outputDir, { summary: false, deleteDuplicates: true }, env);
+
+    expect(onDisk("beta", "real-1").dedup).toBeUndefined();
+    expect(readFileRecord(outputDir, "alpha", FILE)?.findings).toEqual([]);
+  });
+
   it("leaves a cluster alone when the primary's verdict kept it", async () => {
     seed(
       finding("real-1", "alpha", {
