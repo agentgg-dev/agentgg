@@ -1,0 +1,53 @@
+import type { Finding } from "@agentgg/core";
+
+const REJECTED = new Set(["false-positive", "out-of-scope"]);
+const isRejected = (f: Finding) => REJECTED.has(f.validation?.verdict ?? "");
+
+/** Clusters keyed by primary id, duplicates in their stored order. */
+function clusters(findings: Finding[]): Map<string, { primary: Finding; dupes: Finding[] }> {
+  const byId = new Map(findings.map((f) => [f.id, f]));
+  const out = new Map<string, { primary: Finding; dupes: Finding[] }>();
+  for (const f of findings) {
+    const primaryId = f.dedup?.duplicateOf;
+    if (!primaryId) continue;
+    const primary = byId.get(primaryId);
+    if (!primary) continue;
+    const entry = out.get(primaryId) ?? { primary, dupes: [] };
+    entry.dupes.push(f);
+    out.set(primaryId, entry);
+  }
+  return out;
+}
+
+/** Duplicates worth validating: their primary was rejected, so one of them
+ *  may be the finding that ships. */
+export function duplicatesOfRejected(findings: Finding[]): Finding[] {
+  const out: Finding[] = [];
+  for (const { primary, dupes } of clusters(findings).values()) {
+    if (!isRejected(primary)) continue;
+    for (const d of dupes) if (!d.validation) out.push(d);
+  }
+  return out;
+}
+
+/** Hand a rejected primary's place to the first duplicate validation kept.
+ *  Returns every finding whose marker changed. */
+export function promote(findings: Finding[], canMark: (f: Finding) => boolean): Finding[] {
+  const changed: Finding[] = [];
+  for (const { primary, dupes } of clusters(findings).values()) {
+    if (!isRejected(primary)) continue;
+    const heir = dupes.find((d) => d.validation && !isRejected(d));
+    if (!heir) continue;
+    const cluster = [primary, ...dupes];
+    if (!cluster.every(canMark)) continue;
+    const reasoning = heir.dedup?.reasoning ?? "";
+    const runId = heir.dedup?.runId;
+    heir.dedup = undefined;
+    for (const f of cluster) {
+      if (f.id === heir.id) continue;
+      f.dedup = { duplicateOf: heir.id, reasoning, ...(runId ? { runId } : {}) };
+    }
+    changed.push(...cluster);
+  }
+  return changed;
+}
