@@ -18,13 +18,15 @@ describe("promotion", () => {
   it("promotes the first surviving duplicate and demotes the rejected primary", () => {
     const list = [
       f("p1", { validation: { verdict: "false-positive", reasoning: "r" } }),
-      f("d1", { dedup: { duplicateOf: "p1", reasoning: "same" }, validation: { verdict: "confirmed", reasoning: "r" } }),
-      f("d2", { dedup: { duplicateOf: "p1", reasoning: "same" } }),
+      f("d1", { dedup: { duplicateOf: "p1", reasoning: "heir-vs-p1" }, validation: { verdict: "confirmed", reasoning: "r" } }),
+      f("d2", { dedup: { duplicateOf: "p1", reasoning: "d2-vs-p1" } }),
     ];
     const changed = promote(list, () => true);
     expect(list[1].dedup).toBeUndefined();
     expect(list[0].dedup?.duplicateOf).toBe("d1");
+    expect(list[0].dedup?.reasoning).toBe("heir-vs-p1");
     expect(list[2].dedup?.duplicateOf).toBe("d1");
+    expect(list[2].dedup?.reasoning).toBe("d2-vs-p1");
     expect(list[0].validation?.verdict).toBe("false-positive");
     expect(changed.map((x) => x.id).sort()).toEqual(["d1", "d2", "p1"]);
   });

@@ -40,12 +40,18 @@ export function promote(findings: Finding[], canMark: (f: Finding) => boolean): 
     if (!heir) continue;
     const cluster = [primary, ...dupes];
     if (!cluster.every(canMark)) continue;
-    const reasoning = heir.dedup?.reasoning ?? "";
-    const runId = heir.dedup?.runId;
+    const heirReasoning = heir.dedup?.reasoning ?? "";
+    const heirRunId = heir.dedup?.runId;
     heir.dedup = undefined;
     for (const f of cluster) {
       if (f.id === heir.id) continue;
-      f.dedup = { duplicateOf: heir.id, reasoning, ...(runId ? { runId } : {}) };
+      if (f.id === primary.id) {
+        // Demoted primary: gets heir's original reasoning/runId (that pair was actually compared).
+        f.dedup = { duplicateOf: heir.id, reasoning: heirReasoning, ...(heirRunId ? { runId: heirRunId } : {}) };
+      } else {
+        // Non-primary duplicates: keep their own reasoning/runId (never directly compared to heir).
+        f.dedup = { duplicateOf: heir.id, reasoning: f.dedup?.reasoning ?? "", ...(f.dedup?.runId ? { runId: f.dedup.runId } : {}) };
+      }
     }
     changed.push(...cluster);
   }
