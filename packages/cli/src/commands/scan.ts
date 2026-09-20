@@ -1882,12 +1882,15 @@ export async function runScan(
         // and fileCache is only touched in await-free regions, so workers
         // don't race; verdicts are persisted below once the pool drains.
         await runConcurrent(validatable, concurrency, async (finding) => {
-          await validateOne(finding);
-          validateDone++;
-          updateRunStage(outDir, runMeta.runId, "validate", {
-            done: validateDone,
-            total: validatable.length,
-          });
+          try {
+            await validateOne(finding);
+          } finally {
+            validateDone++;
+            updateRunStage(outDir, runMeta.runId, "validate", {
+              done: validateDone,
+              total: validatable.length,
+            });
+          }
         });
         persistWave(validatable.filter((f) => f.validation));
 

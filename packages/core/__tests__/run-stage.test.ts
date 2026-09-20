@@ -31,11 +31,19 @@ describe("updateRunStage", () => {
     expect(() => updateRunStage(outputDir, "missing-run-id", "detect")).not.toThrow();
   });
 
-  it("clears a prior stage's progress when the new stage call passes none", () => {
+  it("clears a prior stage's progress when the new stage call passes none, and a same-stage call inside the throttle window does not leak it back", () => {
     updateRunStage(outputDir, runId, "detect", { done: 5, total: 5 });
     updateRunStage(outputDir, runId, "report");
     const meta = readRunMeta(outputDir, runId);
     expect(meta?.stage).toBe("report");
     expect(meta?.progress).toBeUndefined();
+
+    // Same stage, well inside the 2s throttle window: this write is
+    // swallowed, but it must not resurrect the "detect" progress cleared
+    // above — the on-disk state should stay exactly what it was.
+    updateRunStage(outputDir, runId, "report", { done: 1, total: 2 });
+    const afterThrottled = readRunMeta(outputDir, runId);
+    expect(afterThrottled?.stage).toBe("report");
+    expect(afterThrottled?.progress).toBeUndefined();
   });
 });
