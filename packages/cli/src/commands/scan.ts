@@ -22,6 +22,7 @@ import {
   readAgentRun,
   readFileRecord,
   readScanPlan,
+  updateRunStage,
   upsertScanMeta,
   writeAgentRun,
   writeFileRecord,
@@ -770,6 +771,7 @@ export async function runScan(
     const skipRecon = opts.recon === false;
     let recon: ReconReport;
     let reconBlock: string;
+    updateRunStage(outDir, runMeta.runId, "recon");
     if (skipRecon) {
       console.log(
         "\n[1/3] Recon — skipped (--no-recon); every selected agent runs unconditionally.",
@@ -1415,11 +1417,13 @@ export async function runScan(
     // -------- Phase 2: drain the batch pool --------
     // One bounded worker pool over every enqueued (agent, batch) pair.
     // Batches from different agents run concurrently up to `concurrency`.
+    updateRunStage(outDir, runMeta.runId, "detect", { done: 0, total: batchQueue.length });
     if (batchQueue.length > 0) {
       console.log(
         `  Running ${batchQueue.length} batch(es) across ${runtimeBySlug.size} agent(s) at concurrency ${concurrency}…`,
       );
     }
+    let batchesDone = 0;
     await runConcurrent(batchQueue, concurrency, async ({ agent, batch }) => {
       const rt = runtimeBySlug.get(agent.slug);
       if (!rt) return;
@@ -1533,6 +1537,11 @@ export async function runScan(
         // shared pool an agent isn't a contiguous runtime unit (its batches
         // interleave with other agents'), so filesReviewed/hitCount are the
         // meaningful per-agent signals; whole-scan time lives in RunMeta.
+        batchesDone++;
+        updateRunStage(outDir, runMeta.runId, "detect", {
+          done: batchesDone,
+          total: batchQueue.length,
+        });
         rt.remaining--;
         if (rt.remaining === 0 && !rt.failed) {
           try {
@@ -1597,9 +1606,11 @@ export async function runScan(
       const dedupeTasks = [...byFile.entries()]
         .filter(([, fs]) => fs.length >= 2)
         .map(([filePath, fs]) => ({ filePath, findings: fs }));
+      updateRunStage(outDir, runMeta.runId, "dedupe", { done: 0, total: dedupeTasks.length });
 
       if (dedupeTasks.length > 0) {
         console.log(`\nDe-duplicating across ${dedupeTasks.length} file(s)`);
+        let dedupeDone = 0;
         const dedupeFileCache = new Map<string, string | null>();
         const dupedByShard = new Map<
           string,
@@ -1647,6 +1658,12 @@ export async function runScan(
             }
           } catch (err) {
             handleDetectorError(opts, `dedup:${filePath}`, err, scanAbortController);
+          } finally {
+            dedupeDone++;
+            updateRunStage(outDir, runMeta.runId, "dedupe", {
+              done: dedupeDone,
+              total: dedupeTasks.length,
+            });
           }
         });
         // Persist dedup markers back into the per-(agent, file) shards.
@@ -1711,7 +1728,9 @@ export async function runScan(
       // `--revalidate-all` bypasses the skip and forces re-classification.
       const validatable = opts.revalidateAll ? candidates : candidates.filter((f) => !f.validation);
       const carriedOver = candidates.length - validatable.length;
+      updateRunStage(outDir, runMeta.runId, "validate", { done: 0, total: validatable.length });
       if (validatable.length > 0 || carriedOver > 0) {
+        let validateDone = 0;
         const scopeNote = scopeContent ? " with scope" : "";
         const carryNote = carriedOver > 0 ? ` (${carriedOver} cached)` : "";
         const modeNote = scopeOnlyValidate ? " — scope-only mode" : "";
@@ -1862,7 +1881,14 @@ export async function runScan(
         // One bounded pool over findings. Each finding is a distinct object
         // and fileCache is only touched in await-free regions, so workers
         // don't race; verdicts are persisted below once the pool drains.
-        await runConcurrent(validatable, concurrency, validateOne);
+        await runConcurrent(validatable, concurrency, async (finding) => {
+          await validateOne(finding);
+          validateDone++;
+          updateRunStage(outDir, runMeta.runId, "validate", {
+            done: validateDone,
+            total: validatable.length,
+          });
+        });
         persistWave(validatable.filter((f) => f.validation));
 
         // Promotion wave: a rejected primary took its whole group out of the
@@ -1912,6 +1938,7 @@ export async function runScan(
         findings,
         detector,
         outDir,
+        runId: runMeta.runId,
         targetUrl: opts.targetUrl,
         auth: parseTargetAuth(opts),
         context: opts.targetContext,
@@ -1945,12 +1972,14 @@ export async function runScan(
       );
       const skippedHasScore = findings.filter((f) => f.cvss).length;
       const skippedDisq = findings.filter(isDisqualified).length;
+      updateRunStage(outDir, runMeta.runId, "score", { done: 0, total: scorable.length });
       if (scorable.length > 0) {
         console.log(
           `\nScoring ${scorable.length} finding(s)` +
             (skippedHasScore > 0 ? ` (${skippedHasScore} already scored)` : "") +
             (skippedDisq > 0 ? ` (${skippedDisq} skipped: FP/out-of-scope)` : ""),
         );
+        let scoreDone = 0;
         const scoreFileCache = new Map<string, string | null>();
         const scoredByShard = new Map<
           string,
@@ -1960,47 +1989,55 @@ export async function runScan(
         // is mutated only after the await (a synchronous get/push/set with no
         // yield), so concurrent workers can't lose an entry.
         await runConcurrent(scorable, concurrency, async (finding) => {
-          let content = scoreFileCache.get(finding.filePath);
-          if (content === undefined) {
-            try {
-              content = readFileSync(resolve(root, finding.filePath), "utf8");
-            } catch {
-              content = null;
-            }
-            scoreFileCache.set(finding.filePath, content);
-          }
-          if (content === null) {
-            if (opts.verbose) {
-              console.log(`    skip score ${finding.id}: file not readable`);
-            }
-            return;
-          }
           try {
-            const cvss = await detector.scoreFinding({
-              finding,
-              fileContent: content,
-              recon,
-              signal: scanAbortController.signal,
-            });
-            finding.cvss = cvss;
-            finding.severity = cvss.severity;
-            const normalized = finding.filePath.replace(/\\/g, "/");
-            const key = `${finding.agentSlug} ${normalized}`;
-            const entry = scoredByShard.get(key) ?? {
-              agentSlug: finding.agentSlug,
-              filePath: normalized,
-              findings: [],
-            };
-            entry.findings.push(finding);
-            scoredByShard.set(key, entry);
-            if (opts.verbose) {
-              const loc = finding.lineRange ? `:${finding.lineRange[0]}` : "";
-              console.log(
-                `    ${cvss.severity.padEnd(8)} ${cvss.baseScore.toFixed(1).padStart(4)}  ${findingFilenameSlug(finding)}  ${finding.filePath}${loc}`,
-              );
+            let content = scoreFileCache.get(finding.filePath);
+            if (content === undefined) {
+              try {
+                content = readFileSync(resolve(root, finding.filePath), "utf8");
+              } catch {
+                content = null;
+              }
+              scoreFileCache.set(finding.filePath, content);
             }
-          } catch (err) {
-            handleDetectorError(opts, `score:${finding.id}`, err, scanAbortController);
+            if (content === null) {
+              if (opts.verbose) {
+                console.log(`    skip score ${finding.id}: file not readable`);
+              }
+              return;
+            }
+            try {
+              const cvss = await detector.scoreFinding({
+                finding,
+                fileContent: content,
+                recon,
+                signal: scanAbortController.signal,
+              });
+              finding.cvss = cvss;
+              finding.severity = cvss.severity;
+              const normalized = finding.filePath.replace(/\\/g, "/");
+              const key = `${finding.agentSlug} ${normalized}`;
+              const entry = scoredByShard.get(key) ?? {
+                agentSlug: finding.agentSlug,
+                filePath: normalized,
+                findings: [],
+              };
+              entry.findings.push(finding);
+              scoredByShard.set(key, entry);
+              if (opts.verbose) {
+                const loc = finding.lineRange ? `:${finding.lineRange[0]}` : "";
+                console.log(
+                  `    ${cvss.severity.padEnd(8)} ${cvss.baseScore.toFixed(1).padStart(4)}  ${findingFilenameSlug(finding)}  ${finding.filePath}${loc}`,
+                );
+              }
+            } catch (err) {
+              handleDetectorError(opts, `score:${finding.id}`, err, scanAbortController);
+            }
+          } finally {
+            scoreDone++;
+            updateRunStage(outDir, runMeta.runId, "score", {
+              done: scoreDone,
+              total: scorable.length,
+            });
           }
         });
         // Persist scored findings back into the per-(agent, file) shards.
@@ -2052,6 +2089,7 @@ export async function runScan(
 
     const completedAt = new Date();
 
+    updateRunStage(outDir, runMeta.runId, "report");
     // `--no-summary` skips the report render entirely. Findings are already
     // persisted to state/files/*, so `agentgg summary <outDir>` can produce
     // the markdown later without re-running detection.

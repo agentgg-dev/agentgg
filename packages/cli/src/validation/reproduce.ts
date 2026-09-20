@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import type { Finding, LiveResult } from "@agentgg/core";
-import { getEvidenceDir, readFileRecord, writeFileRecord } from "@agentgg/core";
+import { getEvidenceDir, readFileRecord, updateRunStage, writeFileRecord } from "@agentgg/core";
 import AdmZip from "adm-zip";
 import type { Detector } from "../detect.js";
 import { logWarn } from "../log.js";
@@ -52,6 +52,8 @@ export async function runReproducePhase(args: {
   findings: Finding[];
   detector: Detector;
   outDir: string;
+  /** The scan's run id, so live-validation progress lands in the same run sidecar. */
+  runId: string;
   targetUrl: string;
   auth: TargetAuth;
   context?: string;
@@ -66,7 +68,17 @@ export async function runReproducePhase(args: {
   force?: boolean;
   signal: AbortSignal;
 }): Promise<void> {
-  const { findings, detector, outDir, targetUrl, auth, context, image, signal } = args;
+  const {
+    findings,
+    detector,
+    outDir,
+    runId: scanRunId,
+    targetUrl,
+    auth,
+    context,
+    image,
+    signal,
+  } = args;
 
   // Duplicates are collapsed out of the report, so exclude them here too; the
   // live-validation counts then reconcile with the findings/ directory.
@@ -105,6 +117,8 @@ export async function runReproducePhase(args: {
   }
 
   console.log(`  live validation: reproducing ${work.length} finding(s) against ${targetUrl}`);
+  const liveTotal = Math.min(work.length, args.max);
+  updateRunStage(outDir, scanRunId, "live", { done: 0, total: liveTotal });
 
   // The browser runs inside the container, so a target the host publishes on
   // localhost must be reached via host.docker.internal. Probing stays on the
@@ -140,6 +154,7 @@ export async function runReproducePhase(args: {
         break;
       }
       done++;
+      updateRunStage(outDir, scanRunId, "live", { done, total: liveTotal });
 
       // Announce the finding BEFORE reproducing it, not only its verdict after,
       // so a run that vanishes names the finding it died on.

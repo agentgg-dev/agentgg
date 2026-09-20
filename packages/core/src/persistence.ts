@@ -211,6 +211,42 @@ export function completeRun(
   writeRunMeta(outputDir, updated);
 }
 
+/** Minimum time between progress writes within the same stage, in ms. */
+const STAGE_THROTTLE_MS = 2000;
+
+/** Last written stage + time per runId, so repeated same-stage calls throttle. */
+const lastStageWrite = new Map<string, { stage: string; at: number }>();
+
+/**
+ * Record the pipeline stage (and optional progress) a run is in. Always
+ * writes on a stage change; within the same stage, writes at most once
+ * every `STAGE_THROTTLE_MS` so a tight per-finding loop doesn't hammer
+ * disk. Never throws — a run file that can't be written must not fail
+ * the scan it's reporting on.
+ *
+ * `progress` is always assigned, including when omitted: a stage change
+ * with no progress argument clears the previous stage's counts instead of
+ * letting them linger under the new stage's name.
+ */
+export function updateRunStage(
+  outputDir: string,
+  runId: string,
+  stage: NonNullable<RunMeta["stage"]>,
+  progress?: RunMeta["progress"],
+): void {
+  try {
+    const now = Date.now();
+    const last = lastStageWrite.get(runId);
+    if (last && last.stage === stage && now - last.at < STAGE_THROTTLE_MS) return;
+    const meta = readRunMeta(outputDir, runId);
+    if (!meta) return;
+    writeRunMeta(outputDir, { ...meta, stage, progress });
+    lastStageWrite.set(runId, { stage, at: now });
+  } catch {
+    // best-effort; progress reporting must never fail a scan
+  }
+}
+
 /**
  * All runs in an output dir, newest-first. Malformed JSON is skipped
  * so a single corrupt file doesn't break `status`.

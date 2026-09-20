@@ -1059,6 +1059,12 @@ export const RunMeta = z.object({
   runId: z.string(),
   type: z.enum(["scan", "detect", "validate", "dedup"]),
   phase: z.enum(["running", "done", "error"]),
+  /** Pipeline stage this run is currently in. Absent before the first stage write. */
+  stage: z.enum(["recon", "detect", "dedupe", "validate", "live", "score", "report"]).optional(),
+  /** Units completed within the current stage, e.g. batches or findings. */
+  progress: z
+    .object({ done: z.number().int().nonnegative(), total: z.number().int().nonnegative() })
+    .optional(),
   startedAt: z.string(),
   completedAt: z.string().optional(),
   /**

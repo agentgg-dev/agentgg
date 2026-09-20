@@ -114,6 +114,7 @@ describe("evidence isolation between findings", () => {
       // biome-ignore lint/suspicious/noExplicitAny: only reproduceFinding is exercised
       detector: detector as any,
       outDir,
+      runId: "test-run",
       targetUrl: "http://localhost:3000",
       auth: {},
       image: "img",
@@ -159,6 +160,7 @@ describe("evidence isolation between findings", () => {
       // biome-ignore lint/suspicious/noExplicitAny: only reproduceFinding is exercised
       detector: detector as any,
       outDir,
+      runId: "test-run",
       targetUrl: "http://localhost:3000",
       auth: {},
       image: "img",

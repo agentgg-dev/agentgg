@@ -95,6 +95,7 @@ export async function runLiveValidate(
     findings,
     detector,
     outDir: outputDir,
+    runId: runMeta.runId,
     targetUrl: opts.targetUrl,
     auth: parseTargetAuth(opts),
     context: opts.targetContext,
