@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { extname, resolve } from "node:path";
-import type { Agent, CvssScore, Finding, ReconReport } from "@agentgg/core";
+import type { Agent, CvssScore, Finding, LiveResult, ReconReport } from "@agentgg/core";
 import { z } from "zod";
 import type { AgentSpec } from "./agent-spec.js";
 import type { PreFilterHit, TaintStep } from "./pre-filter.js";
 import type { UsageMeter } from "./usage-meter.js";
+import { proofRulesFor } from "./validation/proof-rules.js";
 import type { TargetAuth } from "./validation/target-auth.js";
 
 /**
@@ -147,29 +148,30 @@ export const SuggestExcludesResult = z.object({
 export type SuggestExcludesResult = z.infer<typeof SuggestExcludesResult>;
 
 /**
- * What the reproduce pass returns — the LLM's verdict after driving a
+ * What the reproduce pass returns — the LLM's result after driving a
  * real browser (via Playwright MCP tools) against a live target to
- * confirm or refute one finding. `script` is only meaningful when
- * `verdict` is `confirmed`; the detector enforces that at the call site,
- * not here, so a model that omits or over-populates the field still
- * validates.
+ * reproduce, refute, or fail to settle one finding. `script` is only
+ * meaningful when `result` is `reproduced`; the detector enforces that at
+ * the call site, not here, so a model that omits or over-populates the
+ * field still validates.
  */
 export const ReproduceFindingResult = z.object({
-  verdict: z
-    .enum(["confirmed", "not-reproduced"])
+  result: z
+    .enum(["reproduced", "refuted", "inconclusive"])
     .describe(
-      "'confirmed' = you drove the browser through the PoC and observed the vulnerable behavior. 'not-reproduced' = the PoC did not trigger it (fixed, blocked, or the described behavior did not occur).",
+      "'reproduced' = you drove the browser through the PoC, observed the vulnerable behavior, and it meets the class's proof rules. 'refuted' = the attack ran and a named control blocked it. 'inconclusive' = anything else, including a run you could not finish.",
     ),
   reasoning: z
     .string()
     .describe(
-      "Short prose explaining what you did in the browser and what you observed, and why that supports the verdict.",
+      "Short prose explaining what you did in the browser and what you observed, and why that supports the result.",
     ),
+  counterevidence: z.string().describe("The strongest case against your own result."),
   script: z
     .string()
     .optional()
     .describe(
-      "Self-contained Playwright test source (a repro.spec.ts) that replays every step you performed, including login. Required when verdict is 'confirmed'; omit otherwise.",
+      "Self-contained Playwright test source (a repro.spec.ts) that replays every step you performed, including login. Required when result is 'reproduced'; omit otherwise.",
     ),
 });
 export type ReproduceFindingResult = z.infer<typeof ReproduceFindingResult>;
@@ -293,13 +295,16 @@ export interface Detector {
   /**
    * Live-validation reproduce pass — optional. Drives a real browser
    * against `baseUrl` (via the Playwright MCP server the sandbox
-   * hosts at `browserEndpoint`, an SSE URL) to confirm or refute one
-   * finding's `poc`, then returns a verdict and, when confirmed, a
+   * hosts at `browserEndpoint`, an SSE URL) to reproduce or refute one
+   * finding's `poc`, then returns a result and, when reproduced, a
    * generated Playwright test that replays it. The session gets ONLY the
    * Playwright MCP tools — no source-tree access — so it works entirely
-   * against the running application. Optional on the interface so a
-   * backend without tool-driven browser support can skip live validation
-   * entirely; callers invoke it as `detector.reproduceFinding?.(args)`.
+   * against the running application. `staticVerdict`/`staticReasoning`
+   * carry the static validator's own verdict, when one ran, so the live
+   * agent can check its evidence against that reasoning rather than
+   * re-deriving it blind. Optional on the interface so a backend without
+   * tool-driven browser support can skip live validation entirely;
+   * callers invoke it as `detector.reproduceFinding?.(args)`.
    */
   reproduceFinding?(args: {
     finding: Finding;
@@ -314,14 +319,20 @@ export interface Detector {
     /** Per-call turn cap. Overrides the detector's default when set, so a
      *  complex target can be given more browser steps than a demo needs. */
     maxTurns?: number;
+    /** Static validator's verdict for this finding, when it ran. */
+    staticVerdict?: string;
+    /** Static validator's reasoning, quoted into the prompt verbatim. */
+    staticReasoning?: string;
     signal?: AbortSignal;
   }): Promise<{
-    verdict: "confirmed" | "not-reproduced";
+    result: LiveResult;
     reasoning: string;
-    /** True when the model declined to reproduce (refusal); `verdict` is
-     *  `not-reproduced`. Mirrors `validateFinding`'s refusal handling. */
+    /** The strongest case the live agent could make against its own result. */
+    counterevidence: string;
+    /** True when the model declined to reproduce (refusal); `result` is
+     *  `inconclusive`. Mirrors `validateFinding`'s refusal handling. */
     refused?: boolean;
-    /** The generated `repro.spec.ts` source. Only present when confirmed. */
+    /** The generated `repro.spec.ts` source. Only present when reproduced. */
     script?: string;
   }>;
 
@@ -694,6 +705,7 @@ export function buildReproducePrompt(
   baseUrl: string,
   auth?: TargetAuth,
   context?: string,
+  staticReview?: { verdict: string; reasoning: string },
 ): string {
   const lineHint = finding.lineRange
     ? `lines ${finding.lineRange[0]}–${finding.lineRange[1]}`
@@ -711,6 +723,12 @@ If the target requires login, sign in first with:
       : "";
 
   const contextBlock = context ? `\n## Additional context\n\n${context}\n` : "";
+
+  const proofRulesBlock = `\n## What counts as proof for this class\n\n${proofRulesFor(finding)}\n`;
+
+  const staticReviewBlock = staticReview
+    ? `\n## Source review of this finding\n\nA reviewer with the source code reached the verdict \`${staticReview.verdict}\`:\n\n${staticReview.reasoning}\n\nYour result counts as 'reproduced' ONLY if what you observed answers this\nreview. Say in your reasoning how it does.\n`
+    : "";
 
   return `You are live-testing a security finding against a running
 application, using only the browser tools attached to this session.
@@ -734,25 +752,29 @@ ${finding.poc}
 
 ### Impact
 ${finding.impact}
-
+${proofRulesBlock}${staticReviewBlock}
 ## Your task
 
 1. Navigate to ${baseUrl} and, if credentials were given above, log in.
 2. Reproduce the PoC above against the live application.
 3. At the point the vulnerable behavior would appear, take a screenshot
    as proof, whether or not it reproduces.
-4. Decide a verdict:
-   - 'confirmed': you observed the described vulnerable behavior.
-   - 'not-reproduced': the PoC did not trigger it (fixed, blocked by a
-     guard, or the behavior described did not occur).
-5. When 'confirmed', also write a self-contained Playwright test (the
+4. Decide a result:
+   - 'reproduced': you observed the vulnerable behavior, it meets the proof
+     rules above, and it answers the source review.
+   - 'refuted': the attack ran and a named control blocked it. Name the
+     control.
+   - 'inconclusive': anything else, including a run you could not finish and
+     evidence that does not meet the proof rules.
+5. When 'reproduced', also write a self-contained Playwright test (the
    source for a \`repro.spec.ts\` file) that replays every step you just
    performed, including login, so someone else can re-run it and see the
-   same result. Omit \`script\` when 'not-reproduced'.
+   same result. Omit \`script\` otherwise.
 
 Be honest: a PoC that fails to reproduce is a valid, useful outcome. Do
-not confirm on a guess; only confirm what you actually observed in the
-browser.`;
+not report 'reproduced' on a guess; only report what you actually observed
+in the browser, and give the strongest case against your own result in
+\`counterevidence\`.`;
 }
 
 /**

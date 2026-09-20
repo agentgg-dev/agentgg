@@ -1,6 +1,6 @@
 import { type FileHandle, open, readdir, readFile } from "node:fs/promises";
 import { join, relative, resolve } from "node:path";
-import type { CvssScore, Finding, ReconReport } from "@agentgg/core";
+import type { CvssScore, Finding, LiveResult, ReconReport } from "@agentgg/core";
 import {
   type CoreMessage,
   experimental_createMCPClient,
@@ -418,7 +418,7 @@ const ARTIFACT: Record<ToolLoopPhase, string> = {
   validate: "verdict JSON",
   recon: "brief JSON",
   "create-agent": "agent spec JSON",
-  reproduce: "reproduction verdict JSON",
+  reproduce: "reproduction result JSON",
 };
 
 /** Env suffix per phase for the budget override below. */
@@ -1325,19 +1325,27 @@ export class VercelAgentDetector implements Detector {
     browserEndpoint: string;
     context?: string;
     maxTurns?: number;
+    staticVerdict?: string;
+    staticReasoning?: string;
     signal?: AbortSignal;
   }): Promise<{
-    verdict: "confirmed" | "not-reproduced";
+    result: LiveResult;
     reasoning: string;
+    counterevidence: string;
     refused?: boolean;
     script?: string;
   }> {
     const label = sessionLabel(`reproduce:${args.finding.id}`);
+    const staticReview =
+      args.staticVerdict != null && args.staticReasoning != null
+        ? { verdict: args.staticVerdict, reasoning: args.staticReasoning }
+        : undefined;
     const prompt = `${buildReproducePrompt(
       args.finding,
       args.baseUrl,
       args.auth,
       args.context,
+      staticReview,
     )}\n\n${reproduceJsonInstruction()}`;
     // Tools come only from the sandbox's Playwright MCP server: no Read/Glob/
     // Grep, so the session works against the live target and nothing else.
@@ -1378,7 +1386,7 @@ export class VercelAgentDetector implements Detector {
           gen,
           "reproduce",
           ReproduceFindingResult,
-          (o) => `verdict ${o.verdict}`,
+          (o) => `result ${o.result}`,
           args.signal,
         );
       }
@@ -1572,29 +1580,31 @@ export class VercelAgentDetector implements Detector {
     findingId: string,
     signal?: AbortSignal,
   ): Promise<{
-    verdict: "confirmed" | "not-reproduced";
+    result: LiveResult;
     reasoning: string;
+    counterevidence: string;
     refused?: boolean;
     script?: string;
   }> {
     // Same guard as parseValidation: the reformat prompt carries only this
-    // text, so an empty answer would be reformatted into an invented verdict.
+    // text, so an empty answer would be reformatted into an invented result.
     if (!text.trim()) {
       logWarn(
-        `[reproduce:${findingId}] the reproduce loop stopped before it reported a verdict; recording not-reproduced`,
+        `[reproduce:${findingId}] the reproduce loop stopped before it reported a verdict; recording inconclusive`,
       );
-      return { verdict: "not-reproduced", reasoning: REPRODUCE_CUT_SHORT };
+      return { result: "inconclusive", reasoning: REPRODUCE_CUT_SHORT, counterevidence: "" };
     }
     try {
       return asReproduceField(ReproduceFindingResult.parse(extractJSON(text)));
     } catch (extractErr) {
       if (looksLikeRefusal(text)) {
         logWarn(
-          `[reproduce:${findingId}] model refused to reproduce; recording not-reproduced+refused`,
+          `[reproduce:${findingId}] model refused to reproduce; recording inconclusive+refused`,
         );
         return {
-          verdict: "not-reproduced",
+          result: "inconclusive",
           reasoning: "Model declined to reproduce this finding (refusal).",
+          counterevidence: "",
           refused: true,
         };
       }
@@ -2566,23 +2576,30 @@ After tracing the finding across the code, output your verdict as a single JSON 
 function reproduceJsonInstruction(): string {
   return `## Output format
 
-After you finish in the browser, output your verdict as a single JSON object matching EXACTLY this shape - no prose, no markdown fences, no trailing text:
+After you finish in the browser, output your result as a single JSON object matching EXACTLY this shape - no prose, no markdown fences, no trailing text:
 
-{"verdict":"confirmed","reasoning":"What you did in the browser and what you observed.","script":"import { test, expect } from '@playwright/test';\\n\\ntest('repro', async ({ page }) => {\\n  await page.goto('/');\\n});\\n"}
+{"result":"reproduced","reasoning":"What you did in the browser and what you observed.","counterevidence":"The strongest case against this result.","script":"import { test, expect } from '@playwright/test';\\n\\ntest('repro', async ({ page }) => {\\n  await page.goto('/');\\n});\\n"}
 
-\`verdict\` MUST be "confirmed" or "not-reproduced". \`script\` is the full source of a self-contained Playwright test that replays every step, written as ONE JSON string with newlines escaped as \\n. Include \`script\` only when the verdict is "confirmed"; omit the field entirely otherwise.`;
+\`result\` MUST be "reproduced", "refuted", or "inconclusive". \`counterevidence\` is required on every result: the strongest case against your own result. \`script\` is the full source of a self-contained Playwright test that replays every step, written as ONE JSON string with newlines escaped as \\n. Include \`script\` only when the result is "reproduced"; omit the field entirely otherwise.`;
 }
 
-/** Drop `script` unless the verdict is `confirmed`. The caller only runs a
- *  script for a confirmation, and a script attached to a non-reproduction
+/** Drop `script` unless the result is `reproduced`. The caller only runs a
+ *  script for a reproduction, and a script attached to any other result
  *  would be replayed as if it proved something. */
 export function asReproduceField(o: ReproduceFindingResult): {
-  verdict: "confirmed" | "not-reproduced";
+  result: LiveResult;
   reasoning: string;
+  counterevidence: string;
   script?: string;
 } {
-  if (o.verdict !== "confirmed") return { verdict: o.verdict, reasoning: o.reasoning };
-  return { verdict: o.verdict, reasoning: o.reasoning, ...(o.script ? { script: o.script } : {}) };
+  if (o.result !== "reproduced")
+    return { result: o.result, reasoning: o.reasoning, counterevidence: o.counterevidence };
+  return {
+    result: o.result,
+    reasoning: o.reasoning,
+    counterevidence: o.counterevidence,
+    ...(o.script ? { script: o.script } : {}),
+  };
 }
 
 function jsonOutputInstruction(multiAgent: boolean): string {

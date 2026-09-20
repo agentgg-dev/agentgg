@@ -73,25 +73,34 @@ describe("reproduceFinding", () => {
 });
 
 describe("asReproduceField", () => {
-  it("keeps the script on a confirmation", () => {
-    expect(asReproduceField({ verdict: "confirmed", reasoning: "r", script: "s" })).toEqual({
-      verdict: "confirmed",
+  it("keeps the script on a reproduction", () => {
+    expect(
+      asReproduceField({ result: "reproduced", reasoning: "r", counterevidence: "c", script: "s" }),
+    ).toEqual({
+      result: "reproduced",
       reasoning: "r",
+      counterevidence: "c",
       script: "s",
     });
   });
 
-  it("drops the script when the finding did not reproduce", () => {
-    expect(asReproduceField({ verdict: "not-reproduced", reasoning: "r", script: "s" })).toEqual({
-      verdict: "not-reproduced",
+  it("drops the script when the finding was refuted", () => {
+    expect(
+      asReproduceField({ result: "refuted", reasoning: "r", counterevidence: "c", script: "s" }),
+    ).toEqual({
+      result: "refuted",
       reasoning: "r",
+      counterevidence: "c",
     });
   });
 
   it("omits the script key entirely when the model returned none", () => {
-    expect(asReproduceField({ verdict: "confirmed", reasoning: "r" })).toEqual({
-      verdict: "confirmed",
+    expect(
+      asReproduceField({ result: "reproduced", reasoning: "r", counterevidence: "c" }),
+    ).toEqual({
+      result: "reproduced",
       reasoning: "r",
+      counterevidence: "c",
     });
   });
 });
@@ -110,10 +119,10 @@ describe("VercelAgentDetector.reproduceFinding — parseReproduce branches", () 
     vi.restoreAllMocks();
   });
 
-  it("records not-reproduced with cut-short reasoning when the loop and its retry both answer nothing", async () => {
+  it("records inconclusive with cut-short reasoning when the loop and its retry both answer nothing", async () => {
     const detector = new VercelAgentDetector("openrouter", scriptedModel(["", ""]));
     const result = await detector.reproduceFinding(reproduceArgs());
-    expect(result.verdict).toBe("not-reproduced");
+    expect(result.result).toBe("inconclusive");
     expect(result.reasoning).toBe(REPRODUCE_CUT_SHORT);
     expect(result.refused).toBeUndefined();
   });
@@ -126,45 +135,48 @@ describe("VercelAgentDetector.reproduceFinding — parseReproduce branches", () 
     );
   });
 
-  it("parses a well-formed confirmed verdict and keeps its script", async () => {
+  it("parses a well-formed reproduced result and keeps its script", async () => {
     const payload = JSON.stringify({
-      verdict: "confirmed",
+      result: "reproduced",
       reasoning: "Followed the link and landed on the external site unprompted.",
+      counterevidence: "The redirect could also be the browser's own referrer-driven navigation.",
       script:
         "test('repro', async ({ page }) => { await page.goto('/login?next=https://evil'); });",
     });
     const detector = new VercelAgentDetector("openrouter", scriptedModel([payload]));
     const result = await detector.reproduceFinding(reproduceArgs());
     expect(result).toEqual({
-      verdict: "confirmed",
+      result: "reproduced",
       reasoning: "Followed the link and landed on the external site unprompted.",
+      counterevidence: "The redirect could also be the browser's own referrer-driven navigation.",
       script:
         "test('repro', async ({ page }) => { await page.goto('/login?next=https://evil'); });",
     });
   });
 
-  it("records not-reproduced and refused on a content refusal, distinct from cut-short", async () => {
+  it("records inconclusive and refused on a content refusal, distinct from cut-short", async () => {
     const detector = new VercelAgentDetector(
       "openrouter",
       scriptedModel(["I can't help reproduce this exploit."]),
     );
     const result = await detector.reproduceFinding(reproduceArgs());
-    expect(result.verdict).toBe("not-reproduced");
+    expect(result.result).toBe("inconclusive");
     expect(result.refused).toBe(true);
     expect(result.reasoning).not.toBe(REPRODUCE_CUT_SHORT);
   });
 
-  it("recovers a verdict via the structuredModel reformat when the loop's answer is unparseable", async () => {
+  it("recovers a result via the structuredModel reformat when the loop's answer is unparseable", async () => {
     const reformatted = JSON.stringify({
-      verdict: "not-reproduced",
+      result: "refuted",
       reasoning: "The redirect target is checked against an allowlist.",
+      counterevidence: "The allowlist check could be bypassed with a different encoding.",
     });
     const detector = new VercelAgentDetector(
       "openrouter",
       scriptedModel(["Garbled output with no JSON in it at all.", reformatted]),
     );
     const result = await detector.reproduceFinding(reproduceArgs());
-    expect(result.verdict).toBe("not-reproduced");
+    expect(result.result).toBe("refuted");
     expect(result.reasoning).toContain("allowlist");
   });
 });
@@ -185,7 +197,9 @@ describe("VercelAgentDetector.reproduceFinding MCP logging", () => {
 
     const detector = new VercelAgentDetector(
       "openrouter",
-      scriptedModel(['{"verdict":"not-reproduced","reasoning":"did not trigger"}']),
+      scriptedModel([
+        '{"result":"inconclusive","reasoning":"did not trigger","counterevidence":""}',
+      ]),
     );
     await detector.reproduceFinding({
       finding: makeFinding(),

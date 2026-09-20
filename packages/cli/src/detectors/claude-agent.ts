@@ -1,4 +1,4 @@
-import type { CvssScore, Finding, ReconReport } from "@agentgg/core";
+import type { CvssScore, Finding, LiveResult, ReconReport } from "@agentgg/core";
 import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { z } from "zod";
@@ -285,14 +285,27 @@ export class ClaudeAgentDetector implements Detector {
     browserEndpoint: string;
     context?: string;
     maxTurns?: number;
+    staticVerdict?: string;
+    staticReasoning?: string;
     signal?: AbortSignal;
   }): Promise<{
-    verdict: "confirmed" | "not-reproduced";
+    result: LiveResult;
     reasoning: string;
+    counterevidence: string;
     refused?: boolean;
     script?: string;
   }> {
-    const prompt = buildReproducePrompt(args.finding, args.baseUrl, args.auth, args.context);
+    const staticReview =
+      args.staticVerdict != null && args.staticReasoning != null
+        ? { verdict: args.staticVerdict, reasoning: args.staticReasoning }
+        : undefined;
+    const prompt = buildReproducePrompt(
+      args.finding,
+      args.baseUrl,
+      args.auth,
+      args.context,
+      staticReview,
+    );
     // No built-in tools (no Read/Glob/Grep); this session works only against
     // the live target through the Playwright MCP server the sandbox hosts.
     // settingSources: [] isolates it from the user's ~/.claude settings and
@@ -312,19 +325,29 @@ export class ClaudeAgentDetector implements Detector {
         allowedTools: ["mcp__playwright__*"],
         settingSources: [],
       });
-      return result.verdict === "confirmed"
-        ? { verdict: result.verdict, reasoning: result.reasoning, script: result.script }
-        : { verdict: result.verdict, reasoning: result.reasoning };
+      return result.result === "reproduced"
+        ? {
+            result: result.result,
+            reasoning: result.reasoning,
+            counterevidence: result.counterevidence,
+            script: result.script,
+          }
+        : {
+            result: result.result,
+            reasoning: result.reasoning,
+            counterevidence: result.counterevidence,
+          };
     } catch (err) {
       // Mirrors validateFinding: record the refusal instead of failing the
       // reproduce pass outright.
       if (err instanceof RefusalError) {
         logWarn(
-          `[reproduce:${args.finding.id}] model refused to reproduce; recording not-reproduced+refused`,
+          `[reproduce:${args.finding.id}] model refused to reproduce; recording inconclusive+refused`,
         );
         return {
-          verdict: "not-reproduced",
+          result: "inconclusive",
           reasoning: "Model declined to reproduce this finding (refusal).",
+          counterevidence: "",
           refused: true,
         };
       }
