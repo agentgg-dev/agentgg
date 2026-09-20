@@ -217,15 +217,10 @@ const STAGE_THROTTLE_MS = 2000;
 const lastStageWrite = new Map<string, { stage: string; at: number }>();
 
 /**
- * Record the pipeline stage (and optional progress) a run is in. Always
- * writes on a stage change; within the same stage, writes at most once
- * every `STAGE_THROTTLE_MS` so a tight per-finding loop doesn't hammer
- * disk. Never throws — a run file that can't be written must not fail
- * the scan it's reporting on.
- *
- * `progress` is always assigned, including when omitted: a stage change
- * with no progress argument clears the previous stage's counts instead of
- * letting them linger under the new stage's name.
+ * Record the pipeline stage (and optional progress) a run is in. Writes on
+ * every stage change, and at most once every `STAGE_THROTTLE_MS` within one
+ * stage. Omitting `progress` clears the previous stage's counts. Never
+ * throws: progress reporting must not fail the scan it reports on.
  */
 export function updateRunStage(
   outputDir: string,

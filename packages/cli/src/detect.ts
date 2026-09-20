@@ -696,9 +696,9 @@ export const REPRODUCE_CUT_SHORT =
 /**
  * Build the reproduce-finding prompt. The model drives a real browser
  * (via the Playwright MCP tools attached to this session — no Read/Glob/
- * Grep) against a live target to confirm or refute one finding, then
- * reports a verdict and, when confirmed, a Playwright test that replays
- * it end to end.
+ * Grep) against a live target, then reports `reproduced`, `refuted` or
+ * `inconclusive` with its counterevidence and, when reproduced, a
+ * Playwright test that replays it end to end.
  */
 export function buildReproducePrompt(
   finding: Finding,

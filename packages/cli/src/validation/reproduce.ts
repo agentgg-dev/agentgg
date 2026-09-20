@@ -236,7 +236,7 @@ export async function runReproducePhase(args: {
       } finally {
         clearTimeout(timer);
         signal.removeEventListener("abort", onAbort);
-        // Every finding, not just the confirmed ones: /out is shared for the
+        // Every finding, not just the reproduced ones: /out is shared for the
         // whole phase, so anything left behind lands in the next finding's
         // evidence.
         try {
