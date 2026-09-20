@@ -17,39 +17,42 @@ const f = {
   validation: {
     verdict: "uncertain",
     reasoning: "r",
-    dynamic: {
-      verdict: "confirmed",
-      reasoning: "reproduced in browser",
-      evidence: {
-        trace: "trace.zip",
-        script: { path: "repro.spec.ts", executed: true, passed: true },
-      },
+  },
+  live: {
+    result: "reproduced",
+    reasoning: "reproduced in browser",
+    counterevidence: "The redirect could also be a coincidental navigation.",
+    evidence: {
+      trace: "trace.zip",
+      screenshots: [],
+      script: { path: "repro.spec.ts", executed: true, passed: true },
     },
   },
 } as any;
 describe("renderFindingMd live validation", () => {
-  it("renders the live validation section for a dynamic confirm", () => {
+  it("renders the live validation section for a reproduced result", () => {
     const md = renderFindingMd(f);
     expect(md).toContain("### Live validation");
+    expect(md).toContain("**Result:** `reproduced`");
     expect(md).toContain("reproduced in browser");
+    expect(md).toContain(
+      "**Counterevidence:** The redirect could also be a coincidental navigation.",
+    );
     expect(md).toContain("repro.spec.ts");
   });
 
   it("renders the request table and links the full dump when requests were captured", () => {
     const withReqs = {
       ...f,
-      validation: {
-        ...f.validation,
-        dynamic: {
-          ...f.validation.dynamic,
-          evidence: {
-            ...f.validation.dynamic.evidence,
-            requests: [
-              { method: "GET", url: "http://app/notes/2", status: 200 },
-              { method: "GET", url: "http://app/go?next=https://evil.com", status: 302 },
-            ],
-            requestsFile: "requests.http",
-          },
+      live: {
+        ...f.live,
+        evidence: {
+          ...f.live.evidence,
+          requests: [
+            { method: "GET", url: "http://app/notes/2", status: 200 },
+            { method: "GET", url: "http://app/go?next=https://evil.com", status: 302 },
+          ],
+          requestsFile: "requests.http",
         },
       },
     };

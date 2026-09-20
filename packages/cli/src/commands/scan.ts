@@ -2379,7 +2379,7 @@ export function registerScanCommand(program: Command): void {
     )
     .option(
       "--live-validate",
-      "After dedup, reproduce PRIMARY web-reachable findings against a running target inside a Docker sandbox (external mode). Runs the reproduce agent per finding, executes its generated Playwright script once, and records a dynamic verdict + evidence. Off by default; requires --target-url and a reachable Docker daemon.",
+      "After dedup, reproduce PRIMARY web-reachable findings against a running target inside a Docker sandbox (external mode). Runs the reproduce agent per finding, executes its generated Playwright script once, and records a live result + evidence. Off by default; requires --target-url and a reachable Docker daemon.",
     )
     .option(
       "--target-url <url>",

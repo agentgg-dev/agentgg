@@ -118,7 +118,7 @@ export function writeMarkdownReport(input: ScanReportInput): ScanReportOutput {
     // slice. Copy it beside the .md too: nobody browsing the report will find
     // it otherwise. `findings/` was just cleared, so this cannot go stale.
     let evidenceDir: string | undefined;
-    if (f.validation?.dynamic?.evidence) {
+    if (f.live?.evidence) {
       const src = getEvidenceDir(outDir, f.agentSlug, f.id);
       if (existsSync(src)) {
         evidenceDir = evidenceDirName(f);
@@ -199,9 +199,11 @@ export function renderFindingMd(
   if (f.cvss) {
     meta.push(`**CVSS:** ${f.cvss.baseScore.toFixed(1)} (\`${f.cvss.vector}\`)`);
   }
-  if (f.validation) {
-    const verdict = f.validation.dynamic ? effectiveVerdict(f) : f.validation.verdict;
-    meta.push(`**Validation:** \`${verdict}\``);
+  if (f.validation || f.live) {
+    // effectiveVerdict can only be undefined here when a finding with no
+    // static verdict got an inconclusive live result: fall back to
+    // `uncertain`, the bucket for "we couldn't tell".
+    meta.push(`**Validation:** \`${effectiveVerdict(f) ?? "uncertain"}\``);
   } else {
     meta.push("**Validation:** _not run_");
   }
@@ -216,14 +218,16 @@ export function renderFindingMd(
     lines.push("");
   }
 
-  const dyn = f.validation?.dynamic;
-  if (dyn) {
+  const live = f.live;
+  if (live) {
     lines.push("### Live validation");
-    lines.push(`**Result:** \`${dyn.verdict}\``);
+    lines.push(`**Result:** \`${live.result}\``);
     lines.push("");
-    lines.push(dyn.reasoning);
+    lines.push(live.reasoning);
     lines.push("");
-    const ev = dyn.evidence;
+    lines.push(`**Counterevidence:** ${live.counterevidence}`);
+    lines.push("");
+    const ev = live.evidence;
     if (ev) {
       const link = (name: string) =>
         evidenceDir ? `[${name}](${evidenceDir}/${name})` : `\`${name}\``;
@@ -407,20 +411,20 @@ export function renderSummaryMd(
     }
   }
 
-  const liveValidated = renderedList.filter((f) => f.validation?.dynamic);
+  const liveValidated = renderedList.filter((f) => f.live);
   if (liveValidated.length > 0) {
     lines.push("## Live validation");
     lines.push("");
     lines.push("| Finding | Result | Evidence |");
     lines.push("| --- | --- | --- |");
     for (const f of liveValidated) {
-      const dyn = f.validation?.dynamic;
+      const live = f.live;
       // Only link when this finding's evidence was actually copied. A
       // finding can carry evidence metadata with nothing on disk (e.g. a
       // rerun cleaned up state/files/<agentSlug>/ after the fact), in which
       // case linking would produce a dangling href.
       const dir = evidenceDirs?.get(f.id);
-      const ev = dyn?.evidence;
+      const ev = live?.evidence;
       const link = (label: string, name: string) =>
         dir ? `[${label}](findings/${dir}/${name})` : `${label} \`${name}\``;
       const parts: string[] = [];
@@ -429,7 +433,7 @@ export function renderSummaryMd(
       if (ev?.script) parts.push(link("script", ev.script.path));
       if (ev?.screenshots?.length) parts.push(`${ev.screenshots.length} screenshot(s)`);
       lines.push(
-        `| [${f.title}](findings/${findingFilename(f)}) | \`${dyn?.verdict}\` | ${
+        `| [${f.title}](findings/${findingFilename(f)}) | \`${live?.result}\` | ${
           parts.length > 0 ? parts.join(", ") : "none"
         } |`,
       );

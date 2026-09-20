@@ -19,16 +19,13 @@ const f = (vulnSlug: string, extra: object = {}) =>
   }) as any;
 
 describe("selectForReproduce", () => {
-  it("keeps web-reachable primaries without a dynamic result", () => {
+  it("keeps web-reachable primaries without a live result", () => {
     const list = [
       f("xss"),
       f("secret"),
       f("sqli", {
-        validation: {
-          verdict: "confirmed",
-          reasoning: "r",
-          dynamic: { verdict: "confirmed", reasoning: "d" },
-        },
+        validation: { verdict: "confirmed", reasoning: "r" },
+        live: { result: "reproduced", reasoning: "d", counterevidence: "" },
       }),
     ];
     expect(selectForReproduce(list).map((x) => x.vulnSlug)).toEqual(["xss"]);
@@ -44,9 +41,9 @@ describe("selectForReproduce", () => {
     expect(selectForReproduce(list).map((x) => x.vulnSlug)).toEqual(["idor"]);
   });
 
-  it("skips findings validation marked false-positive", () => {
+  it("keeps a lone false-positive finding, since live evidence can still resolve it", () => {
     const list = [f("xss", { validation: { verdict: "false-positive", reasoning: "r" } })];
-    expect(selectForReproduce(list)).toEqual([]);
+    expect(selectForReproduce(list).map((x) => x.vulnSlug)).toEqual(["xss"]);
   });
 
   it("skips findings validation marked out-of-scope", () => {
@@ -63,5 +60,24 @@ describe("selectForReproduce", () => {
     expect(selectForReproduce([f("open-redirect")]).map((x) => x.vulnSlug)).toEqual([
       "open-redirect",
     ]);
+  });
+
+  it("keeps a false-positive finding but puts it last", () => {
+    const list = [
+      f("xss", { validation: { verdict: "false-positive", reasoning: "r" } }),
+      f("idor", { validation: { verdict: "uncertain", reasoning: "r" } }),
+      f("sqli", { validation: { verdict: "confirmed", reasoning: "r" } }),
+    ];
+    expect(selectForReproduce(list).map((x) => x.vulnSlug)).toEqual(["idor", "sqli", "xss"]);
+  });
+
+  it("drops out-of-scope findings", () => {
+    const list = [f("sqli", { validation: { verdict: "out-of-scope", reasoning: "r" } })];
+    expect(selectForReproduce(list)).toEqual([]);
+  });
+
+  it("skips a finding that already carries a live result", () => {
+    const list = [f("xss", { live: { result: "refuted", reasoning: "r", counterevidence: "" } })];
+    expect(selectForReproduce(list)).toEqual([]);
   });
 });

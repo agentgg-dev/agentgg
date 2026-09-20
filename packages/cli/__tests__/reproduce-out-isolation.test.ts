@@ -100,7 +100,12 @@ describe("evidence isolation between findings", () => {
         call++;
         // Playwright writes the session video into the shared /out.
         out.set(`/out/page-${call}.webm`, Buffer.from(`video ${call}`));
-        return { verdict: "confirmed" as const, reasoning: "r", script: "// repro" };
+        return {
+          result: "reproduced" as const,
+          reasoning: "r",
+          counterevidence: "",
+          script: "// repro",
+        };
       },
     };
 
@@ -125,7 +130,7 @@ describe("evidence isolation between findings", () => {
     expect(existsSync(join(dirB, "page-2.webm"))).toBe(true);
     // The leak: without clearing /out, finding B inherits A's recording.
     expect(existsSync(join(dirB, "page-1.webm"))).toBe(false);
-    expect(b.validation?.dynamic?.evidence?.video).toBe("page-2.webm");
+    expect(b.live?.evidence?.video).toBe("page-2.webm");
   });
 
   it("forwards the configured turn cap to the detector", async () => {
@@ -145,7 +150,7 @@ describe("evidence isolation between findings", () => {
       name: "fake",
       async reproduceFinding(args: { maxTurns?: number }) {
         seen = args.maxTurns;
-        return { verdict: "not-reproduced" as const, reasoning: "r" };
+        return { result: "inconclusive" as const, reasoning: "r", counterevidence: "" };
       },
     };
 

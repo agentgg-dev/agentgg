@@ -3,12 +3,12 @@
 // each finding it asks the backend to reproduce the exploit against a running
 // target (through the sandbox's Playwright MCP server), runs the generated
 // script once, copies the trace/video/screenshots out of the sandbox, and
-// persists the dynamic verdict incrementally so a killed run resumes.
+// persists the live result incrementally so a killed run resumes.
 
 import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
-import type { Finding } from "@agentgg/core";
+import type { Finding, LiveResult } from "@agentgg/core";
 import { getEvidenceDir, readFileRecord, writeFileRecord } from "@agentgg/core";
 import AdmZip from "adm-zip";
 import type { Detector } from "../detect.js";
@@ -20,28 +20,32 @@ import { redact, type TargetAuth } from "./target-auth.js";
 import { parseTraceRequests, renderRequestsHttp } from "./trace-requests.js";
 import { logSkips, selectWebReachable } from "./web-reachable.js";
 
-type Dynamic = NonNullable<Finding["validation"]>["dynamic"];
-type Evidence = NonNullable<NonNullable<Dynamic>["evidence"]>;
+type Evidence = NonNullable<NonNullable<Finding["live"]>["evidence"]>;
 
-/** Findings validation already rejected. Reproducing one wastes a browser
- *  session, and a blind live `confirmed` would override the static verdict.
- *  `uncertain` is NOT rejected: live evidence is what resolves it. */
-export function isValidationRejected(f: Finding): boolean {
-  const v = f.validation?.verdict;
-  return v === "false-positive" || v === "out-of-scope";
+const ORDER: Record<string, number> = {
+  uncertain: 0,
+  confirmed: 1,
+  "false-positive": 2,
+};
+
+/** Primaries a live run may test, best use of the budget first. `out-of-scope`
+ *  comes from the user's scope file, so it never reaches the browser. */
+export function selectForReproduce(findings: Finding[], force = false): Finding[] {
+  const reachable = selectWebReachable(findings).selected.filter(
+    (f) => f.validation?.verdict !== "out-of-scope",
+  );
+  // Default resume key: skip findings that already carry a live result.
+  // `force` re-reproduces every web-reachable primary (like revalidate --revalidate-all).
+  const work = force ? reachable : reachable.filter((f) => !f.live);
+  return [...work].sort(
+    (a, b) => (ORDER[a.validation?.verdict ?? ""] ?? 3) - (ORDER[b.validation?.verdict ?? ""] ?? 3),
+  );
 }
 
-/**
- * Findings eligible for reproduction: PRIMARY + web-reachable, minus any that
- * validation rejected, minus any that already carry a dynamic verdict. That
- * last filter is the resume key — a re-run skips findings a prior run already
- * reproduced.
- */
-export function selectForReproduce(findings: Finding[], force = false): Finding[] {
-  const reachable = selectWebReachable(findings).selected.filter((f) => !isValidationRejected(f));
-  // Default resume key: skip findings that already carry a dynamic result.
-  // `force` re-reproduces every web-reachable primary (like revalidate --revalidate-all).
-  return force ? reachable : reachable.filter((f) => !f.validation?.dynamic);
+/** A live claim must point at traffic that was really captured. */
+export function gradeLiveResult(raw: LiveResult, evidence?: Evidence): LiveResult {
+  if (raw !== "reproduced") return raw;
+  return (evidence?.requests?.length ?? 0) > 0 ? "reproduced" : "inconclusive";
 }
 
 export async function runReproducePhase(args: {
@@ -58,7 +62,7 @@ export async function runReproducePhase(args: {
   /** Per-finding browser turn cap. Threaded to the detector; when unset the
    *  detector's own default applies. */
   reproduceMaxTurns?: number;
-  /** Re-reproduce web-reachable findings that already have a dynamic verdict. */
+  /** Re-reproduce web-reachable findings that already have a live result. */
   force?: boolean;
   signal: AbortSignal;
 }): Promise<void> {
@@ -69,11 +73,11 @@ export async function runReproducePhase(args: {
   const primaries = findings.filter((f) => !f.dedup);
   const work = selectForReproduce(primaries, args.force ?? false);
   logSkips(selectWebReachable(primaries).skipped);
-  const rejected = selectWebReachable(primaries).selected.filter(isValidationRejected).length;
+  const rejected = selectWebReachable(primaries).selected.filter(
+    (f) => f.validation?.verdict === "out-of-scope",
+  ).length;
   if (rejected > 0) {
-    console.log(
-      `  live validation: skipped ${rejected} finding(s) validation marked false-positive or out-of-scope`,
-    );
+    console.log(`  live validation: skipped ${rejected} finding(s) validation marked out-of-scope`);
   }
   if (work.length === 0) {
     console.log("  live validation: no web-reachable findings to reproduce");
@@ -123,7 +127,7 @@ export async function runReproducePhase(args: {
 
   const phaseStart = Date.now();
   let done = 0;
-  let confirmed = 0;
+  const counts: Record<LiveResult, number> = { reproduced: 0, refuted: 0, inconclusive: 0 };
   try {
     for (const finding of work) {
       if (signal.aborted) break;
@@ -160,11 +164,13 @@ export async function runReproducePhase(args: {
           browserEndpoint: sandbox.browserEndpoint(),
           context,
           maxTurns: args.reproduceMaxTurns,
+          staticVerdict: finding.validation?.verdict,
+          staticReasoning: finding.validation?.reasoning,
           signal: ac.signal,
         });
 
         let evidence: Evidence | undefined;
-        if (res.verdict === "confirmed" && res.script) {
+        if (res.result === "reproduced" && res.script) {
           const script = await runReproScript(sandbox, res.script);
           const evidenceDir = getEvidenceDir(outDir, finding.agentSlug, finding.id);
           evidence = await copyEvidence(sandbox, evidenceDir);
@@ -175,23 +181,19 @@ export async function runReproducePhase(args: {
           evidence.script = { path: script.path, executed: script.executed, passed: script.passed };
         }
 
-        const dynamic: Dynamic = {
-          verdict: res.verdict,
+        const graded = gradeLiveResult(res.result, evidence);
+        finding.live = {
+          result: graded,
           reasoning: redact(res.reasoning, auth),
+          counterevidence: redact(res.counterevidence, auth),
           ...(res.refused ? { refused: true } : {}),
           baseUrl: agentBaseUrl,
           ...(evidence ? { evidence } : {}),
-        };
-        finding.validation = {
-          ...(finding.validation ?? {
-            verdict: "uncertain",
-            reasoning: "not statically validated",
-          }),
-          dynamic,
+          runId,
         };
         persistFinding(outDir, finding, detector.name, runId);
-        if (res.verdict === "confirmed") confirmed++;
-        console.log(`    ${finding.id}: ${res.verdict}`);
+        counts[graded]++;
+        console.log(`    ${finding.id}: ${graded}`);
       } catch (err) {
         let reason: string;
         if (timedOut) {
@@ -201,19 +203,16 @@ export async function runReproducePhase(args: {
         }
         logWarn(`[reproduce:${finding.id}] ${redact(reason, auth)}`);
         if (signal.aborted) break;
-        // A timeout or reproduction failure records not-reproduced rather than
-        // crashing the scan; the static verdict is preserved underneath.
-        finding.validation = {
-          ...(finding.validation ?? {
-            verdict: "uncertain",
-            reasoning: "not statically validated",
-          }),
-          dynamic: {
-            verdict: "not-reproduced",
-            reasoning: redact(reason, auth),
-            baseUrl: agentBaseUrl,
-          },
+        // A timeout or crash records inconclusive rather than crashing the
+        // scan; the static verdict is preserved underneath.
+        finding.live = {
+          result: "inconclusive",
+          reasoning: redact(reason, auth),
+          counterevidence: "",
+          baseUrl: agentBaseUrl,
+          runId,
         };
+        counts.inconclusive++;
         try {
           persistFinding(outDir, finding, detector.name, runId);
         } catch (persistErr) {
@@ -232,7 +231,12 @@ export async function runReproducePhase(args: {
         }
       }
     }
-    if (confirmed === 0 && done > 0) {
+    if (done > 0) {
+      console.log(
+        `  live validation: ${counts.reproduced} reproduced, ${counts.refuted} refuted, ${counts.inconclusive} inconclusive`,
+      );
+    }
+    if (counts.reproduced === 0 && done > 0) {
       const tail = (await sandbox.logs())
         .split("\n")
         .map((l) => `    ${l}`)
@@ -411,14 +415,14 @@ function persistFinding(outDir: string, finding: Finding, provider: string, runI
   const filePath = finding.filePath.replace(/\\/g, "/");
   if (isAbsolute(filePath)) {
     logWarn(
-      `[reproduce:${finding.id}] dynamic result not persisted (non-relative filePath "${finding.filePath}"); it will re-run next scan`,
+      `[reproduce:${finding.id}] live result not persisted (non-relative filePath "${finding.filePath}"); it will re-run next scan`,
     );
     return;
   }
   const record = readFileRecord(outDir, finding.agentSlug, filePath);
   if (!record) {
     logWarn(
-      `[reproduce:${finding.id}] dynamic result not persisted (no file record for "${filePath}"); it will re-run next scan`,
+      `[reproduce:${finding.id}] live result not persisted (no file record for "${filePath}"); it will re-run next scan`,
     );
     return;
   }

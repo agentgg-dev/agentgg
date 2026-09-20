@@ -22,16 +22,17 @@ const finding = (): Finding =>
     validation: {
       verdict: "confirmed",
       reasoning: "static",
-      dynamic: {
-        verdict: "confirmed",
-        reasoning: "reproduced in the browser",
-        baseUrl: "http://host.docker.internal:3000",
-        evidence: {
-          trace: "trace.zip",
-          video: "session.webm",
-          screenshots: ["shot-1.png"],
-          script: { path: "repro.spec.ts", executed: true, passed: true },
-        },
+    },
+    live: {
+      result: "reproduced",
+      reasoning: "reproduced in the browser",
+      counterevidence: "",
+      baseUrl: "http://host.docker.internal:3000",
+      evidence: {
+        trace: "trace.zip",
+        video: "session.webm",
+        screenshots: ["shot-1.png"],
+        script: { path: "repro.spec.ts", executed: true, passed: true },
       },
     },
   }) as Finding;
@@ -95,12 +96,12 @@ describe("evidence in the rendered report", () => {
     expect(summary).toContain("## Live validation");
     expect(summary).toContain("| Finding | Result | Evidence |");
     expect(summary).toContain("Reflected XSS in search");
-    expect(summary).toContain("`confirmed`");
+    expect(summary).toContain("`reproduced`");
   });
 
   it("omits the live validation table when nothing was live-validated", () => {
     const f = finding();
-    f.validation = { verdict: "confirmed", reasoning: "static" };
+    f.live = undefined;
     render(f);
     const summary = readFileSync(join(outDir, "summary.md"), "utf8");
     expect(summary).not.toContain("## Live validation");
@@ -123,7 +124,7 @@ describe("evidence in the rendered report", () => {
     });
     const summary = readFileSync(join(outDir, "summary.md"), "utf8");
     expect(summary).toContain("Reflected XSS in search");
-    expect(summary).toContain("`confirmed`");
+    expect(summary).toContain("`reproduced`");
     expect(summary).not.toContain(`findings/${evidenceDirName(f)}/`);
   });
 });

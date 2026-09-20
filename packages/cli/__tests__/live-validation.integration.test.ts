@@ -69,12 +69,12 @@ describe.runIf(url)("live validation e2e (external mode)", () => {
       signal: new AbortController().signal,
     });
 
-    expect(finding.validation?.dynamic?.verdict).toBe("confirmed");
+    expect(finding.live?.result).toBe("reproduced");
 
     const evidenceDir = getEvidenceDir(outDir, finding.agentSlug, finding.id);
     expect(existsSync(evidenceDir)).toBe(true);
     expect(readdirSync(evidenceDir).length).toBeGreaterThan(0);
 
-    expect(finding.validation?.dynamic?.evidence?.script?.passed).toBe(true);
+    expect(finding.live?.evidence?.script?.passed).toBe(true);
   }, 300_000);
 });

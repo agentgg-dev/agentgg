@@ -114,7 +114,7 @@ export async function runLiveValidate(
   });
 
   // Re-render the report so findings/*.md and summary.md pick up the new
-  // dynamic verdicts — runReproducePhase already persisted each finding
+  // live results — runReproducePhase already persisted each finding
   // incrementally to state/files/*.
   const byAgent: Record<string, number> = {};
   for (const f of findings) byAgent[f.agentSlug] = (byAgent[f.agentSlug] ?? 0) + 1;
@@ -128,7 +128,7 @@ export async function runLiveValidate(
     byAgent,
   });
 
-  console.log("Done. Report re-rendered with the new dynamic verdicts.");
+  console.log("Done. Report re-rendered with the new live results.");
 }
 
 export function registerLiveValidateCommand(program: Command): void {
