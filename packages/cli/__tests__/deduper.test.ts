@@ -21,6 +21,10 @@ function makeFinding(id: string, overrides: Partial<Finding> = {}): Finding {
   };
 }
 
+function f(id: string, agentSlug: string): Finding {
+  return makeFinding(id, { agentSlug });
+}
+
 describe("resolveDedup", () => {
   it("returns the duplicates of a well-formed cluster, keyed to the primary", () => {
     const findings = [makeFinding("a"), makeFinding("b"), makeFinding("c")];
@@ -87,6 +91,20 @@ describe("resolveDedup", () => {
       { id: "c", duplicateOf: "a", reasoning: "ac" },
     ]);
   });
+
+  it("never marks a finding the run may not write", () => {
+    const findings = [f("a1", "alpha"), f("b1", "beta")];
+    const clusters = [{ primaryId: "a1", duplicateIds: ["b1"], reasoning: "same sink" }];
+    const kept = resolveDedup(findings, clusters, { canMark: (x) => x.agentSlug === "alpha" });
+    expect(kept).toEqual([]);
+  });
+
+  it("marks a finding the run owns", () => {
+    const findings = [f("a1", "alpha"), f("b1", "beta")];
+    const clusters = [{ primaryId: "b1", duplicateIds: ["a1"], reasoning: "same sink" }];
+    const kept = resolveDedup(findings, clusters, { canMark: (x) => x.agentSlug === "alpha" });
+    expect(kept.map((x) => x.id)).toEqual(["a1"]);
+  });
 });
 
 describe("buildDedupePrompt", () => {
@@ -108,5 +126,14 @@ describe("buildDedupePrompt", () => {
       findings: [makeFinding("aaa"), makeFinding("bbb")],
     });
     expect(prompt).not.toContain("## The source file");
+  });
+
+  it("ranks candidates without a verdict, using confidence only as a tiebreak", () => {
+    const prompt = buildDedupePrompt({
+      filePath: "src/db.ts",
+      findings: [makeFinding("aaa"), makeFinding("bbb")],
+    });
+    expect(prompt).not.toContain("verdict:");
+    expect(prompt).toContain("Confidence");
   });
 });

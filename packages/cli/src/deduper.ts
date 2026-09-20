@@ -9,10 +9,10 @@ import { languageFromPath } from "./detect.js";
  * SAME underlying vulnerability at the SAME code location, each with one
  * primary kept and the rest marked duplicate.
  *
- * This is the third post-detection pass, peer to validation and scoring,
- * but it is a *gather* step: unlike those it needs every finding for a
- * file co-located, so it can only run after the distributed
- * scan/validate/score phases have all completed.
+ * Dedupe runs right after detection, before validation or scoring, so no
+ * finding has a verdict yet. Unlike those per-finding phases it is a
+ * *gather* step: it needs every finding for a file co-located, so it can
+ * only run once detection for that file has finished across all agents.
  */
 
 /**
@@ -25,7 +25,7 @@ export const LlmDedupCluster = z.object({
   primaryId: z
     .string()
     .describe(
-      "The `id` of the finding to KEEP as the canonical report for this root cause. Pick the most precise / highest-confidence statement (prefer a 'confirmed' finding over an 'uncertain' one).",
+      "The `id` of the finding to KEEP as the canonical report for this root cause. Prefer the one that names the root cause's vulnerability class, then the most exact sink location, then a concrete PoC; use confidence only to break a tie.",
     ),
   duplicateIds: z
     .array(z.string())
@@ -71,14 +71,15 @@ export function buildDedupePrompt(args: {
       const lineHint = f.lineRange
         ? `lines ${f.lineRange[0]}-${f.lineRange[1]}`
         : "unspecified lines";
-      const verdict = f.validation?.verdict ? ` | verdict: ${f.validation.verdict}` : "";
       return `### Finding id: ${f.id}
 - **Agent:** ${f.agentSlug}
 - **Vuln class:** ${f.vulnSlug}
 - **Title:** ${f.title}
-- **Location:** ${lineHint}${verdict}
+- **Location:** ${lineHint}
+- **Confidence:** ${(f.confidence * 100).toFixed(0)}%
 - **Summary:** ${f.summary}
-- **Details:** ${truncate(f.details, 800)}`;
+- **Details:** ${truncate(f.details, 800)}
+- **PoC:** ${truncate(f.poc, 300)}`;
     })
     .join("\n\n");
 
@@ -111,10 +112,10 @@ code location**, and for each group pick ONE primary to keep.
   duplicate** (e.g. two separate SQL queries on different lines are two
   findings, not one).
 - Different vulnerability classes are never duplicates of each other.
-- For each group, exactly ONE finding is the primary (kept). Pick the most
-  precise / highest-confidence one; prefer a \`confirmed\` finding as the
-  primary over an \`uncertain\` one. Every other member is a duplicate of
-  it.
+- For each group, exactly ONE finding is the primary (kept). Rank the
+  candidates in this order: the vulnerability class that names the root
+  cause; the most exact location of the sink; a concrete PoC; detection
+  confidence, only to break a tie.
 - When in doubt, do NOT merge. Folding two distinct bugs into one is worse
   than leaving a real duplicate un-merged.
 
@@ -153,8 +154,17 @@ export interface DedupAssignment {
  * Clusters that violate the invariant are dropped wholesale (their members
  * stay unmarked and get retried on the next `dedup --force`), rather than
  * producing a tangled half-applied state.
+ *
+ * `opts.canMark`, when given, gates which findings this run may write a
+ * `dedup` marker onto. A duplicate the run doesn't own is skipped outright
+ * (not returned), so a restored finding from an earlier run can still be
+ * a primary but never becomes someone's duplicate under this run's id.
  */
-export function resolveDedup(findings: Finding[], clusters: LlmDedupCluster[]): DedupAssignment[] {
+export function resolveDedup(
+  findings: Finding[],
+  clusters: LlmDedupCluster[],
+  opts: { canMark?: (f: Finding) => boolean } = {},
+): DedupAssignment[] {
   const byId = new Map(findings.map((f) => [f.id, f]));
   const primaries = new Set<string>();
   const claimedDuplicates = new Set<string>();
@@ -182,9 +192,11 @@ export function resolveDedup(findings: Finding[], clusters: LlmDedupCluster[]): 
     }
     for (const dupId of c.duplicateIds) {
       if (dupId === c.primaryId) continue; // self-reference
-      if (!byId.has(dupId)) continue; // unknown duplicate
+      const dupe = byId.get(dupId);
+      if (!dupe) continue; // unknown duplicate
       if (primaries.has(dupId)) continue; // can't be a duplicate AND a primary
       if (claimedDuplicates.has(dupId)) continue; // already assigned to a primary
+      if (opts.canMark && !opts.canMark(dupe)) continue; // this run may not write to it
       claimedDuplicates.add(dupId);
       assignments.push({ id: dupId, duplicateOf: c.primaryId, reasoning: c.reasoning });
     }

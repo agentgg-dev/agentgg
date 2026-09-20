@@ -53,14 +53,8 @@ interface DedupOpts {
   concurrency?: number;
 }
 
-/** A finding is disqualified (won't ship) when validation rejected it. */
-function isDisqualified(f: Finding): boolean {
-  const v = f.validation?.verdict;
-  return v === "false-positive" || v === "out-of-scope";
-}
-
 /**
- * De-duplication phase — the final gather pass over persisted findings.
+ * De-duplication phase over persisted findings.
  *
  * Findings are sharded on disk by `(agentSlug, filePath)`, so the same
  * source file's full finding set is the union of every agent's record for
@@ -71,12 +65,13 @@ function isDisqualified(f: Finding): boolean {
  * verdict — a `confirmed` finding can still be a duplicate.
  *
  * This cannot run distributed: it needs every finding for a file
- * co-located. Run it after scan/validate/score have all completed.
+ * co-located. It runs on whatever findings exist, independent of whether
+ * they've been validated yet.
  *
  * By default a duplicate is only MARKED (kept on disk); `--delete-
- * duplicates` strips it from its FileRecord instead. Files that already
- * carry dedup markers are skipped unless `--force` (which clears the old
- * markers and recomputes).
+ * duplicates` strips it from its FileRecord instead. A finding that
+ * already carries a dedup marker is excluded from the candidate set (its
+ * primary already represents it) unless `--force` clears markers first.
  */
 export async function runDedup(
   outputArg: string,
@@ -115,10 +110,13 @@ export async function runDedup(
   }
 
   // Index every finding by id → {finding, record}, and group the
-  // shippable findings by source filePath (unioning across agent shards).
+  // not-yet-deduped findings by source filePath (unioning across agent
+  // shards). A finding that already carries a dedup marker is excluded:
+  // its primary already represents it, so it is not compared again.
   const index = new Map<string, { finding: Finding; record: FileRecord }>();
   const byFile = new Map<string, Finding[]>();
   const dirtyRecords = new Set<FileRecord>();
+  let alreadyMarked = 0;
   for (const record of records) {
     for (const finding of record.findings) {
       index.set(finding.id, { finding, record });
@@ -127,31 +125,28 @@ export async function runDedup(
         finding.dedup = undefined;
         dirtyRecords.add(record);
       }
-      if (isDisqualified(finding)) continue;
+      if (finding.dedup) {
+        alreadyMarked++;
+        continue;
+      }
       const bucket = byFile.get(finding.filePath);
       if (bucket) bucket.push(finding);
       else byFile.set(finding.filePath, [finding]);
     }
   }
 
-  // Candidate files: 2+ shippable findings. Without --force, skip files
-  // that already carry any dedup marker (already processed).
+  // Candidate files: 2+ findings not yet deduped.
   type Task = { filePath: string; findings: Finding[] };
   const tasks: Task[] = [];
-  let skippedAlready = 0;
   for (const [filePath, findings] of byFile) {
     if (findings.length < 2) continue;
-    if (!opts.force && findings.some((f) => f.dedup)) {
-      skippedAlready++;
-      continue;
-    }
     tasks.push({ filePath, findings });
   }
 
   if (tasks.length === 0) {
     console.log(
-      `Nothing to de-duplicate. ${byFile.size} file(s) with shippable findings; none have 2+ to compare${
-        skippedAlready > 0 ? ` (${skippedAlready} already de-duplicated)` : ""
+      `Nothing to de-duplicate. ${byFile.size} file(s) with undeduped findings; none have 2+ to compare${
+        alreadyMarked > 0 ? ` (${alreadyMarked} finding(s) already de-duplicated)` : ""
       }.`,
     );
     console.log("  Pass --force to re-run de-duplication over already-processed files.");
@@ -161,7 +156,9 @@ export async function runDedup(
   console.log(`De-duplicating findings across ${tasks.length} file(s) in ${outputDir}`);
   console.log(`  Root:        ${rootPath}`);
   console.log(`  Provider:    ${detector.name}`);
-  if (skippedAlready > 0) console.log(`  Skipped:     ${skippedAlready} already de-duplicated`);
+  if (alreadyMarked > 0) {
+    console.log(`  Skipped:     ${alreadyMarked} finding(s) already de-duplicated`);
+  }
   if (opts.force) console.log(`  Force:       cleared prior markers, recomputing`);
   if (opts.deleteDuplicates) console.log(`  Mode:        deleting duplicates (not just marking)`);
   console.log("");
