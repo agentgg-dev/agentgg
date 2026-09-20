@@ -730,6 +730,10 @@ If the target requires login, sign in first with:
     ? `\n## Source review of this finding\n\nA reviewer with the source code reached the verdict \`${staticReview.verdict}\`:\n\n${staticReview.reasoning}\n\nYour result counts as 'reproduced' ONLY if what you observed answers this\nreview. Say in your reasoning how it does.\n`
     : "";
 
+  // Only a run given a static review owes it an answer; the majority of
+  // reproduce calls have none, and the criterion must stay satisfiable there.
+  const reviewCriterion = staticReview ? ", and it answers the source review" : "";
+
   return `You are live-testing a security finding against a running
 application, using only the browser tools attached to this session.
 You have no access to the source code — work entirely against the live
@@ -761,7 +765,7 @@ ${proofRulesBlock}${staticReviewBlock}
    as proof, whether or not it reproduces.
 4. Decide a result:
    - 'reproduced': you observed the vulnerable behavior, it meets the proof
-     rules above, and it answers the source review.
+     rules above${reviewCriterion}.
    - 'refuted': the attack ran and a named control blocked it. Name the
      control.
    - 'inconclusive': anything else, including a run you could not finish and

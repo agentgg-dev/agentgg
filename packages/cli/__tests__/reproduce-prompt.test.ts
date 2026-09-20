@@ -23,9 +23,16 @@ describe("buildReproducePrompt", () => {
     expect(prompt).toContain("never checks the cookie");
     expect(prompt).toContain("uncertain");
     expect(prompt).toContain("different origin");
+    expect(prompt).toContain("answers the source review");
   });
 
   it("omits the static section when no review ran", () => {
-    expect(buildReproducePrompt(finding, "http://t")).not.toContain("Source review");
+    const prompt = buildReproducePrompt(finding, "http://t");
+    expect(prompt).not.toContain("Source review");
+  });
+
+  it("does not ask the 'reproduced' criterion to answer a review that isn't there", () => {
+    const prompt = buildReproducePrompt(finding, "http://t");
+    expect(prompt).not.toContain("answers the source review");
   });
 });
