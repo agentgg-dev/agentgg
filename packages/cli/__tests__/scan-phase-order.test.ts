@@ -242,4 +242,31 @@ describe("scan phase order", () => {
     expect(heir.validation?.verdict).toBe("confirmed");
     expect(heir.cvss?.baseScore).toBe(9.8);
   });
+
+  it("keeps a promoted duplicate under --delete-duplicates and deletes the rest", async () => {
+    detectorMock.runAgent.mockImplementation(async ({ agent }) =>
+      agent.slug === "alpha"
+        ? [mockFinding("alpha", "alpha-1"), mockFinding("alpha", "alpha-2")]
+        : [mockFinding("beta", "beta-1")],
+    );
+    detectorMock.dedupeFindings.mockImplementation(async () => [
+      { primaryId: "alpha-1", duplicateIds: ["beta-1", "alpha-2"], reasoning: "same sink" },
+    ]);
+    detectorMock.validateFinding.mockImplementation(async ({ finding }) =>
+      finding.agentSlug === "alpha"
+        ? { verdict: "false-positive" as const, reasoning: "not reachable" }
+        : { verdict: "confirmed" as const, reasoning: "reachable" },
+    );
+
+    await runScan(projectRoot, { ...opts(), deleteDuplicates: true }, env);
+
+    // beta-1 took over from the rejected primary, so it survives deletion.
+    const heir = findingOnDisk("beta", "beta-1");
+    expect(heir.dedup).toBeUndefined();
+    expect(heir.cvss?.baseScore).toBe(9.8);
+
+    // The demoted primary and the remaining duplicate are gone from disk.
+    const alpha = readFileRecord(outputDir, "alpha", FILE);
+    expect(alpha?.findings.map((f) => f.id)).toEqual([]);
+  });
 });

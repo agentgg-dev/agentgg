@@ -1589,8 +1589,10 @@ export async function runScan(
     // post-detection phases: unlike those per-finding passes it needs every
     // finding for a file co-located, and running it here keeps validation
     // and scoring off findings that would be collapsed anyway. Marks the
-    // non-primary findings with a `dedup` field; `--delete-duplicates`
-    // strips them instead. The report render below then collapses them.
+    // non-primary findings with a `dedup` field; the report render below
+    // then collapses them. `--delete-duplicates` strips them from disk, but
+    // only after the promotion wave, since until then a duplicate may still
+    // turn out to be the finding that ships.
     if (opts.dedup && findings.length > 0) {
       const comparable = dedupeCandidates(findings).filter(
         (f) => f.filePath && f.filePath !== "(unknown)",
@@ -1670,14 +1672,10 @@ export async function runScan(
           const record = readFileRecord(outDir, agentSlug, filePath);
           if (!record) continue;
           const inMemory = new Map(group.map((f) => [f.id, f]));
-          if (opts.deleteDuplicates) {
-            record.findings = record.findings.filter((rec) => !inMemory.has(rec.id));
-          } else {
-            record.findings = record.findings.map((rec) => {
-              const live = inMemory.get(rec.id);
-              return live?.dedup ? { ...rec, dedup: live.dedup } : rec;
-            });
-          }
+          record.findings = record.findings.map((rec) => {
+            const live = inMemory.get(rec.id);
+            return live?.dedup ? { ...rec, dedup: live.dedup } : rec;
+          });
           record.analysisHistory.push({
             runId: runMeta.runId,
             phase: "dedup",
@@ -1695,13 +1693,7 @@ export async function runScan(
             }
           }
         }
-        const verb = opts.deleteDuplicates ? "deleted" : "marked";
-        console.log(`  ${verb} ${totalDuplicates} duplicate(s)`);
-        // When deleting, drop them from the in-memory list too so the
-        // report render below doesn't re-include them.
-        if (opts.deleteDuplicates && totalDuplicates > 0) {
-          findings = findings.filter((f) => !f.dedup);
-        }
+        console.log(`  marked ${totalDuplicates} duplicate(s)`);
       } else {
         console.log("\nDe-duplication: nothing to compare (no file has 2+ findings).");
       }
@@ -1950,6 +1942,42 @@ export async function runScan(
         reproduceMaxTurns: Number(opts.reproduceMaxTurns ?? 50),
         signal: scanAbortController.signal,
       });
+    }
+
+    // `--delete-duplicates` strips the duplicates only here: the promotion
+    // wave above may have handed a group to one of them, so deleting any
+    // earlier can throw away the finding that ships.
+    if (opts.dedup && opts.deleteDuplicates) {
+      const doomed = findings.filter((f) => f.dedup);
+      if (doomed.length > 0) {
+        const byShard = new Map<string, { agentSlug: string; filePath: string; ids: Set<string> }>();
+        for (const f of doomed) {
+          const normalized = f.filePath.replace(/\\/g, "/");
+          if (isAbsolute(normalized)) continue;
+          const key = `${f.agentSlug} ${normalized}`;
+          const entry = byShard.get(key) ?? {
+            agentSlug: f.agentSlug,
+            filePath: normalized,
+            ids: new Set<string>(),
+          };
+          entry.ids.add(f.id);
+          byShard.set(key, entry);
+        }
+        for (const { agentSlug, filePath, ids } of byShard.values()) {
+          const record = readFileRecord(outDir, agentSlug, filePath);
+          if (!record) continue;
+          record.findings = record.findings.filter((rec) => !ids.has(rec.id));
+          try {
+            writeFileRecord(outDir, record);
+          } catch (err) {
+            if (opts.verbose) {
+              logError(`persist failed for ${agentSlug}/${filePath}: ${(err as Error).message}`);
+            }
+          }
+        }
+        findings = findings.filter((f) => !f.dedup);
+        console.log(`\nDeleted ${doomed.length} duplicate(s) from their file records`);
+      }
     }
 
     // -------- scoring phase --------
@@ -2422,7 +2450,7 @@ export function registerScanCommand(program: Command): void {
     )
     .option(
       "--delete-duplicates",
-      "With --dedup, physically remove duplicate findings from their FileRecords instead of just marking them (default: keep + mark).",
+      "With --dedup, physically remove duplicate findings from their FileRecords instead of just marking them (default: keep + mark). Removal happens after validation, so a duplicate that takes over from a rejected primary is kept.",
     )
     .option(
       "--serve [port]",
