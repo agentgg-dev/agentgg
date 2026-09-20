@@ -9,6 +9,7 @@ import {
   listRuns,
   readFileRecord,
   saveUserConfig,
+  updateRunStage,
   upsertScanMeta,
   writeFileRecord,
   writeRunMeta,
@@ -200,6 +201,35 @@ describe("runStatus", () => {
     expect(out.findings.total).toBe(1);
     expect(out.recentRuns).toHaveLength(1);
     expect(out.recentRuns[0].runId).toBe(run.runId);
+  });
+
+  it("--json carries the same stage, progress and duplicate count as the text output", async () => {
+    upsertScanMeta(outputDir, projectRoot);
+    const primary = makeFinding({ id: "primary-1" });
+    const duplicate = makeFinding({
+      id: "dupe-1",
+      dedup: { duplicateOf: "primary-1", reasoning: "same sink" },
+    });
+    writeFileRecord(outputDir, makeRecord("a.ts", [primary, duplicate]));
+    const run = createRunMeta({ type: "scan" });
+    writeRunMeta(outputDir, run);
+    updateRunStage(outputDir, run.runId, "validate", { done: 3, total: 7 });
+    const logs: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      logs.push(args.join(" "));
+    });
+
+    await runStatus(outputDir, { json: true });
+    const out = JSON.parse(logs[0]);
+    expect(out.findings.duplicates).toBe(1);
+    expect(out.recentRuns[0].stage).toBe("validate");
+    expect(out.recentRuns[0].progress).toEqual({ done: 3, total: 7 });
+
+    logs.length = 0;
+    await runStatus(outputDir, {});
+    const text = logs.join("\n");
+    expect(text).toContain("duplicates: 1");
+    expect(text).toContain("Stage: validate (3/7)");
   });
 });
 

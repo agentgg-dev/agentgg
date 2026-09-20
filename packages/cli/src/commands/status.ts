@@ -49,6 +49,8 @@ export async function runStatus(outputArg: string, opts: StatusOpts): Promise<vo
     verdictCounts[f.validation.verdict] = (verdictCounts[f.validation.verdict] ?? 0) + 1;
   }
 
+  const duplicates = allFindings.filter((f) => f.dedup).length;
+
   if (opts.json) {
     console.log(
       JSON.stringify(
@@ -63,6 +65,7 @@ export async function runStatus(outputArg: string, opts: StatusOpts): Promise<vo
           findings: {
             total: allFindings.length,
             validated: validated.length,
+            duplicates,
             byVerdict: verdictCounts,
           },
           recentRuns: runs.slice(0, 10).map((r) => ({
@@ -71,6 +74,8 @@ export async function runStatus(outputArg: string, opts: StatusOpts): Promise<vo
             phase: r.phase,
             startedAt: r.startedAt,
             completedAt: r.completedAt,
+            stage: r.stage,
+            progress: r.progress,
             stats: r.stats,
           })),
         },
@@ -95,7 +100,6 @@ export async function runStatus(outputArg: string, opts: StatusOpts): Promise<vo
   console.log("");
 
   if (allFindings.length > 0) {
-    const duplicates = allFindings.filter((f) => f.dedup).length;
     console.log("Findings");
     console.log(`  total:      ${allFindings.length}`);
     console.log(`  validated:  ${validated.length}/${allFindings.length}`);
