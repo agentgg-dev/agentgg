@@ -363,4 +363,33 @@ describe("runRevalidate", () => {
     const reloaded = readFileRecord(outputDir, "sql-injection", "server.js");
     expect(reloaded?.findings[0].validation?.verdict).toBe("false-positive");
   });
+  it("validates the duplicates of a rejected primary and promotes the survivor", async () => {
+    saveAnthropicConfig();
+    upsertScanMeta(outputDir, projectRoot);
+    writeFile("server.js", "const x = 1;");
+    const primary = makeFinding({ id: "primary-1", agentSlug: "alpha" });
+    const duplicate = makeFinding({
+      id: "dupe-1",
+      agentSlug: "beta",
+      dedup: { duplicateOf: "primary-1", reasoning: "same sink" },
+    });
+    writeFileRecord(outputDir, makeRecord("server.js", [primary]));
+    writeFileRecord(outputDir, makeRecord("server.js", [duplicate]));
+    detectorMock.validateFinding.mockImplementation(async ({ finding }) =>
+      finding.id === "primary-1"
+        ? { verdict: "false-positive", reasoning: "not reachable" }
+        : { verdict: "confirmed", reasoning: "reachable" },
+    );
+    vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await runRevalidate(outputDir, { concurrency: 1, summary: false }, env);
+
+    const heir = readFileRecord(outputDir, "beta", "server.js")?.findings[0];
+    expect(heir?.validation?.verdict).toBe("confirmed");
+    expect(heir?.dedup).toBeUndefined();
+
+    const demoted = readFileRecord(outputDir, "alpha", "server.js")?.findings[0];
+    expect(demoted?.validation?.verdict).toBe("false-positive");
+    expect(demoted?.dedup?.duplicateOf).toBe("dupe-1");
+  });
 });

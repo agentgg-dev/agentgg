@@ -16,6 +16,7 @@ import { loadDefaultScope } from "../default-scope.js";
 import { handleDetectorError } from "../diagnostics.js";
 import { loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
 import { logError } from "../log.js";
+import { duplicatesOfRejected, promote } from "../promote.js";
 import {
   buildCredentialsFromOpts,
   REGION_FLAG_HELP,
@@ -233,7 +234,7 @@ export async function runRevalidate(
   // regions, so concurrent workers can't race. Dirtied records are written
   // below once the pool drains.
   const concurrency = Math.max(1, opts.concurrency ?? 5);
-  await runConcurrent(tasks, concurrency, async ({ record, finding }) => {
+  const validateOne = async ({ record, finding }: Task): Promise<void> => {
     // Scope-only branch: never read the file, only ask the LLM to
     // classify against the scope document, and only persist when the
     // verdict is `out-of-scope`. In-scope/uncertain results are logged
@@ -306,7 +307,35 @@ export async function runRevalidate(
     } catch (err) {
       handleDetectorError(opts, `validate:${finding.id}`, err, revalidateAbortController);
     }
-  });
+  };
+  await runConcurrent(tasks, concurrency, validateOne);
+
+  // Promotion wave, matching the static pass inside `scan`: a primary this
+  // run rejected would take its whole group out of the report, so classify
+  // its duplicates and hand the group to the first one that survives. This
+  // command owns every shard in the directory, so nothing is off limits.
+  const recordOf = new Map<string, FileRecord>();
+  for (const record of records) {
+    for (const finding of record.findings) recordOf.set(finding.id, record);
+  }
+  const allFindings = records.flatMap((r) => r.findings);
+  const secondWave = duplicatesOfRejected(allFindings);
+  if (secondWave.length > 0) {
+    console.log(`  Validating ${secondWave.length} duplicate(s) of rejected primaries`);
+    await runConcurrent(secondWave, concurrency, async (finding) => {
+      const record = recordOf.get(finding.id);
+      if (record) await validateOne({ record, finding });
+    });
+  }
+  const promoted = promote(allFindings, () => true);
+  if (promoted.length > 0) {
+    const heirs = promoted.filter((f) => !f.dedup).length;
+    console.log(`  Promoted ${heirs} finding(s) whose primary was rejected.`);
+    for (const finding of promoted) {
+      const record = recordOf.get(finding.id);
+      if (record) dirtyRecords.add(record);
+    }
+  }
 
   // Write dirtied records back. Append a validate-phase AnalysisRun
   // entry so the history reflects this revalidate pass.
