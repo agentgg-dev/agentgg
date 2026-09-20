@@ -47,10 +47,18 @@ export function promote(findings: Finding[], canMark: (f: Finding) => boolean): 
       if (f.id === heir.id) continue;
       if (f.id === primary.id) {
         // Demoted primary: gets heir's original reasoning/runId (that pair was actually compared).
-        f.dedup = { duplicateOf: heir.id, reasoning: heirReasoning, ...(heirRunId ? { runId: heirRunId } : {}) };
+        f.dedup = {
+          duplicateOf: heir.id,
+          reasoning: heirReasoning,
+          ...(heirRunId ? { runId: heirRunId } : {}),
+        };
       } else {
         // Non-primary duplicates: keep their own reasoning/runId (never directly compared to heir).
-        f.dedup = { duplicateOf: heir.id, reasoning: f.dedup?.reasoning ?? "", ...(f.dedup?.runId ? { runId: f.dedup.runId } : {}) };
+        f.dedup = {
+          duplicateOf: heir.id,
+          reasoning: f.dedup?.reasoning ?? "",
+          ...(f.dedup?.runId ? { runId: f.dedup.runId } : {}),
+        };
       }
     }
     changed.push(...cluster);
