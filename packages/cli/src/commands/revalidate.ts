@@ -149,16 +149,25 @@ export async function runRevalidate(
   // (record, finding) pairs we'll actually re-validate.
   type Task = { record: FileRecord; finding: Finding };
   const tasks: Task[] = [];
+  let skippedDupes = 0;
   for (const record of records) {
     for (const finding of record.findings) {
       if (!opts.force && finding.validation) continue;
+      // A duplicate is represented by its primary, so it is not classified
+      // on its own. `agentgg dedup --force` clears the marker first.
+      if (finding.dedup) {
+        skippedDupes++;
+        continue;
+      }
       tasks.push({ record, finding });
     }
   }
 
   if (tasks.length === 0) {
     console.log(
-      `Nothing to revalidate. ${records.length} file(s) on disk; every finding already has a verdict.`,
+      `Nothing to revalidate. ${records.length} file(s) on disk; every finding already has a verdict${
+        skippedDupes > 0 ? ` or is a duplicate (${skippedDupes} skipped)` : ""
+      }.`,
     );
     console.log("  Pass --force to re-classify every finding.");
     return;

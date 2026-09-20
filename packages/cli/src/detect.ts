@@ -368,14 +368,14 @@ export interface Detector {
   ): Promise<CvssScore>;
 
   /**
-   * De-duplication phase — the final gather pass. Given every finding for
-   * ONE source file (unioned across agent shards) and, when readable, the
+   * De-duplication phase — the gather pass. Given every finding for ONE
+   * source file (unioned across agent shards) and, when readable, the
    * file content, return the equivalence classes of findings that describe
    * the same root cause at the same location. The caller marks the
    * non-primary members with a `dedup` field. Single structured-output
    * call, no tools (the finding metadata + file are already in the prompt).
    * Cannot run distributed: it needs all of a file's findings co-located,
-   * so it runs only after scan/validate/score complete.
+   * so it runs only once detection for that file has finished.
    */
   dedupeFindings(
     args: { filePath: string; findings: Finding[]; fileContent?: string } & AbortableArgs,
