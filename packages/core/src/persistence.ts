@@ -370,13 +370,24 @@ export function getEvidenceDir(outputDir: string, agentSlug: string, findingId: 
 }
 
 /**
- * Compute the effective verdict of a finding: dynamic verdict takes
- * precedence over static when present and confirmed; dynamic
- * not-reproduced never downgrades the static verdict.
+ * The one verdict a reader sees: the static verdict and the live result
+ * combined. A live result never pushes a verdict below `uncertain`, and a
+ * live `reproduced` only reaches `confirmed` when static did not reject it.
  */
 export function effectiveVerdict(
   f: Finding,
 ): "confirmed" | "false-positive" | "out-of-scope" | "uncertain" | undefined {
-  if (f.validation?.dynamic?.verdict === "confirmed") return "confirmed" as const;
-  return f.validation?.verdict;
+  const staticVerdict = f.validation?.verdict;
+  const live = f.live?.result;
+  if (staticVerdict === "out-of-scope") return "out-of-scope";
+  if (live === undefined) return staticVerdict;
+  if (staticVerdict === undefined) {
+    if (live === "reproduced") return "confirmed";
+    return live === "refuted" ? "uncertain" : undefined;
+  }
+  if (live === "reproduced") {
+    return staticVerdict === "false-positive" ? "uncertain" : "confirmed";
+  }
+  if (live === "refuted" && staticVerdict === "confirmed") return "uncertain";
+  return staticVerdict;
 }

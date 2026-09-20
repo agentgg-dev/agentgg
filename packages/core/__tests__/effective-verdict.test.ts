@@ -16,30 +16,30 @@ const base = {
   notifications: [],
 } as any;
 
-describe("effectiveVerdict", () => {
-  it("dynamic confirm upgrades", () => {
-    expect(
-      effectiveVerdict({
-        ...base,
-        validation: {
-          verdict: "uncertain",
-          reasoning: "r",
-          dynamic: { verdict: "confirmed", reasoning: "y" },
-        },
-      }),
-    ).toBe("confirmed");
-  });
+const withBoth = (verdict: string, result?: string) => ({
+  ...base,
+  ...(verdict === "none" ? {} : { validation: { verdict, reasoning: "r" } }),
+  ...(result ? { live: { result, reasoning: "l", counterevidence: "c" } } : {}),
+});
 
-  it("dynamic not-reproduced does not downgrade a static confirmed", () => {
-    expect(
-      effectiveVerdict({
-        ...base,
-        validation: {
-          verdict: "confirmed",
-          reasoning: "r",
-          dynamic: { verdict: "not-reproduced", reasoning: "n" },
-        },
-      }),
-    ).toBe("confirmed");
+describe("effectiveVerdict", () => {
+  it.each([
+    ["confirmed", "reproduced", "confirmed"],
+    ["confirmed", "inconclusive", "confirmed"],
+    ["confirmed", undefined, "confirmed"],
+    ["confirmed", "refuted", "uncertain"],
+    ["uncertain", "reproduced", "confirmed"],
+    ["uncertain", "refuted", "uncertain"],
+    ["uncertain", "inconclusive", "uncertain"],
+    ["false-positive", "reproduced", "uncertain"],
+    ["false-positive", "refuted", "false-positive"],
+    ["false-positive", undefined, "false-positive"],
+    ["out-of-scope", undefined, "out-of-scope"],
+    ["none", "reproduced", "confirmed"],
+    ["none", "refuted", "uncertain"],
+    ["none", "inconclusive", undefined],
+    ["none", undefined, undefined],
+  ])("static %s + live %s = %s", (verdict, result, expected) => {
+    expect(effectiveVerdict(withBoth(verdict, result))).toBe(expected);
   });
 });

@@ -357,6 +357,33 @@ export const CvssScore = z.object({
 });
 export type CvssScore = z.infer<typeof CvssScore>;
 
+export const LiveResult = z.enum(["reproduced", "refuted", "inconclusive"]);
+export type LiveResult = z.infer<typeof LiveResult>;
+
+export const LiveValidation = z.object({
+  result: LiveResult,
+  reasoning: z.string(),
+  /** The strongest case the live agent could make against its own result. */
+  counterevidence: z.string().default(""),
+  refused: z.boolean().optional(),
+  baseUrl: z.string().optional(),
+  evidence: z
+    .object({
+      trace: z.string().optional(),
+      video: z.string().optional(),
+      screenshots: z.array(z.string()).default([]),
+      har: z.string().optional(),
+      script: z.object({ path: z.string(), executed: z.boolean(), passed: z.boolean() }).optional(),
+      requests: z
+        .array(z.object({ method: z.string(), url: z.string(), status: z.number() }))
+        .optional(),
+      requestsFile: z.string().optional(),
+    })
+    .optional(),
+  runId: z.string().optional(),
+});
+export type LiveValidation = z.infer<typeof LiveValidation>;
+
 // ---------------------------------------------------------------------------
 // Finding (a single security issue surfaced by an agent)
 // ---------------------------------------------------------------------------
@@ -418,35 +445,10 @@ export const Finding = z.object({
        * of being coerced into a bogus verdict or silently dropped.
        */
       refused: z.boolean().optional(),
-      dynamic: z
-        .object({
-          verdict: z.enum(["confirmed", "not-reproduced"]),
-          reasoning: z.string(),
-          refused: z.boolean().optional(),
-          baseUrl: z.string().optional(),
-          evidence: z
-            .object({
-              trace: z.string().optional(),
-              video: z.string().optional(),
-              screenshots: z.array(z.string()).default([]),
-              har: z.string().optional(),
-              script: z
-                .object({ path: z.string(), executed: z.boolean(), passed: z.boolean() })
-                .optional(),
-              /** HTTP exchanges pulled from the trace, for the report's request
-               *  table. Method/url/status only; full headers live in the
-               *  linked `requestsFile`, off the mirrored record. */
-              requests: z
-                .array(z.object({ method: z.string(), url: z.string(), status: z.number() }))
-                .optional(),
-              /** Filename of the replayable `.http` dump beside the evidence. */
-              requestsFile: z.string().optional(),
-            })
-            .optional(),
-        })
-        .optional(),
     })
     .optional(),
+  /** Filled in after the live (browser) validation pass. */
+  live: LiveValidation.optional(),
   /**
    * Set by the de-duplication phase (`agentgg dedup`) when this finding
    * describes the same root cause as another finding in the SAME source
