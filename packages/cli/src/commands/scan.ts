@@ -1950,7 +1950,10 @@ export async function runScan(
     if (opts.dedup && opts.deleteDuplicates) {
       const doomed = findings.filter((f) => f.dedup);
       if (doomed.length > 0) {
-        const byShard = new Map<string, { agentSlug: string; filePath: string; ids: Set<string> }>();
+        const byShard = new Map<
+          string,
+          { agentSlug: string; filePath: string; ids: Set<string> }
+        >();
         for (const f of doomed) {
           const normalized = f.filePath.replace(/\\/g, "/");
           if (isAbsolute(normalized)) continue;

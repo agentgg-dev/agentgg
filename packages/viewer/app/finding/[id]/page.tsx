@@ -1,4 +1,4 @@
-import type { Finding } from "@agentgg/core";
+import { effectiveVerdict, type Finding } from "@agentgg/core";
 import { ArrowLeft, ExternalLink, Hash } from "lucide-react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -38,7 +38,7 @@ export default async function FindingPage({ params }: { params: Promise<{ id: st
         <div className="rounded-xl border border-bg-border bg-bg-panel/40 p-6 md:p-8 mb-6">
           <div className="flex flex-wrap items-center gap-2 mb-4">
             <SeverityBadge severity={finding.severity} />
-            <VerdictBadge verdict={finding.validation?.verdict} />
+            <VerdictBadge verdict={effectiveVerdict(finding)} />
             <DuplicateBadge dedup={finding.dedup} />
             <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider border border-bg-border bg-bg/40 text-amber">
               {finding.agentSlug}

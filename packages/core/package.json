@@ -11,6 +11,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./verdict": {
+      "types": "./dist/verdict.d.ts",
+      "import": "./dist/verdict.js"
     }
   },
   "files": [

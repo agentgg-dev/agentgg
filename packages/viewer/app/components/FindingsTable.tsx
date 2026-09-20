@@ -1,6 +1,7 @@
 "use client";
 
 import type { Finding, Severity } from "@agentgg/core";
+import { effectiveVerdict } from "@agentgg/core/verdict";
 import { ChevronRight, Search } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
@@ -50,7 +51,7 @@ export default function FindingsTable({ findings, agents }: Props) {
       .filter(({ f }) => {
         if (agent !== "all" && f.agentSlug !== agent) return false;
         if (verdict !== "all") {
-          const v = f.validation?.verdict ?? "pending";
+          const v = effectiveVerdict(f) ?? "pending";
           if (v !== verdict) return false;
         }
         if (dedup === "duplicate" && !f.dedup) return false;
@@ -150,7 +151,7 @@ export default function FindingsTable({ findings, agents }: Props) {
             >
               <div className="flex flex-col items-center gap-2 pt-1 min-w-[88px]">
                 <SeverityBadge severity={f.severity} />
-                <VerdictBadge verdict={f.validation?.verdict} />
+                <VerdictBadge verdict={effectiveVerdict(f)} />
                 <DuplicateBadge dedup={f.dedup} />
               </div>
 

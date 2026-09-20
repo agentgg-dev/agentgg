@@ -1,6 +1,7 @@
 import "server-only";
 import { resolve } from "node:path";
 import {
+  effectiveVerdict,
   type FileRecord,
   type Finding,
   listRuns,
@@ -62,13 +63,14 @@ export function loadViewerState(): ViewerState {
   const findingsValidated = findings.filter((f) => f.validation).length;
   const findingsDuplicate = findings.filter((f) => f.dedup).length;
   const findingsConfirmedUnique = findings.filter(
-    (f) => f.validation?.verdict === "confirmed" && !f.dedup,
+    (f) => effectiveVerdict(f) === "confirmed" && !f.dedup,
   ).length;
 
   const findingsByVerdict: Record<string, number> = {};
   for (const f of findings) {
-    if (!f.validation) continue;
-    findingsByVerdict[f.validation.verdict] = (findingsByVerdict[f.validation.verdict] ?? 0) + 1;
+    const verdict = effectiveVerdict(f);
+    if (!verdict) continue;
+    findingsByVerdict[verdict] = (findingsByVerdict[verdict] ?? 0) + 1;
   }
 
   const agentCounts: Record<string, number> = {};

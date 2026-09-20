@@ -41,11 +41,10 @@ export interface ScanReportInput {
   byAgent: Record<string, number>;
   /**
    * When false (default), every finding gets a per-finding `.md`
-   * regardless of verdict — including those with `validation.verdict
-   * === "false-positive"`. When true, false-positive findings are
-   * skipped when writing per-finding `.md` files; the summary still
-   * reports the FP count so the user can see how many were filtered
-   * out.
+   * regardless of verdict. When true, findings whose combined verdict is
+   * `false-positive` are skipped when writing per-finding `.md` files;
+   * the summary still reports the FP count so the user can see how many
+   * were filtered out.
    */
   excludeFalsePositives?: boolean;
 }
@@ -99,7 +98,7 @@ export function writeMarkdownReport(input: ScanReportInput): ScanReportOutput {
   // Duplicates are always collapsed out of the rendered set.
   const renderable = (
     input.excludeFalsePositives
-      ? input.findings.filter((f) => f.validation?.verdict !== "false-positive")
+      ? input.findings.filter((f) => effectiveVerdict(f) !== "false-positive")
       : [...input.findings]
   )
     .filter((f) => !f.dedup)
@@ -200,10 +199,10 @@ export function renderFindingMd(
     meta.push(`**CVSS:** ${f.cvss.baseScore.toFixed(1)} (\`${f.cvss.vector}\`)`);
   }
   if (f.validation || f.live) {
-    // effectiveVerdict can only be undefined here when a finding with no
-    // static verdict got an inconclusive live result: fall back to
-    // `uncertain`, the bucket for "we couldn't tell".
-    meta.push(`**Validation:** \`${effectiveVerdict(f) ?? "uncertain"}\``);
+    // Undefined here means no static verdict plus an inconclusive live
+    // result, which settles on no verdict at all.
+    const verdict = effectiveVerdict(f);
+    meta.push(verdict ? `**Validation:** \`${verdict}\`` : "**Validation:** _not settled_");
   } else {
     meta.push("**Validation:** _not run_");
   }
@@ -225,8 +224,10 @@ export function renderFindingMd(
     lines.push("");
     lines.push(live.reasoning);
     lines.push("");
-    lines.push(`**Counterevidence:** ${live.counterevidence}`);
-    lines.push("");
+    if (live.counterevidence.trim().length > 0) {
+      lines.push(`**Counterevidence:** ${live.counterevidence}`);
+      lines.push("");
+    }
     const ev = live.evidence;
     if (ev) {
       const link = (name: string) =>
@@ -363,20 +364,22 @@ export function renderSummaryMd(
   }
   lines.push("");
 
+  // Primaries only, on the combined verdict: a duplicate is represented by
+  // its primary and never gets a verdict of its own, and a live result can
+  // move the one a primary carries.
+  const primaries = input.findings.filter((f) => !f.dedup);
   const byVerdict: Record<string, number> = {};
   let unvalidated = 0;
-  for (const f of input.findings) {
-    if (f.validation) {
-      byVerdict[f.validation.verdict] = (byVerdict[f.validation.verdict] ?? 0) + 1;
-    } else {
-      unvalidated++;
-    }
+  for (const f of primaries) {
+    const verdict = effectiveVerdict(f);
+    if (verdict) byVerdict[verdict] = (byVerdict[verdict] ?? 0) + 1;
+    else unvalidated++;
   }
-  if (input.findings.length > 0) {
+  if (primaries.length > 0) {
     lines.push("## Findings by validation verdict");
     lines.push("");
     const verdictKeys = Object.keys(byVerdict).sort();
-    if (verdictKeys.length === 0 && unvalidated === input.findings.length) {
+    if (verdictKeys.length === 0 && unvalidated === primaries.length) {
       lines.push("_Validation phase did not run (pass `--validate` to enable)._");
     } else {
       for (const v of verdictKeys) lines.push(`- \`${v}\`: ${byVerdict[v]}`);

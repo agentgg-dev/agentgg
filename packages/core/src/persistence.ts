@@ -44,7 +44,6 @@ import {
 import {
   AgentRun,
   FileRecord,
-  type Finding,
   ReconReport,
   RunMeta,
   ScanMeta,
@@ -405,25 +404,6 @@ export function getEvidenceDir(outputDir: string, agentSlug: string, findingId: 
   return join(outputDir, "state", "files", agentSlug, "live-validation", findingId);
 }
 
-/**
- * The one verdict a reader sees: the static verdict and the live result
- * combined. A live result never pushes a verdict below `uncertain`, and a
- * live `reproduced` only reaches `confirmed` when static did not reject it.
- */
-export function effectiveVerdict(
-  f: Finding,
-): "confirmed" | "false-positive" | "out-of-scope" | "uncertain" | undefined {
-  const staticVerdict = f.validation?.verdict;
-  const live = f.live?.result;
-  if (staticVerdict === "out-of-scope") return "out-of-scope";
-  if (live === undefined) return staticVerdict;
-  if (staticVerdict === undefined) {
-    if (live === "reproduced") return "confirmed";
-    return live === "refuted" ? "uncertain" : undefined;
-  }
-  if (live === "reproduced") {
-    return staticVerdict === "false-positive" ? "uncertain" : "confirmed";
-  }
-  if (live === "refuted" && staticVerdict === "confirmed") return "uncertain";
-  return staticVerdict;
-}
+// Re-exported here so every existing `@agentgg/core` import keeps working;
+// the function itself lives in `verdict.ts`, which imports no node builtins.
+export { effectiveVerdict } from "./verdict.js";

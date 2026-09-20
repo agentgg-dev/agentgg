@@ -63,3 +63,36 @@ describe("renderFindingMd live validation", () => {
     expect(md).toContain("[requests.http](ev-dir/requests.http)");
   });
 });
+
+describe("renderFindingMd meta line and counterevidence", () => {
+  it("prints no verdict when nothing settled one", () => {
+    const md = renderFindingMd({
+      ...f,
+      validation: undefined,
+      live: { result: "inconclusive", reasoning: "the login never completed", counterevidence: "" },
+    });
+    expect(md).toContain("**Validation:** _not settled_");
+    expect(md).not.toContain("**Validation:** `uncertain`");
+  });
+
+  it("prints the combined verdict, not the static one", () => {
+    const md = renderFindingMd({
+      ...f,
+      validation: { verdict: "false-positive", reasoning: "the token is checked" },
+      live: {
+        result: "reproduced",
+        reasoning: "the forged POST went through",
+        counterevidence: "",
+      },
+    });
+    expect(md).toContain("**Validation:** `uncertain`");
+  });
+
+  it("skips the counterevidence line when the agent gave none", () => {
+    const md = renderFindingMd({
+      ...f,
+      live: { ...f.live, counterevidence: "   " },
+    });
+    expect(md).not.toContain("**Counterevidence:**");
+  });
+});
