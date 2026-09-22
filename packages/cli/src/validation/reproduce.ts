@@ -141,7 +141,12 @@ export async function runReproducePhase(args: {
 
   const phaseStart = Date.now();
   let done = 0;
-  const counts: Record<LiveResult, number> = { reproduced: 0, refuted: 0, inconclusive: 0 };
+  const counts: Record<LiveResult, number> = {
+    reproduced: 0,
+    refuted: 0,
+    inconclusive: 0,
+    error: 0,
+  };
   try {
     for (const finding of work) {
       if (signal.aborted) break;
@@ -218,16 +223,17 @@ export async function runReproducePhase(args: {
         }
         logWarn(`[reproduce:${finding.id}] ${redact(reason, auth)}`);
         if (signal.aborted) break;
-        // A timeout or crash records inconclusive rather than crashing the
-        // scan; the static verdict is preserved underneath.
+        // A timeout spent the whole budget without proof, so it counts
+        // against the finding; a crash says nothing about the code.
+        const result: LiveResult = timedOut ? "inconclusive" : "error";
         finding.live = {
-          result: "inconclusive",
+          result,
           reasoning: redact(reason, auth),
           counterevidence: "",
           baseUrl: agentBaseUrl,
           runId,
         };
-        counts.inconclusive++;
+        counts[result]++;
         try {
           persistFinding(outDir, finding, detector.name, runId);
         } catch (persistErr) {
@@ -248,7 +254,7 @@ export async function runReproducePhase(args: {
     }
     if (done > 0) {
       console.log(
-        `  live validation: ${counts.reproduced} reproduced, ${counts.refuted} refuted, ${counts.inconclusive} inconclusive`,
+        `  live validation: ${counts.reproduced} reproduced, ${counts.refuted} refuted, ${counts.inconclusive} inconclusive${counts.error > 0 ? `, ${counts.error} error` : ""}`,
       );
     }
     if (counts.reproduced === 0 && done > 0) {

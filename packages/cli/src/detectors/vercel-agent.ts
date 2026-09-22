@@ -1,5 +1,6 @@
+import { existsSync } from "node:fs";
 import { type FileHandle, open, readdir, readFile } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
 import type { CvssScore, Finding, LiveResult, ReconReport } from "@agentgg/core";
 import {
   type CoreMessage,
@@ -1907,10 +1908,10 @@ export function buildTools(opts: ToolLoopOpts) {
         "Read the contents of a file. Path must be relative to the repository root. " +
         "A large file comes back one part at a time; the note at the end gives the offset of the next part.",
       parameters: ReadParameters,
-      execute: async ({ path, offset, limit }) => {
+      execute: async ({ path: requestedPath, offset, limit }) => {
         const started = Date.now();
         const shown = [
-          path,
+          requestedPath,
           offset != null && `offset=${offset}`,
           limit != null && `limit=${limit}`,
         ]
@@ -1918,6 +1919,7 @@ export function buildTools(opts: ToolLoopOpts) {
           .join(" ");
         const emit = (out: string) => logCall("Read", shown, started, out);
         if (budgetExhausted()) return emit(budgetNotice(phase, budgetBytes));
+        const path = resolveReadPath(requestedPath, cwd);
         const start = Math.max(1, offset ?? 1);
         const lineLimit = limit ?? null;
         // Signed on the range too, so the next part of a file is not a repeat.
@@ -2250,6 +2252,18 @@ function countLines(content: string): number {
   return lines.length;
 }
 
+/** Models prefix the repository's own folder name onto a path that is already
+ *  relative to the root (`myrepo/src/a.ts` when the root IS `myrepo`). Drop
+ *  that segment, but only when it points at nothing and the shorter path does:
+ *  a repository that really holds a folder of its own name keeps working. */
+function resolveReadPath(path: string, cwd: string): string {
+  const segments = path.split(/[\\/]/);
+  if (segments.length < 2 || segments[0] !== basename(resolve(cwd))) return path;
+  if (existsSync(resolve(cwd, path))) return path;
+  const stripped = segments.slice(1).join("/");
+  return existsSync(resolve(cwd, stripped)) ? stripped : path;
+}
+
 async function readToolExecute(
   path: string,
   cwd: string,
@@ -2282,7 +2296,14 @@ async function readToolExecute(
     }
     return readPage(content, start, limit);
   } catch (err) {
-    return failedRead(`Error reading file: ${(err as Error).message}`);
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      return failedRead(`Error reading file: ${(err as Error).message}`);
+    }
+    // The raw ENOENT names an absolute host path the model cannot use; this
+    // says what a usable path looks like instead.
+    return failedRead(
+      `Error: No such file: ${path}. Paths are relative to the repository root, e.g. src/server.ts.`,
+    );
   }
 }
 

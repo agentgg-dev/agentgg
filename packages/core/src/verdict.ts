@@ -9,6 +9,8 @@ import type { Finding } from "./types.js";
  * The one verdict a reader sees: the static verdict and the live result
  * combined. A live result never pushes a verdict below `uncertain`, and a
  * live `reproduced` only reaches `confirmed` when static did not reject it.
+ * A live run that found no proof takes a static `confirmed` down to
+ * `uncertain`; a broken run or a refusal leaves the static verdict alone.
  */
 export function effectiveVerdict(
   f: Finding,
@@ -16,7 +18,7 @@ export function effectiveVerdict(
   const staticVerdict = f.validation?.verdict;
   const live = f.live?.result;
   if (staticVerdict === "out-of-scope") return "out-of-scope";
-  if (live === undefined) return staticVerdict;
+  if (live === undefined || live === "error" || f.live?.refused) return staticVerdict;
   if (staticVerdict === undefined) {
     if (live === "reproduced") return "confirmed";
     return live === "refuted" ? "uncertain" : undefined;
@@ -24,6 +26,6 @@ export function effectiveVerdict(
   if (live === "reproduced") {
     return staticVerdict === "false-positive" ? "uncertain" : "confirmed";
   }
-  if (live === "refuted" && staticVerdict === "confirmed") return "uncertain";
+  if (staticVerdict === "confirmed") return "uncertain";
   return staticVerdict;
 }

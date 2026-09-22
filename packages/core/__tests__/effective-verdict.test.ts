@@ -25,21 +25,32 @@ const withBoth = (verdict: string, result?: string) => ({
 describe("effectiveVerdict", () => {
   it.each([
     ["confirmed", "reproduced", "confirmed"],
-    ["confirmed", "inconclusive", "confirmed"],
+    ["confirmed", "inconclusive", "uncertain"],
+    ["confirmed", "error", "confirmed"],
     ["confirmed", undefined, "confirmed"],
     ["confirmed", "refuted", "uncertain"],
     ["uncertain", "reproduced", "confirmed"],
     ["uncertain", "refuted", "uncertain"],
     ["uncertain", "inconclusive", "uncertain"],
+    ["uncertain", "error", "uncertain"],
     ["false-positive", "reproduced", "uncertain"],
     ["false-positive", "refuted", "false-positive"],
     ["false-positive", undefined, "false-positive"],
+    ["false-positive", "error", "false-positive"],
     ["out-of-scope", undefined, "out-of-scope"],
+    ["out-of-scope", "reproduced", "out-of-scope"],
     ["none", "reproduced", "confirmed"],
     ["none", "refuted", "uncertain"],
     ["none", "inconclusive", undefined],
+    ["none", "error", undefined],
     ["none", undefined, undefined],
   ])("static %s + live %s = %s", (verdict, result, expected) => {
     expect(effectiveVerdict(withBoth(verdict, result))).toBe(expected);
+  });
+
+  it("keeps a static confirm when the live agent refused", () => {
+    const f = withBoth("confirmed", "inconclusive");
+    f.live.refused = true;
+    expect(effectiveVerdict(f)).toBe("confirmed");
   });
 });

@@ -184,14 +184,15 @@ findings you are certain are a genuine, exploitable security
 vulnerability: the kind you would stake a CVE, a security advisory, or a
 published proof-of-concept on. That means you traced the exact unsafe
 code element AND a concrete, working exploit path from an
-attacker-reachable entry point, AND the reported sink and flow match
-that path. If you are not that certain, do not confirm.
+attacker-reachable entry point, AND the reported sink, flow and PoC
+match that path. If you are not that certain, do not confirm.
 
 Use 'uncertain' whenever a real issue that untrusted input can reach is
 plausible but you cannot stand behind the report as written: the
-reported entry point turns out to be a filter or guard, the true exploit
-path runs through a different endpoint than the title claims, or you
-could not fully verify reachability. When only a trusted actor can
+reported entry point turns out to be a filter or guard, the PoC as
+written would not work, the true exploit path runs through a different
+endpoint than the title claims, or you could not fully verify
+reachability. When only a trusted actor can
 supply the unsafe value, that is not 'uncertain': it is 'out-of-scope'
 under the scope rules, or 'false-positive' when a guard lets only
 trusted values reach the sink. 'uncertain' is the correct
@@ -199,11 +200,11 @@ home for "there is probably something here, but not the clean, certain,
 report-it-upstream finding that was described." Confirming a shaky or
 mischaracterized finding is worse than an honest 'uncertain'.
 
-Judge the vulnerability, not the exploit string. A mistake in the PoC
-does not by itself make a finding uncertain. When the unsafe code
-element and the attacker-reachable path are real, and you can state a
-payload that passes every filter and encoding step on that path, return
-'confirmed' and give the corrected payload in your reasoning.
+When the PoC as written would not work but you can see a payload that
+would, return 'uncertain' and give that payload in your reasoning. You
+cannot run code, so a payload you wrote yourself is a suggestion, not
+proof. A different host, port, or encoding of the same payload is not a
+fix and does not count against the PoC.
 `;
 
   // Last thing the model reads before it answers: either the agent's own
@@ -213,11 +214,11 @@ payload that passes every filter and encoding step on that path, return
 ${custom}`
     : `
 'confirmed' requires ALL of: you traced a working exploit path end to
-end, it is reachable by the relevant attacker, and the reported sink and
-flow match the code. A wrong payload in the PoC does not block
-'confirmed' when you can state one that works. If no working path exists
-but a real issue may still be there, return 'uncertain'. If there is no
-real vulnerability at all, return 'false-positive'.`;
+end, it is reachable by the relevant attacker, the reported sink and
+flow match the code, and the PoC as written would work. If the PoC needs
+a fix, return 'uncertain' and give the corrected payload in your
+reasoning. If there is no real vulnerability at all, return
+'false-positive'.`;
 
   return `You are reviewing a security finding produced by another agent.
 Your job is to classify it by re-examining the source code yourself.

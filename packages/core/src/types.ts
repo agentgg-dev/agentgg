@@ -357,7 +357,9 @@ export const CvssScore = z.object({
 });
 export type CvssScore = z.infer<typeof CvssScore>;
 
-export const LiveResult = z.enum(["reproduced", "refuted", "inconclusive"]);
+/** `error` is a run that broke (sandbox, MCP, provider) before the agent
+ *  could answer. Unlike `inconclusive`, it says nothing about the code. */
+export const LiveResult = z.enum(["reproduced", "refuted", "inconclusive", "error"]);
 export type LiveResult = z.infer<typeof LiveResult>;
 
 export const LiveValidation = z.object({
