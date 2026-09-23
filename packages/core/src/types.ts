@@ -376,8 +376,22 @@ export const LiveValidation = z.object({
       screenshots: z.array(z.string()).default([]),
       har: z.string().optional(),
       script: z.object({ path: z.string(), executed: z.boolean(), passed: z.boolean() }).optional(),
+      /**
+       * The captured exchanges. `requestBody` is the payload a reviewer needs
+       * to tell one attempt from the next; without it a login bypass looks
+       * like every other POST to the same path. Truncated, and REQUEST side
+       * only: this record is mirrored to a client-readable store, and a
+       * response body holds whatever the exploit reached.
+       */
       requests: z
-        .array(z.object({ method: z.string(), url: z.string(), status: z.number() }))
+        .array(
+          z.object({
+            method: z.string(),
+            url: z.string(),
+            status: z.number(),
+            requestBody: z.string().optional(),
+          }),
+        )
         .optional(),
       requestsFile: z.string().optional(),
     })

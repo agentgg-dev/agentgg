@@ -248,9 +248,14 @@ export function renderFindingMd(
       if (ev.requests && ev.requests.length > 0) {
         lines.push("### Requests");
         lines.push("");
-        lines.push("| Method | URL | Status |");
-        lines.push("| --- | --- | --- |");
-        for (const r of ev.requests) lines.push(`| ${r.method} | \`${r.url}\` | ${r.status} |`);
+        lines.push("| Method | URL | Status | Payload |");
+        lines.push("| --- | --- | --- | --- |");
+        for (const r of ev.requests) {
+          // The payload is what separates one attempt from the next: without
+          // it every login try reads as the same row.
+          const body = r.requestBody ? `\`${r.requestBody.replace(/\|/g, "\\|")}\`` : "";
+          lines.push(`| ${r.method} | \`${r.url}\` | ${r.status} | ${body} |`);
+        }
         if (ev.requestsFile)
           lines.push("", `Full request and response headers: ${link(ev.requestsFile)}.`);
         lines.push("");

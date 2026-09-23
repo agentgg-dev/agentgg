@@ -17,10 +17,19 @@ import { ensureSandboxImage } from "./image.js";
 import { runReproScript } from "./repro-script.js";
 import { type Sandbox, startLocalDockerSandbox } from "./sandbox.js";
 import { redact, type TargetAuth } from "./target-auth.js";
-import { parseTraceRequests, renderRequestsHttp } from "./trace-requests.js";
+import {
+  parseTraceRequests,
+  renderRequestsHttp,
+  requestBodyPreview,
+  type TraceResources,
+} from "./trace-requests.js";
 import { logSkips, selectWebReachable } from "./web-reachable.js";
 
 type Evidence = NonNullable<NonNullable<Finding["live"]>["evidence"]>;
+
+/** The finding record is mirrored to a client-readable store, so the payload
+ *  it carries stays short. `requests.http` keeps the full body, locally. */
+const MAX_RECORD_BODY = 512;
 
 const ORDER: Record<string, number> = {
   uncertain: 0,
@@ -361,10 +370,15 @@ export async function copyEvidence(
   const traced = await copyTrace(sandbox, evidenceDir);
   if (traced?.trace) evidence.trace = traced.trace;
   if (traced?.networkText) {
-    const requests = parseTraceRequests(traced.networkText);
+    const requests = parseTraceRequests(traced.networkText, traced.resources);
     if (requests.length > 0) {
       writeFileSync(join(evidenceDir, "requests.http"), renderRequestsHttp(requests));
-      evidence.requests = requests.map((r) => ({ method: r.method, url: r.url, status: r.status }));
+      evidence.requests = requests.map((r) => ({
+        method: r.method,
+        url: r.url,
+        status: r.status,
+        requestBody: requestBodyPreview(r, MAX_RECORD_BODY),
+      }));
       evidence.requestsFile = "requests.http";
     }
   }
@@ -403,7 +417,7 @@ async function listOut(sandbox: Sandbox, waitMs: number, pollMs: number): Promis
 async function copyTrace(
   sandbox: Sandbox,
   evidenceDir: string,
-): Promise<{ trace?: string; networkText?: string } | undefined> {
+): Promise<{ trace?: string; networkText?: string; resources?: TraceResources } | undefined> {
   const { code, stdout } = await sandbox.exec(["sh", "-c", "find /out/traces -type f 2>/dev/null"]);
   if (code !== 0) return undefined;
   const paths = stdout
@@ -415,6 +429,7 @@ async function copyTrace(
   const prefix = "/out/traces/";
   const zip = new AdmZip();
   let networkText: string | undefined;
+  const resources: TraceResources = new Map();
   for (const path of paths) {
     if (!path.startsWith(prefix)) continue;
     let buf: Buffer;
@@ -423,13 +438,16 @@ async function copyTrace(
     } catch {
       continue;
     }
-    zip.addFile(path.slice(prefix.length), buf);
+    const name = path.slice(prefix.length);
+    zip.addFile(name, buf);
     // The .network file carries the request/response snapshots for the report.
     if (path.endsWith(".network")) networkText = buf.toString("utf8");
+    // Bodies live here; the snapshots only point at them by sha1 name.
+    else if (name.startsWith("resources/")) resources.set(name.slice("resources/".length), buf);
   }
   if (zip.getEntries().length === 0) return undefined;
   zip.writeZip(join(evidenceDir, "trace.zip"));
-  return { trace: "trace.zip", networkText };
+  return { trace: "trace.zip", networkText, resources };
 }
 
 function delay(ms: number): Promise<void> {

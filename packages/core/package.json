@@ -15,6 +15,10 @@
     "./verdict": {
       "types": "./dist/verdict.d.ts",
       "import": "./dist/verdict.js"
+    },
+    "./live": {
+      "types": "./dist/live.d.ts",
+      "import": "./dist/live.js"
     }
   },
   "files": [

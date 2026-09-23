@@ -1,4 +1,5 @@
 import { effectiveVerdict, type Finding } from "@agentgg/core";
+import { liveState } from "@agentgg/core/live";
 import { ArrowLeft, ExternalLink, Hash } from "lucide-react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -9,8 +10,13 @@ import {
   VerdictBadge,
 } from "@/app/components/Badges";
 import CopyMarkdownButton from "@/app/components/CopyMarkdownButton";
+import EvidencePanel from "@/app/components/EvidencePanel";
+import FindingTabs from "@/app/components/FindingTabs";
+import { LiveResultBadge } from "@/app/components/LiveBadges";
 import Markdown from "@/app/components/Markdown";
 import Nav from "@/app/components/Nav";
+import Section from "@/app/components/Section";
+import ValidationPanel from "@/app/components/ValidationPanel";
 import { findFindingById, loadViewerState } from "@/app/lib/state";
 
 export const dynamic = "force-dynamic";
@@ -39,6 +45,7 @@ export default async function FindingPage({ params }: { params: Promise<{ id: st
           <div className="flex flex-wrap items-center gap-2 mb-4">
             <SeverityBadge severity={finding.severity} />
             <VerdictBadge verdict={effectiveVerdict(finding)} />
+            {finding.live && <LiveResultBadge state={liveState(finding)} />}
             <DuplicateBadge dedup={finding.dedup} />
             <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider border border-bg-border bg-bg/40 text-amber">
               {finding.agentSlug}
@@ -77,98 +84,84 @@ export default async function FindingPage({ params }: { params: Promise<{ id: st
           </div>
         </div>
 
-        {/* sections */}
-        <Section title="Details">
-          <Markdown source={finding.details} />
-        </Section>
-
-        <Section title="Proof of concept">
-          <Markdown source={finding.poc} />
-        </Section>
-
-        <Section title="Impact">
-          <Markdown source={finding.impact} />
-        </Section>
-
-        {finding.validation && (
-          <Section title="Validation">
-            <div className="mb-4 flex items-center gap-2">
-              <VerdictBadge verdict={finding.validation.verdict} />
-              {finding.validation.scopeRef && (
-                <span className="text-xs font-mono text-ink-dim">
-                  scope: {finding.validation.scopeRef}
-                </span>
-              )}
-            </div>
-            <Markdown source={finding.validation.reasoning} />
-          </Section>
-        )}
-
-        {finding.dedup && (
-          <Section title="Duplicate">
-            <div className="mb-4 flex flex-wrap items-center gap-2 text-xs">
-              <DuplicateBadge dedup={finding.dedup} />
-              <span className="text-ink-dim">folded into primary</span>
-              <Link
-                href={`/finding/${finding.dedup.duplicateOf}`}
-                className="inline-flex items-center gap-1 font-mono text-cyan hover:text-cyan-glow transition-colors"
-              >
-                <Hash className="w-3 h-3" />
-                {finding.dedup.duplicateOf}
-              </Link>
-            </div>
-            <Markdown source={finding.dedup.reasoning} />
-          </Section>
-        )}
-
-        {finding.cvss && (
-          <Section title="CVSS 3.1">
-            <div className="font-mono text-xs text-cyan break-all mb-3">{finding.cvss.vector}</div>
-            <div className="text-sm text-ink mb-3">
-              Base score:{" "}
-              <span className="text-amber font-semibold">{finding.cvss.baseScore.toFixed(1)}</span>{" "}
-              · <SeverityBadge severity={finding.cvss.severity} />
-            </div>
-            <Markdown source={finding.cvss.justification} />
-          </Section>
-        )}
-
-        {finding.references.length > 0 && (
-          <Section title="References">
-            <ul className="space-y-2">
-              {finding.references.map((ref) => (
-                <li key={ref} className="text-sm">
-                  {ref.startsWith("http") ? (
-                    <a
-                      href={ref}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1.5 text-cyan hover:text-cyan-glow transition-colors"
-                    >
-                      <ExternalLink className="w-3.5 h-3.5" />
-                      {ref}
-                    </a>
-                  ) : (
-                    <span className="font-mono text-ink-muted">{ref}</span>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </Section>
-        )}
+        <FindingTabs
+          details={<DetailsPanel finding={finding} />}
+          validation={<ValidationPanel finding={finding} />}
+          evidence={<EvidencePanel finding={finding} />}
+        />
       </main>
     </>
   );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function DetailsPanel({ finding }: { finding: Finding }) {
   return (
-    <section className="rounded-xl border border-bg-border bg-bg-panel/40 p-6 md:p-8 mb-5">
-      <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-amber mb-3">
-        {title}
-      </div>
-      {children}
-    </section>
+    <>
+      <Section title="Details">
+        <Markdown source={finding.details} />
+      </Section>
+
+      <Section title="Proof of concept">
+        <Markdown source={finding.poc} />
+      </Section>
+
+      <Section title="Impact">
+        <Markdown source={finding.impact} />
+      </Section>
+
+      {finding.dedup && (
+        <Section title="Duplicate">
+          <div className="mb-4 flex flex-wrap items-center gap-2 text-xs">
+            <DuplicateBadge dedup={finding.dedup} />
+            <span className="text-ink-dim">folded into primary</span>
+            <Link
+              href={`/finding/${finding.dedup.duplicateOf}`}
+              className="inline-flex items-center gap-1 font-mono text-cyan hover:text-cyan-glow transition-colors"
+            >
+              <Hash className="w-3 h-3" />
+              {finding.dedup.duplicateOf}
+            </Link>
+          </div>
+          <Markdown source={finding.dedup.reasoning} />
+        </Section>
+      )}
+
+      {finding.cvss && (
+        <Section title="CVSS 3.1">
+          <div className="font-mono text-xs text-cyan break-all mb-3">{finding.cvss.vector}</div>
+          <div className="text-sm text-ink mb-3">
+            Base score:{" "}
+            <span className="text-amber font-semibold">{finding.cvss.baseScore.toFixed(1)}</span> ·{" "}
+            <SeverityBadge severity={finding.cvss.severity} />
+          </div>
+          <Markdown source={finding.cvss.justification} />
+        </Section>
+      )}
+
+      {finding.references.length > 0 && (
+        <Section title="References">
+          <ul className="space-y-2">
+            {finding.references.map((ref) => (
+              <li key={ref} className="text-sm">
+                {ref.startsWith("http") ? (
+                  <a
+                    href={ref}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1.5 text-cyan hover:text-cyan-glow transition-colors"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    {ref}
+                  </a>
+                ) : (
+                  <span className="font-mono text-ink-muted">{ref}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </Section>
+      )}
+    </>
   );
 }
 
