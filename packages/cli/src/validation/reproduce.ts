@@ -198,6 +198,14 @@ export async function runReproducePhase(args: {
           // evidence.script.path link resolves.
           mkdirSync(evidenceDir, { recursive: true });
           writeFileSync(join(evidenceDir, "repro.spec.ts"), res.script);
+          // The runner's own words, next to the script. Without them a replay
+          // that never started looks the same as an exploit that stopped working.
+          writeFileSync(join(evidenceDir, "repro-run.log"), script.output);
+          if (!script.passed) {
+            logWarn(
+              `[reproduce:${finding.id}] the replay ${script.executed ? "did not pass" : "never ran"}: ${script.output.split("\n")[0] ?? ""}`,
+            );
+          }
           evidence.script = { path: script.path, executed: script.executed, passed: script.passed };
         }
 

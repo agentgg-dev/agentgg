@@ -773,7 +773,15 @@ ${proofRulesBlock}${staticReviewBlock}
 5. When 'reproduced', also write a self-contained Playwright test (the
    source for a \`repro.spec.ts\` file) that replays every step you just
    performed, including login, so someone else can re-run it and see the
-   same result. Omit \`script\` otherwise.
+   same result. Omit \`script\` otherwise. The script runs unattended, so
+   write it for the test runner rather than for a person watching:
+   - Anything that blocks page load must be handled before the navigation
+     that triggers it, not awaited after it. A handler registered but never
+     answered leaves the navigation waiting until the test times out.
+   - Assert on what the browser ended up with, not on an intermediate state
+     the navigation already consumed on your behalf.
+   - Assert the vulnerable effect itself, not a side effect that a fixed
+     application would also produce.
 
 Be honest: a PoC that fails to reproduce is a valid, useful outcome. Do
 not report 'reproduced' on a guess; only report what you actually observed

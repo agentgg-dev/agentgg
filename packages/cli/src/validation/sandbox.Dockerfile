@@ -1,6 +1,6 @@
 # Live-validation sandbox: Playwright + Chromium + @playwright/mcp SSE server.
 # Build with this file's own directory as the context (it COPYs url-banner.js):
-#   docker build -f packages/cli/src/validation/sandbox.Dockerfile -t agentgg/live-sandbox:pw1.56.0-mcp0.0.41-3 packages/cli/src/validation
+#   docker build -f packages/cli/src/validation/sandbox.Dockerfile -t agentgg/live-sandbox:pw1.56.0-mcp0.0.41-4 packages/cli/src/validation
 #
 # @playwright/mcp 0.0.41 pinned: it depends on playwright 1.56.0-alpha, so the
 # image installs that exact playwright and its matching chromium on top of the
@@ -14,6 +14,12 @@ WORKDIR /srv
 # Chromium build (the base image ships stable 1.56.0 browsers; the alpha may differ).
 RUN npm install -g @playwright/mcp@0.0.41 playwright@1.56.0-alpha-2025-10-01 \
   && playwright install chromium
+
+# The replay runs `npx playwright test /srv/repro.spec.ts`, and every generated
+# script imports `@playwright/test`. A global install is not on the resolution
+# path from /srv, so it goes in the working directory. Version 1.56.0 matches
+# the base image's browsers; the alpha above is only for the MCP server.
+RUN npm install --prefix /srv --no-audit --no-fund @playwright/test@1.56.0
 
 # Trace/video/session artifacts land here; the host copies them out.
 RUN mkdir -p /out
