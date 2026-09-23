@@ -1936,7 +1936,7 @@ export async function runScan(
         auth: parseTargetAuth(opts),
         context: opts.targetContext,
         image: opts.targetImage ?? DEFAULT_SANDBOX_IMAGE,
-        timeoutMs: Number(opts.reproduceTimeout ?? 300) * 1000,
+        timeoutMs: Number(opts.reproduceTimeout ?? 600) * 1000,
         budgetMs: Number(opts.reproduceBudget ?? 1800) * 1000,
         max: Number(opts.reproduceMax ?? 50),
         reproduceMaxTurns: Number(opts.reproduceMaxTurns ?? 50),
@@ -2513,9 +2513,9 @@ export function registerScanCommand(program: Command): void {
     )
     .option(
       "--reproduce-timeout <s>",
-      "Per-finding reproduction timeout in seconds (default 300).",
+      "Per-finding reproduction timeout in seconds (default 600). A backstop only: the turn cap (--reproduce-max-turns) is meant to end a run first, because it stops cleanly with a verdict, while a timeout aborts and keeps no evidence.",
       (v) => parseInt(v, 10),
-      300,
+      600,
     )
     .option(
       "--reproduce-budget <s>",
