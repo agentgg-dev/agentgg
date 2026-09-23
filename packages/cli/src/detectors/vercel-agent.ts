@@ -1350,19 +1350,21 @@ export class VercelAgentDetector implements Detector {
     )}\n\n${reproduceJsonInstruction()}`;
     // Tools come only from the sandbox's Playwright MCP server: no Read/Glob/
     // Grep, so the session works against the live target and nothing else.
-    // hardStop's stall counter is fed by buildTools, which is absent here, so
-    // only its reserved last turn applies.
     let client: Awaited<ReturnType<typeof experimental_createMCPClient>> | undefined;
     try {
       client = await experimental_createMCPClient({
         transport: { type: "sse", url: args.browserEndpoint },
       });
-      const tools = await client.tools();
+      const mcpTools = await client.tools();
       // The Claude path gets an MCP status line from its SDK; this is the
       // equivalent signal that the browser tools actually attached.
-      console.log(`  live validation: MCP playwright: ${Object.keys(tools).length} tool(s)`);
+      console.log(`  live validation: MCP playwright: ${Object.keys(mcpTools).length} tool(s)`);
       const maxTurns = args.maxTurns ?? this.reproduceMaxTurns;
       const stop = hardStop(label, maxTurns + 1);
+      const tools = guardMcpTools(
+        mcpTools,
+        repeatGuard({ label, phase: "reproduce", onStall: stop.onStall }),
+      );
       const gen = await this.metered(
         () =>
           generateText({
@@ -1799,6 +1801,95 @@ interface ToolLoopOpts {
   onStall?: () => void;
 }
 
+/** Field separator inside a tool-call signature. A NUL cannot appear in a path,
+ *  a pattern, or a glob, so `Grep "a b"` cannot collide with `Grep "a"` scoped to
+ *  `b`. Never printed raw: a NUL byte makes grep treat a whole log as binary and
+ *  refuse to match it, so the warn below swaps it for a space. */
+export const SIG_SEP = "\u0000";
+
+/**
+ * Repeated identical tool calls are the signature of a stalled loop: the model
+ * re-issues the same call, gets the same bytes back, and never advances. A
+ * validator can run the same Grep dozens of times, spend its whole turn budget,
+ * and answer with nothing.
+ *
+ * A repeat re-executes nothing, so the loop becomes cheap; the warn makes it
+ * visible; and a stalled repeat feeds `hardStop`, which ends it.
+ */
+export function repeatGuard(opts: { label: string; phase: ToolLoopPhase; onStall?: () => void }) {
+  const { label, phase } = opts;
+  const callCounts = new Map<string, number>();
+  // Every repeat in this loop, across all signatures. A model that cycles
+  // A,B,A,B stalls just as hard as one that repeats A, but no single
+  // signature climbs fast enough to show it.
+  let totalRepeats = 0;
+  return {
+    repeated(
+      toolName: string,
+      signature: string,
+      notice?: (stalled: boolean) => string,
+    ): string | null {
+      const n = (callCounts.get(signature) ?? 0) + 1;
+      callCounts.set(signature, n);
+      if (n === 1) return null;
+      totalRepeats++;
+      // One repeat early in a long session is a slip, not a stall, and telling
+      // that model to finalize invites the empty answer this guard exists to
+      // prevent. Only escalate once the loop looks genuinely stuck.
+      const stalled = n >= REPEAT_STALL_PER_CALL || totalRepeats >= REPEAT_STALL_TOTAL;
+      if (stalled) opts.onStall?.();
+      // The signature keys on a NUL separator so a pattern containing a space
+      // cannot collide with a scoped search. Never print it raw: a NUL byte makes
+      // grep treat the whole log as binary and refuse to match it.
+      logWarn(
+        `[${label}] repeated ${toolName} call #${n}: ${signature.split(SIG_SEP).join(" ").slice(0, 120)}` +
+          (stalled ? " (stalled; telling it to finalize)" : ""),
+      );
+      return notice ? notice(stalled) : repeatNotice(toolName, phase, stalled);
+    },
+    /** Record a signature the loop has already answered once, with no warn. */
+    seed(signature: string): void {
+      if (!callCounts.has(signature)) callCounts.set(signature, 1);
+    },
+  };
+}
+
+/**
+ * The browser tools come from the sandbox's MCP server, not from `buildTools`,
+ * so nothing counts their repeats: a model that re-issues one wait call spends
+ * its whole turn budget unseen. Wrap each tool in the same guard the file tools
+ * use, keyed on the tool name and its arguments.
+ */
+export function guardMcpTools<T extends Record<string, { execute?: unknown }>>(
+  tools: T,
+  guard: Pick<ReturnType<typeof repeatGuard>, "repeated">,
+): T {
+  const out: Record<string, unknown> = {};
+  for (const [name, tool] of Object.entries(tools)) {
+    const run = tool.execute as ((args: unknown, ctx: unknown) => unknown) | undefined;
+    out[name] =
+      typeof run === "function"
+        ? {
+            ...tool,
+            execute: async (args: unknown, ctx: unknown) => {
+              const dup = guard.repeated(name, `${name}${SIG_SEP}${stableArgs(args)}`);
+              return dup ?? (await run(args, ctx));
+            },
+          }
+        : tool;
+  }
+  return out as T;
+}
+
+/** Argument key for a signature: same arguments in any key order, one key. */
+function stableArgs(args: unknown): string {
+  if (args === null || typeof args !== "object") return JSON.stringify(args) ?? "";
+  const entries = Object.entries(args as Record<string, unknown>).sort(([a], [b]) =>
+    a < b ? -1 : a > b ? 1 : 0,
+  );
+  return JSON.stringify(entries);
+}
+
 export function buildTools(opts: ToolLoopOpts) {
   const { cwd, maxFileSizeKb, verbose, label, phase } = opts;
   const exclude = opts.exclude ?? [];
@@ -1845,50 +1936,10 @@ export function buildTools(opts: ToolLoopOpts) {
     return out;
   };
 
-  // Repeated identical tool calls are the signature of a stalled loop: the
-  // model re-issues the same search, gets the same bytes back, and never
-  // advances. A validator can run the same Grep dozens of times, spend its
-  // whole turn budget, and answer with nothing.
-  // A repeat re-executes nothing and is not charged to the byte
-  // budget, so the loop becomes cheap; the warn makes it visible.
-  //
   // Keyed on what actually EXECUTES rather than the raw arguments: Grep's
   // `path` is an alias for `glob` and both resolve to one scope, so two
   // spellings of the same search collapse to a single signature.
-  /** Field separator inside a tool-call signature. A NUL cannot appear in a path,
-   *  a pattern, or a glob, so `Grep "a b"` cannot collide with `Grep "a"` scoped to
-   *  `b`. Never printed raw: a NUL byte makes grep treat a whole log as binary and
-   *  refuse to match it, so the warn below swaps it for a space. */
-  const SIG_SEP = "\u0000";
-
-  const callCounts = new Map<string, number>();
-  // Every repeat in this loop, across all signatures. A model that cycles
-  // A,B,A,B stalls just as hard as one that repeats A, but no single
-  // signature climbs fast enough to show it.
-  let totalRepeats = 0;
-  const repeated = (
-    toolName: string,
-    signature: string,
-    notice?: (stalled: boolean) => string,
-  ): string | null => {
-    const n = (callCounts.get(signature) ?? 0) + 1;
-    callCounts.set(signature, n);
-    if (n === 1) return null;
-    totalRepeats++;
-    // One repeat early in a long session is a slip, not a stall, and telling
-    // that model to finalize invites the empty answer this guard exists to
-    // prevent. Only escalate once the loop looks genuinely stuck.
-    const stalled = n >= REPEAT_STALL_PER_CALL || totalRepeats >= REPEAT_STALL_TOTAL;
-    if (stalled) opts.onStall?.();
-    // The signature keys on a NUL separator so a pattern containing a space
-    // cannot collide with a scoped search. Never print it raw: a NUL byte makes
-    // grep treat the whole log as binary and refuse to match it.
-    logWarn(
-      `[${label}] repeated ${toolName} call #${n}: ${signature.split(SIG_SEP).join(" ").slice(0, 120)}` +
-        (stalled ? " (stalled; telling it to finalize)" : ""),
-    );
-    return notice ? notice(stalled) : repeatNotice(toolName, phase, stalled);
-  };
+  const { repeated, seed } = repeatGuard({ label, phase, onStall: opts.onStall });
 
   // Which lines of which file this loop already returned. The signature guard
   // above cannot see a re-read: every window is a distinct `(path, offset,
@@ -1951,7 +2002,7 @@ export function buildTools(opts: ToolLoopOpts) {
           coverage.add(path, got.range[0], got.range[1], got.total);
           // This read is occurrence #1 for the path, so the first covered
           // re-read counts as a repeat rather than as a fresh call.
-          if (!callCounts.has(coveredSig(path))) callCounts.set(coveredSig(path), 1);
+          seed(coveredSig(path));
         }
         return emit(account(got.text));
       },
