@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { type FileHandle, open, readdir, readFile } from "node:fs/promises";
 import { basename, join, relative, resolve } from "node:path";
@@ -1857,13 +1858,20 @@ export function repeatGuard(opts: { label: string; phase: ToolLoopPhase; onStall
 /**
  * The browser tools come from the sandbox's MCP server, not from `buildTools`,
  * so nothing counts their repeats: a model that re-issues one wait call spends
- * its whole turn budget unseen. Wrap each tool in the same guard the file tools
- * use, keyed on the tool name and its arguments.
+ * its whole turn budget unseen.
+ *
+ * The file guard keys on the call alone, because a repeated Read of an
+ * unchanged repository returns the same bytes by definition. A browser does
+ * not work that way: `/` before a login and `/` after it are two different
+ * pages, and reading the second as a repeat ends a session that was making
+ * progress. So the call always runs, and only an UNCHANGED result counts.
+ * Running it costs no model turn.
  */
 export function guardMcpTools<T extends Record<string, { execute?: unknown }>>(
   tools: T,
-  guard: Pick<ReturnType<typeof repeatGuard>, "repeated">,
+  guard: Pick<ReturnType<typeof repeatGuard>, "repeated" | "seed">,
 ): T {
+  const lastResult = new Map<string, string>();
   const out: Record<string, unknown> = {};
   for (const [name, tool] of Object.entries(tools)) {
     const run = tool.execute as ((args: unknown, ctx: unknown) => unknown) | undefined;
@@ -1872,13 +1880,29 @@ export function guardMcpTools<T extends Record<string, { execute?: unknown }>>(
         ? {
             ...tool,
             execute: async (args: unknown, ctx: unknown) => {
-              const dup = guard.repeated(name, `${name}${SIG_SEP}${stableArgs(args)}`);
-              return dup ?? (await run(args, ctx));
+              const signature = `${name}${SIG_SEP}${stableArgs(args)}`;
+              const result = await run(args, ctx);
+              const shape = fingerprint(result);
+              if (lastResult.get(signature) === shape) {
+                // Seeded on the first call, so this counts as call #2 and the
+                // thresholds match the file tools.
+                const dup = guard.repeated(name, signature);
+                if (dup) return dup;
+              }
+              lastResult.set(signature, shape);
+              guard.seed(signature);
+              return result;
             },
           }
         : tool;
   }
   return out as T;
+}
+
+/** Stand-in for a tool result, small enough to keep for a whole session. */
+function fingerprint(result: unknown): string {
+  const text = typeof result === "string" ? result : (JSON.stringify(result) ?? "");
+  return createHash("sha1").update(text).digest("hex");
 }
 
 /** Argument key for a signature: same arguments in any key order, one key. */
