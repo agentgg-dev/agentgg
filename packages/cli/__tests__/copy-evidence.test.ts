@@ -153,6 +153,28 @@ describe("copyEvidence", () => {
     expect(http).toContain("Cookie: user=alice");
   });
 
+  it("skips the video when the caller does not want it kept", async () => {
+    const sb = fakeSandbox(
+      new Map([
+        ["/out/shot.png", Buffer.from("png")],
+        ["/out/page-a.webm", Buffer.from("vid")],
+      ]),
+    );
+    const ev = await copyEvidence(sb, dir, { ...FAST, keepVideo: false });
+    expect(ev.video).toBeUndefined();
+    expect(existsSync(join(dir, "page-a.webm"))).toBe(false);
+    // Everything else still lands: a refutation needs the trace and the shots.
+    expect(ev.screenshots).toEqual(["shot.png"]);
+    expect(existsSync(join(dir, "shot.png"))).toBe(true);
+  });
+
+  it("does not wait for a video it will not keep", async () => {
+    const sb = fakeSandbox(new Map([["/out/shot.png", Buffer.from("png")]]));
+    const started = Date.now();
+    await copyEvidence(sb, dir, { videoWaitMs: 5_000, pollMs: 50, keepVideo: false });
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
   it("leaves requests unset when the trace has no network data", async () => {
     const sb = fakeSandbox(new Map([["/out/page-a.webm", Buffer.from("vid")]]));
     const ev = await copyEvidence(sb, dir, FAST);

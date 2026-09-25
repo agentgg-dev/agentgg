@@ -232,10 +232,17 @@ export function renderFindingMd(
     if (ev) {
       const link = (name: string) =>
         evidenceDir ? `[${name}](${evidenceDir}/${name})` : `\`${name}\``;
-      if (ev.script)
-        lines.push(
-          `- Reproduction script: ${link(ev.script.path)} (${ev.script.passed ? "replays" : "unverified"})`,
-        );
+      if (ev.script) {
+        // A refuted finding's script is a negative control, never replayed:
+        // calling it a reproduction would read as a partial exploit.
+        if (live.result === "refuted") {
+          lines.push(`- Negative control script: ${link(ev.script.path)}`);
+        } else {
+          lines.push(
+            `- Reproduction script: ${link(ev.script.path)} (${ev.script.passed ? "replays" : "unverified"})`,
+          );
+        }
+      }
       if (ev.trace) lines.push(`- Trace: ${link(ev.trace)}`);
       if (ev.video) lines.push(`- Video: ${link(ev.video)}`);
       if (ev.har) lines.push(`- HAR: ${link(ev.har)}`);

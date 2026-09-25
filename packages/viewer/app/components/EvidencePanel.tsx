@@ -104,8 +104,9 @@ export default function EvidencePanel({ finding }: { finding: Finding }) {
               href={href(evidence.script.path)}
               name={evidence.script.path}
             >
-              A Playwright script that repeats the attempt. Replay not verified, so treat it as a
-              starting point and not as a result.
+              {finding.live?.result === "refuted"
+                ? "The negative control: a Playwright script that tried the attack and did not get it to fire. Never replayed, because a pass would contradict the verdict."
+                : "A Playwright script that repeats the attempt. Replay not verified, so treat it as a starting point and not as a result."}
             </FileRow>
           )}
           {evidence.video && (

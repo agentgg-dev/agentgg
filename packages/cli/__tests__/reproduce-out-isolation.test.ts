@@ -134,6 +134,57 @@ describe("evidence isolation between findings", () => {
     expect(b.live?.evidence?.video).toBe("page-2.webm");
   });
 
+  it("does not carry a reproduced finding's artifacts into a refuted one", async () => {
+    const a = finding("aaa", "agent-a");
+    const b = finding("bbb", "agent-b");
+    for (const f of [a, b]) {
+      writeFileRecord(outDir, {
+        agentSlug: f.agentSlug,
+        filePath: f.filePath,
+        contentHash: "h",
+        findings: [f],
+        analysisHistory: [],
+        candidates: [],
+        status: "analyzed",
+      } as never);
+    }
+
+    let call = 0;
+    const detector = {
+      name: "fake",
+      async reproduceFinding() {
+        call++;
+        out.set(`/out/page-${call}.webm`, Buffer.from(`video ${call}`));
+        out.set(`/out/shot-${call}.png`, Buffer.from(`png ${call}`));
+        return call === 1
+          ? { result: "reproduced" as const, reasoning: "r", counterevidence: "", script: "// s" }
+          : { result: "refuted" as const, reasoning: "r", counterevidence: "", script: "// n" };
+      },
+    };
+
+    await runReproducePhase({
+      findings: [a, b],
+      // biome-ignore lint/suspicious/noExplicitAny: only reproduceFinding is exercised
+      detector: detector as any,
+      outDir,
+      runId: "test-run",
+      targetUrl: "http://localhost:3000",
+      auth: {},
+      image: "img",
+      timeoutMs: 30_000,
+      budgetMs: 60_000,
+      max: 10,
+      signal: new AbortController().signal,
+    });
+
+    const dirB = getEvidenceDir(outDir, b.agentSlug, b.id);
+    expect(existsSync(join(dirB, "shot-2.png"))).toBe(true);
+    expect(existsSync(join(dirB, "shot-1.png"))).toBe(false);
+    // The refuted path drops every video, this finding's included.
+    expect(existsSync(join(dirB, "page-2.webm"))).toBe(false);
+    expect(b.live?.evidence?.video).toBeUndefined();
+  });
+
   it("forwards the configured turn cap to the detector", async () => {
     const a = finding("aaa", "agent-a");
     writeFileRecord(outDir, {

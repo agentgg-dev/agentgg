@@ -1,12 +1,13 @@
 // Live-validation "reproduce" sub-phase. Runs after dedup, over PRIMARY
 // web-reachable findings only, serially, inside a time + count budget. For
 // each finding it asks the backend to reproduce the exploit against a running
-// target (through the sandbox's Playwright MCP server), runs the generated
-// script once, copies the trace/video/screenshots out of the sandbox, and
-// persists the live result incrementally so a killed run resumes.
+// target (through the sandbox's Playwright MCP server), replays the generated
+// script once if it reproduced, copies the artifacts out of the sandbox for a
+// reproduced or refuted verdict, and persists the live result incrementally so
+// a killed run resumes.
 
 import { randomUUID } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import type { Finding, LiveResult } from "@agentgg/core";
 import { getEvidenceDir, readFileRecord, updateRunStage, writeFileRecord } from "@agentgg/core";
@@ -49,6 +50,12 @@ export function selectForReproduce(findings: Finding[], force = false): Finding[
   return [...work].sort(
     (a, b) => (ORDER[a.validation?.verdict ?? ""] ?? 3) - (ORDER[b.validation?.verdict ?? ""] ?? 3),
   );
+}
+
+/** Whether the copy produced anything worth linking. An evidence block with
+ *  no files renders an empty panel, which promises artifacts that are absent. */
+function hasArtifacts(e: Evidence): boolean {
+  return Boolean(e.trace || e.video || e.script || e.requestsFile || e.screenshots.length > 0);
 }
 
 /** A live claim must point at traffic that was really captured. */
@@ -216,6 +223,20 @@ export async function runReproducePhase(args: {
             );
           }
           evidence.script = { path: script.path, executed: script.executed, passed: script.passed };
+        } else if (res.result === "refuted") {
+          // A refutation is a claim too, so it keeps the artifacts a triager
+          // needs to check it. Not the video: its value is the "watch it fire"
+          // moment, and it is the one artifact that costs tens of megabytes.
+          const evidenceDir = getEvidenceDir(outDir, finding.agentSlug, finding.id);
+          const captured = await copyEvidence(sandbox, evidenceDir, { keepVideo: false });
+          if (res.script) {
+            writeFileSync(join(evidenceDir, "repro.spec.ts"), res.script);
+            // Never replayed: a negative control that passes contradicts the
+            // verdict it was written to support.
+            captured.script = { path: "repro.spec.ts", executed: false, passed: false };
+          }
+          if (hasArtifacts(captured)) evidence = captured;
+          else rmSync(evidenceDir, { recursive: true, force: true });
         }
 
         const graded = gradeLiveResult(res.result, evidence);
@@ -338,17 +359,23 @@ const VIDEO_POLL_MS = 250;
 export async function copyEvidence(
   sandbox: Sandbox,
   evidenceDir: string,
-  opts: { videoWaitMs?: number; pollMs?: number } = {},
+  opts: { videoWaitMs?: number; pollMs?: number; keepVideo?: boolean } = {},
 ): Promise<Evidence> {
+  const keepVideo = opts.keepVideo ?? true;
   const evidence: Evidence = { screenshots: [] };
   mkdirSync(evidenceDir, { recursive: true });
 
   const names = await listOut(
     sandbox,
-    opts.videoWaitMs ?? VIDEO_WAIT_MS,
+    // The wait exists to let Playwright flush the video. A caller that drops
+    // the video has nothing to wait for.
+    keepVideo ? (opts.videoWaitMs ?? VIDEO_WAIT_MS) : 0,
     opts.pollMs ?? VIDEO_POLL_MS,
   );
   for (const name of names) {
+    const lower = name.toLowerCase();
+    const isVideo = lower.endsWith(".webm") || lower.endsWith(".mp4");
+    if (isVideo && !keepVideo) continue;
     let buf: Buffer;
     try {
       buf = await sandbox.readFile(`/out/${name}`);
@@ -357,8 +384,7 @@ export async function copyEvidence(
       continue;
     }
     writeFileSync(join(evidenceDir, name), buf);
-    const lower = name.toLowerCase();
-    if (lower.endsWith(".webm") || lower.endsWith(".mp4")) {
+    if (isVideo) {
       // `ls -1t` is newest first, so this keeps THIS finding's recording even
       // if an earlier one's file is still in /out.
       evidence.video ??= name;

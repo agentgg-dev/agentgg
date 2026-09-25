@@ -41,6 +41,29 @@ describe("renderFindingMd live validation", () => {
     expect(md).toContain("repro.spec.ts");
   });
 
+  it("calls a refuted finding's script a negative control, not a reproduction", () => {
+    const refuted = {
+      ...f,
+      live: {
+        result: "refuted",
+        reasoning: "the payload was escaped",
+        counterevidence: "",
+        evidence: {
+          trace: "trace.zip",
+          screenshots: ["shot.png"],
+          script: { path: "repro.spec.ts", executed: false, passed: false },
+        },
+      },
+    };
+    const md = renderFindingMd(refuted, undefined, "ev-dir");
+    expect(md).toContain("**Result:** `refuted`");
+    expect(md).toContain("- Negative control script: [repro.spec.ts](ev-dir/repro.spec.ts)");
+    // "Reproduction script (unverified)" would read as a partial exploit.
+    expect(md).not.toContain("Reproduction script");
+    expect(md).toContain("- Trace: [trace.zip](ev-dir/trace.zip)");
+    expect(md).not.toContain("- Video:");
+  });
+
   it("renders the request table and links the full dump when requests were captured", () => {
     const withReqs = {
       ...f,

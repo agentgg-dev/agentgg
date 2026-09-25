@@ -2493,7 +2493,7 @@ export function registerScanCommand(program: Command): void {
     )
     .option(
       "--live-validate",
-      "Reproduce web-reachable primary findings against a running target inside a Docker sandbox, at the end of the validation phase (external mode). Runs the reproduce agent per finding, executes its generated Playwright script once, and records a live result + evidence. Off by default; requires --target-url and a reachable Docker daemon.",
+      "Reproduce web-reachable primary findings against a running target inside a Docker sandbox, at the end of the validation phase (external mode). Runs the reproduce agent per finding, executes its generated Playwright script once, and records a live result + evidence. A reproduced finding keeps a recording too; a refuted one keeps only the trace, screenshots and requests, roughly 3 MB, so its verdict can be checked. Off by default; requires --target-url and a reachable Docker daemon.",
     )
     .option(
       "--target-url <url>",
