@@ -478,6 +478,10 @@ export const Finding = z.object({
       reasoning: z.string(),
       scopeRef: z.string().optional(),
       adjustedSeverity: Severity.optional(),
+      /** The impact validation could confirm, from any member of the group. */
+      confirmedImpact: z.string().optional(),
+      /** A worse impact a member claimed that validation could not confirm. */
+      unconfirmedImpact: z.string().optional(),
       /**
        * True when the model declined to validate (a content refusal) rather
        * than reaching a verdict. `verdict` is set to `uncertain` in this case:

@@ -8,3 +8,4 @@ export * from "./paths.js";
 export * from "./persistence.js";
 export * from "./types.js";
 export * from "./user-config.js";
+export * from "./verdict.js";

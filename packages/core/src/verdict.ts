@@ -30,3 +30,10 @@ export function effectiveVerdict(
   if (staticVerdict === "confirmed") return "uncertain";
   return staticVerdict;
 }
+
+/** The finding that holds the group's verdict and score. A duplicate whose
+ *  primary is not loaded stands for itself. */
+export function groupPrimary(f: Finding, byId: Map<string, Finding>): Finding {
+  const id = f.dedup?.duplicateOf;
+  return (id && byId.get(id)) || f;
+}
