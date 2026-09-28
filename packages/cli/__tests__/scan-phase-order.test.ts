@@ -108,6 +108,7 @@ vi.mock("../src/llm.js", async () => {
 });
 
 import { runScan } from "../src/commands/scan.js";
+import { fitMembers } from "../src/validator.js";
 
 let agentggHome: string;
 let projectRoot: string;
@@ -274,6 +275,47 @@ describe("scan phase order", () => {
     expect(detectorMock.validateFinding).toHaveBeenCalledTimes(1);
     expect(findingOnDisk("alpha", "alpha-1").dedup).toBeUndefined();
     expect(findingOnDisk("beta", "beta-1").dedup?.duplicateOf).toBe("alpha-1");
+  });
+
+  it("validates the members a rejected group left out, and promotes a survivor", async () => {
+    // Long enough that the member cap shows only some of them.
+    const long = (n: number) => "x".repeat(n);
+    const dupes = Array.from({ length: 10 }, (_, i) => ({
+      ...mockFinding("beta", `beta-${i}`),
+      summary: long(420),
+      impact: long(620),
+      poc: long(820),
+    }));
+    detectorMock.runAgent.mockImplementation(async ({ agent }) =>
+      agent.slug === "alpha" ? [mockFinding("alpha", "alpha-1")] : dupes,
+    );
+    detectorMock.dedupeFindings.mockImplementation(async () => [
+      { primaryId: "alpha-1", duplicateIds: dupes.map((d) => d.id), reasoning: "same sink" },
+    ]);
+    detectorMock.validateFinding.mockImplementation(async ({ finding }) =>
+      finding.id === "alpha-1"
+        ? { verdict: "false-positive" as const, reasoning: "not reachable" }
+        : { verdict: "confirmed" as const, reasoning: "reachable" },
+    );
+
+    await runScan(projectRoot, opts(), env);
+
+    const calls = detectorMock.validateFinding.mock.calls.map(
+      ([args]) => args as { finding: Finding; members?: Finding[] },
+    );
+    expect(calls[0].finding.id).toBe("alpha-1");
+    const { shown, left } = fitMembers(calls[0].members ?? []);
+    expect(shown.length).toBeGreaterThan(0);
+    expect(left.length).toBeGreaterThan(0);
+    expect(new Set(calls.slice(1).map((c) => c.finding.id))).toEqual(
+      new Set(left.map((m) => m.id)),
+    );
+
+    const heir = findingOnDisk("beta", left[0].id);
+    expect(heir.dedup).toBeUndefined();
+    expect(heir.validation?.verdict).toBe("confirmed");
+    expect(heir.cvss?.baseScore).toBe(9.8);
+    expect(findingOnDisk("alpha", "alpha-1").dedup?.duplicateOf).toBe(left[0].id);
   });
 
   it("keeps the lead under --delete-duplicates and deletes the rest", async () => {

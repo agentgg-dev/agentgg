@@ -164,11 +164,7 @@ describe("group validation in revalidate", () => {
 
     expect(calls()).toHaveLength(1);
     expect(calls()[0].finding.id).toBe("p1");
-    expect(
-      calls()[0]
-        .members?.map((m) => m.id)
-        .sort(),
-    ).toEqual(["d1", "d2"]);
+    expect(calls()[0].members?.map((m) => m.id)).toEqual(["d1", "d2"]);
 
     const byId = findingsById();
     expect(byId.get("d1")?.dedup).toBeUndefined();
