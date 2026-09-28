@@ -49,6 +49,19 @@ describe("recoverFromError — findings", () => {
     expect(got?.findings).toEqual([]);
   });
 
+  it("recovers a fenced object whose poc holds its own fenced http block", () => {
+    const poc = "Read another user's record:\\n```http\\nGET /api/users?id=1 HTTP/1.1\\n```";
+    const withFence = FINDING.replace(
+      `"Authenticate as user A, request user B's order id."`,
+      `"${poc}"`,
+    );
+    const got = recoverFromError(
+      DetectionResult,
+      noObjectGenerated(`\`\`\`json\n{"findings":[${withFence}]}\n\`\`\``),
+    );
+    expect(got?.findings[0].poc).toContain("GET /api/users?id=1");
+  });
+
   it("returns null on text with no recoverable object, so the caller rethrows", () => {
     expect(recoverFromError(DetectionResult, noObjectGenerated(`{"{""  :  ""}`))).toBeNull();
     expect(
