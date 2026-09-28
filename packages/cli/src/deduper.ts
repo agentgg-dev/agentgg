@@ -25,7 +25,7 @@ export const LlmDedupCluster = z.object({
   primaryId: z
     .string()
     .describe(
-      "The `id` of the finding to KEEP as the canonical report for this root cause. Prefer the one that names the root cause's vulnerability class, then the most exact sink location, then a concrete PoC; use confidence only to break a tie.",
+      "The `id` of the finding to KEEP as the canonical report for this root cause. Prefer the one that names the root cause's vulnerability class, then the most severe claimed impact, then the most exact sink location, then a concrete PoC; use confidence only to break a tie.",
     ),
   duplicateIds: z
     .array(z.string())
@@ -79,6 +79,7 @@ export function buildDedupePrompt(args: {
 - **Confidence:** ${(f.confidence * 100).toFixed(0)}%
 - **Summary:** ${f.summary}
 - **Details:** ${truncate(f.details, 800)}
+- **Impact:** ${truncate(f.impact, 400)}
 - **PoC:** ${truncate(f.poc, 300)}`;
     })
     .join("\n\n");
@@ -114,8 +115,11 @@ code location**, and for each group pick ONE primary to keep.
 - Different vulnerability classes are never duplicates of each other.
 - For each group, exactly ONE finding is the primary (kept). Rank the
   candidates in this order: the vulnerability class that names the root
-  cause; the most exact location of the sink; a concrete PoC; detection
-  confidence, only to break a tie.
+  cause (the report from the agent that specializes in this bug class);
+  the most severe impact claimed; the most exact location of the sink; a
+  concrete PoC; detection confidence, only to break a tie. Validation
+  later checks every member's claim, so do not discount a severe claim
+  because it looks less certain.
 - When in doubt, do NOT merge. Folding two distinct bugs into one is worse
   than leaving a real duplicate un-merged.
 

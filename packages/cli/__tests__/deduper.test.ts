@@ -138,6 +138,26 @@ describe("buildDedupePrompt", () => {
   });
 });
 
+describe("buildDedupePrompt primary ranking", () => {
+  it("shows each finding's impact", () => {
+    const out = buildDedupePrompt({
+      filePath: "src/login.ts",
+      findings: [makeFinding("id1", { impact: "Attacker dumps the users table." })],
+    });
+    expect(out).toContain("**Impact:** Attacker dumps the users table.");
+  });
+
+  it("ranks the root-cause class first and the claimed impact second", () => {
+    const out = buildDedupePrompt({ filePath: "src/login.ts", findings: [makeFinding("id2")] });
+    const cls = out.indexOf("the vulnerability class that names the root");
+    const impact = out.indexOf("the most severe impact claimed");
+    const sink = out.indexOf("the most exact location");
+    expect(cls).toBeGreaterThan(-1);
+    expect(impact).toBeGreaterThan(cls);
+    expect(sink).toBeGreaterThan(impact);
+  });
+});
+
 describe("dedupeCandidates", () => {
   it("drops findings that already carry a marker", () => {
     const list = [
