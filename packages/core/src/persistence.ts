@@ -401,4 +401,4 @@ export function getEvidenceDir(outputDir: string, agentSlug: string, findingId: 
 
 // Re-exported here so every existing `@agentgg/core` import keeps working;
 // the function itself lives in `verdict.ts`, which imports no node builtins.
-export { effectiveVerdict } from "./verdict.js";
+export { effectiveVerdict, groupPrimary } from "./verdict.js";
