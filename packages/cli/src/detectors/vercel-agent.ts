@@ -1197,6 +1197,8 @@ export class VercelAgentDetector implements Detector {
     maxFileSizeKb?: number;
     /** The reporting agent's own validation rules; replaces the defaults. */
     validationPrompt?: string;
+    /** The group's duplicates; the verdict then covers the whole group. */
+    members?: Finding[];
     signal?: AbortSignal;
   }) {
     try {
@@ -1516,6 +1518,10 @@ export class VercelAgentDetector implements Detector {
   ): Promise<{
     verdict: "confirmed" | "false-positive" | "out-of-scope" | "uncertain";
     reasoning: string;
+    confirmedImpact?: string;
+    unconfirmedImpact?: string;
+    leadId?: string;
+    primaryClaimHolds?: boolean;
     refused?: boolean;
   }> {
     // Nothing to parse and nothing to reformat. The reformat prompt below
@@ -2668,9 +2674,9 @@ function validationJsonInstruction(): string {
 
 After tracing the finding across the code, output your verdict as a single JSON object matching EXACTLY this shape — no prose, no markdown fences, no trailing text:
 
-{"verdict":"confirmed","reasoning":"Short reasoning citing a specific code element.","confidence":0.9}
+{"verdict":"confirmed","reasoning":"Short reasoning citing a specific code element.","confidence":0.9,"confirmedImpact":"The impact you confirmed.","leadId":"id-of-the-report-you-confirmed","primaryClaimHolds":true}
 
-\`verdict\` MUST be one of "confirmed", "false-positive", "out-of-scope", or "uncertain". \`confidence\` is a decimal 0.0–1.0 (not a percentage).`;
+\`verdict\` MUST be one of "confirmed", "false-positive", "out-of-scope", or "uncertain". \`confidence\` is a decimal 0.0–1.0 (not a percentage). \`confirmedImpact\`, \`unconfirmedImpact\`, \`leadId\` and \`primaryClaimHolds\` are optional: omit a field that does not apply.`;
 }
 
 function reproduceJsonInstruction(): string {

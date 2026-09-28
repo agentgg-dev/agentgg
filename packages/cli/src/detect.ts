@@ -288,10 +288,21 @@ export interface Detector {
        * agent just means the default rules apply.
        */
       validationPrompt?: string;
+      /** The group's duplicates. The verdict then covers the whole group. */
+      members?: Finding[];
     } & AbortableArgs,
   ): Promise<{
     verdict: "confirmed" | "false-positive" | "out-of-scope" | "uncertain";
     reasoning: string;
+    /** The impact validation confirmed, from any member of the group. */
+    confirmedImpact?: string;
+    /** A worse claimed impact that validation could not confirm. */
+    unconfirmedImpact?: string;
+    /** The member whose claim gives `confirmedImpact`. */
+    leadId?: string;
+    /** Whether the primary's own claim was confirmed. The caller swaps only on
+     *  `confirmed` with this set to false. */
+    primaryClaimHolds?: boolean;
     /** True when the model declined to validate (refusal); `verdict` is
      *  `uncertain`. The finding stays unvalidated, but the caller records the
      *  refusal instead of treating it as a genuine uncertain verdict. */

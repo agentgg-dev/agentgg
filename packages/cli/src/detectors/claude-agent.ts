@@ -241,6 +241,8 @@ export class ClaudeAgentDetector implements Detector {
     maxFileSizeKb?: number;
     /** The reporting agent's own validation rules; replaces the defaults. */
     validationPrompt?: string;
+    /** The group's duplicates; the verdict then covers the whole group. */
+    members?: Finding[];
     signal?: AbortSignal;
   }) {
     const prompt = buildValidatePrompt(args);

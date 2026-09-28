@@ -55,8 +55,71 @@ export const LlmValidation = z.object({
     .describe(
       "Decimal 0.0–1.0. NOT a percentage. Write 0.3 not 30. 0.0 = guess, 1.0 = certain. Uncertain verdicts should have low confidence.",
     ),
+  confirmedImpact: z
+    .string()
+    .optional()
+    .describe(
+      "One or two sentences: the impact you confirmed in the code, from the worst claim that holds. Omit when nothing is confirmed.",
+    ),
+  unconfirmedImpact: z
+    .string()
+    .optional()
+    .describe(
+      "One sentence: a worse impact a report claimed that you could not confirm. Omit when every claimed impact was confirmed or refuted.",
+    ),
+  leadId: z
+    .string()
+    .optional()
+    .describe(
+      "The id of the report whose claim gives confirmedImpact. Omit for a single report or when nothing is confirmed.",
+    ),
+  primaryClaimHolds: z
+    .boolean()
+    .optional()
+    .describe(
+      "True when you confirmed the claim of the finding under review itself, false when you could not. Omit for a single report.",
+    ),
 });
 export type LlmValidation = z.infer<typeof LlmValidation>;
+
+export const GROUP_MEMBER_CHAR_CAP = 6000;
+
+function memberBlock(m: Finding): string {
+  return `### Report ${m.id}
+**Reported by agent:** ${m.agentSlug}
+**Vuln class:** ${m.vulnSlug}
+
+**Summary:** ${clip(m.summary, 400)}
+
+**Impact:** ${clip(m.impact, 600)}
+
+**PoC:** ${clip(m.poc, 800)}`;
+}
+
+/** Split members into those the prompt shows and those the cap leaves out.
+ *  The caller validates the left-out ones itself if the group is rejected. */
+export function fitMembers(members: Finding[]): { shown: Finding[]; left: Finding[] } {
+  const shown: Finding[] = [];
+  let used = 0;
+  for (const m of members) {
+    const size = memberBlock(m).length;
+    if (used + size > GROUP_MEMBER_CHAR_CAP) break;
+    shown.push(m);
+    used += size;
+  }
+  return { shown, left: members.slice(shown.length) };
+}
+
+function memberBlocks(members: Finding[]): string {
+  const { shown, left } = fitMembers(members);
+  const blocks = shown.map(memberBlock);
+  if (left.length > 0) blocks.push(`_${left.length} more report(s) left out to fit the prompt._`);
+  return blocks.join("\n\n");
+}
+
+function clip(s: string, max: number): string {
+  return s.length > max ? `${s.slice(0, max)}…` : s;
+}
 
 /**
  * Build the prompt the validator sees for one finding. Includes the
@@ -95,8 +158,10 @@ export function buildValidatePrompt(args: {
    * schema can not break.
    */
   validationPrompt?: string;
+  /** The group's duplicates. The verdict then covers the whole group. */
+  members?: Finding[];
 }): string {
-  const { finding, fileContent, scope, root, validationPrompt } = args;
+  const { finding, fileContent, scope, root, validationPrompt, members } = args;
   const custom = validationPrompt?.trim();
   const lang = languageFromPath(finding.filePath);
   const lineHint = finding.lineRange
@@ -220,6 +285,30 @@ a fix, return 'uncertain' and give the corrected payload in your
 reasoning. If there is no real vulnerability at all, return
 'false-positive'.`;
 
+  const groupBlock =
+    members && members.length > 0
+      ? `
+## Other reports of the same bug
+
+De-duplication grouped the reports below with the finding above: the same
+vulnerability at the same sink. They can claim different impacts or give
+different PoCs. Your verdict applies to the whole group.
+
+Judge the worst claim in this group that you can confirm, not only the claim
+of the finding above. If the finding above claims more than you can confirm
+but another report's claim holds, the verdict is 'confirmed' for that claim.
+
+${memberBlocks(members)}
+`
+      : "";
+
+  const leadNote =
+    members && members.length > 0
+      ? " Set `leadId` to the id of the report whose claim gives `confirmedImpact` (the finding above is `" +
+        finding.id +
+        "`), set `primaryClaimHolds` to true if you confirmed the claim of the finding above and false if you did not, and put any worse claim you could not confirm in `unconfirmedImpact`."
+      : "";
+
   return `You are reviewing a security finding produced by another agent.
 Your job is to classify it by re-examining the source code yourself.
 ${rulesBlock}
@@ -242,7 +331,7 @@ ${finding.poc}
 
 ### Impact
 ${finding.impact}
-
+${groupBlock}
 ## The source code
 
 \`\`\`${lang}
@@ -252,7 +341,8 @@ ${tracingBlock}${scopeBlock}
 ## Your task
 
 Return a verdict (${verdictOptions}), a short reasoning (max 4
-sentences, cite a specific code element), and your confidence.
+sentences, cite a specific code element), your confidence, and in
+\`confirmedImpact\` the impact you confirmed in one or two sentences.${leadNote}
 ${scopeVerdictNote}${tailBlock}`;
 }
 
@@ -263,8 +353,19 @@ ${scopeVerdictNote}${tailBlock}`;
 export function asValidationField(v: LlmValidation): {
   verdict: ValidationVerdict;
   reasoning: string;
+  confirmedImpact?: string;
+  unconfirmedImpact?: string;
+  leadId?: string;
+  primaryClaimHolds?: boolean;
 } {
-  return { verdict: v.verdict, reasoning: v.reasoning };
+  return {
+    verdict: v.verdict,
+    reasoning: v.reasoning,
+    ...(v.confirmedImpact?.trim() ? { confirmedImpact: v.confirmedImpact.trim() } : {}),
+    ...(v.unconfirmedImpact?.trim() ? { unconfirmedImpact: v.unconfirmedImpact.trim() } : {}),
+    ...(v.leadId?.trim() ? { leadId: v.leadId.trim() } : {}),
+    ...(typeof v.primaryClaimHolds === "boolean" ? { primaryClaimHolds: v.primaryClaimHolds } : {}),
+  };
 }
 
 /**
