@@ -1,4 +1,4 @@
-import type { Finding } from "@agentgg/core";
+import type { Finding, ValidationVerdict } from "@agentgg/core";
 
 const REJECTED = new Set(["false-positive", "out-of-scope"]);
 const isRejected = (f: Finding) => REJECTED.has(f.validation?.verdict ?? "");
@@ -22,14 +22,40 @@ function clusters(findings: Finding[]): Map<string, { primary: Finding; dupes: F
 }
 
 /** Duplicates worth validating: their primary was rejected, so one of them
- *  may be the finding that ships. */
-export function duplicatesOfRejected(findings: Finding[]): Finding[] {
+ *  may be the finding that ships. `only` limits them to ids the group
+ *  verdict never saw. */
+export function duplicatesOfRejected(findings: Finding[], only?: Set<string>): Finding[] {
   const out: Finding[] = [];
   for (const { primary, dupes } of clusters(findings).values()) {
     if (!isRejected(primary)) continue;
-    for (const d of dupes) if (!d.validation) out.push(d);
+    for (const d of dupes) if (!d.validation && (!only || only.has(d.id))) out.push(d);
   }
   return out;
+}
+
+/** Duplicates keyed by their primary's id, in stored order. */
+export function membersOf(findings: Finding[]): Map<string, Finding[]> {
+  const out = new Map<string, Finding[]>();
+  for (const { primary, dupes } of clusters(findings).values()) out.set(primary.id, dupes);
+  return out;
+}
+
+/** Make `heir` the primary of `primary`'s group. The demoted primary takes
+ *  the heir's reasoning (that pair was compared); the rest keep their own.
+ *  Its score and live result judged its own text, so they go too. */
+function handOver(primary: Finding, dupes: Finding[], heir: Finding): void {
+  const heirReasoning = heir.dedup?.reasoning ?? "";
+  const heirRunId = heir.dedup?.runId;
+  heir.dedup = undefined;
+  primary.cvss = undefined;
+  primary.severity = undefined;
+  primary.live = undefined;
+  for (const f of [primary, ...dupes]) {
+    if (f.id === heir.id) continue;
+    const reasoning = f.id === primary.id ? heirReasoning : (f.dedup?.reasoning ?? "");
+    const runId = f.id === primary.id ? heirRunId : f.dedup?.runId;
+    f.dedup = { duplicateOf: heir.id, reasoning, ...(runId ? { runId } : {}) };
+  }
 }
 
 /** Hand a rejected primary's place to the first duplicate validation kept.
@@ -42,28 +68,51 @@ export function promote(findings: Finding[], canMark: (f: Finding) => boolean): 
     if (!heir) continue;
     const cluster = [primary, ...dupes];
     if (!cluster.every(canMark)) continue;
-    const heirReasoning = heir.dedup?.reasoning ?? "";
-    const heirRunId = heir.dedup?.runId;
-    heir.dedup = undefined;
-    for (const f of cluster) {
-      if (f.id === heir.id) continue;
-      if (f.id === primary.id) {
-        // Demoted primary: gets heir's original reasoning/runId (that pair was actually compared).
-        f.dedup = {
-          duplicateOf: heir.id,
-          reasoning: heirReasoning,
-          ...(heirRunId ? { runId: heirRunId } : {}),
-        };
-      } else {
-        // Non-primary duplicates: keep their own reasoning/runId (never directly compared to heir).
-        f.dedup = {
-          duplicateOf: heir.id,
-          reasoning: f.dedup?.reasoning ?? "",
-          ...(f.dedup?.runId ? { runId: f.dedup.runId } : {}),
-        };
-      }
-    }
+    handOver(primary, dupes, heir);
     changed.push(...cluster);
   }
   return changed;
+}
+
+export type GroupVerdict = {
+  verdict: ValidationVerdict;
+  reasoning: string;
+  confirmedImpact?: string;
+  unconfirmedImpact?: string;
+  leadId?: string;
+  primaryClaimHolds?: boolean;
+  refused?: boolean;
+};
+
+/** Record one group verdict. The group moves to the `leadId` member only
+ *  when the verdict is confirmed and the primary's own claim failed; the
+ *  primary is the class specialist, so it keeps the group otherwise. The
+ *  model can set `leadId` when it should not, so both checks are needed. */
+export function applyGroupVerdict(
+  findings: Finding[],
+  primary: Finding,
+  result: GroupVerdict,
+  canMark: (f: Finding) => boolean,
+): Finding[] {
+  const { leadId, primaryClaimHolds, ...rest } = result;
+  const validation = {
+    verdict: rest.verdict,
+    reasoning: rest.reasoning,
+    ...(rest.confirmedImpact ? { confirmedImpact: rest.confirmedImpact } : {}),
+    ...(rest.unconfirmedImpact ? { unconfirmedImpact: rest.unconfirmedImpact } : {}),
+    ...(rest.refused ? { refused: true } : {}),
+  };
+  const dupes = membersOf(findings).get(primary.id) ?? [];
+  const heir =
+    rest.verdict === "confirmed" && primaryClaimHolds === false && leadId && leadId !== primary.id
+      ? dupes.find((d) => d.id === leadId)
+      : undefined;
+  if (!heir || ![primary, ...dupes].every(canMark)) {
+    primary.validation = validation;
+    return [primary];
+  }
+  handOver(primary, dupes, heir);
+  heir.validation = validation;
+  primary.validation = undefined;
+  return [primary, ...dupes];
 }
