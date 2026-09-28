@@ -16,7 +16,7 @@ import { loadDefaultScope } from "../default-scope.js";
 import { handleDetectorError } from "../diagnostics.js";
 import { loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
 import { logError } from "../log.js";
-import { duplicatesOfRejected, promote } from "../promote.js";
+import { applyGroupVerdict, duplicatesOfRejected, membersOf, promote } from "../promote.js";
 import {
   buildCredentialsFromOpts,
   REGION_FLAG_HELP,
@@ -24,6 +24,7 @@ import {
 } from "../providers/index.js";
 import { writeMarkdownReport } from "../reporters/md.js";
 import { createUsageMeter } from "../usage-meter.js";
+import { fitMembers } from "../validator.js";
 import { buildInvocation } from "./invocation.js";
 
 interface RevalidateOpts {
@@ -234,6 +235,15 @@ export async function runRevalidate(
   // regions, so concurrent workers can't race. Dirtied records are written
   // below once the pool drains.
   const concurrency = Math.max(1, opts.concurrency ?? 5);
+  const recordOf = new Map<string, FileRecord>();
+  for (const record of records) {
+    for (const finding of record.findings) recordOf.set(finding.id, record);
+  }
+  const allFindings = records.flatMap((r) => r.findings);
+  // Built once, before any swap. Safe: a swapped group is confirmed and never
+  // enters the second wave below, which is the only later reader.
+  const groups = membersOf(allFindings);
+  let moved = 0;
   const validateOne = async ({ record, finding }: Task): Promise<void> => {
     // Scope-only branch: never read the file, only ask the LLM to
     // classify against the scope document, and only persist when the
@@ -291,16 +301,17 @@ export async function runRevalidate(
         scope: scopeContent,
         root: rootPath,
         validationPrompt: agentBySlug.get(finding.agentSlug)?.validationPrompt,
+        members: groups.get(finding.id),
         signal: revalidateAbortController.signal,
       });
-      // Mutate in place — the record points to the same Finding
-      // object we got from loadAllFileRecords.
-      finding.validation = {
-        verdict: result.verdict,
-        reasoning: result.reasoning,
-      };
+      // This command owns every shard in the directory.
+      const changed = applyGroupVerdict(allFindings, finding, result, () => true);
+      if (changed.length > 1) moved++;
+      for (const f of changed) {
+        const r = recordOf.get(f.id);
+        if (r) dirtyRecords.add(r);
+      }
       verdicts[result.verdict] = (verdicts[result.verdict] ?? 0) + 1;
-      dirtyRecords.add(record);
       if (opts.verbose) {
         console.log(`  ${finding.filePath} (${finding.id}): ${result.verdict}`);
       }
@@ -310,18 +321,15 @@ export async function runRevalidate(
   };
   await runConcurrent(tasks, concurrency, validateOne);
 
-  // Promotion wave, matching the static pass inside `scan`: a primary this
-  // run rejected would take its whole group out of the report, so classify
-  // its duplicates and hand the group to the first one that survives. This
-  // command owns every shard in the directory, so nothing is off limits.
-  const recordOf = new Map<string, FileRecord>();
-  for (const record of records) {
-    for (const finding of record.findings) recordOf.set(finding.id, record);
+  // A rejected group covers only the members its prompt showed. Members the
+  // cap left out get their own verdict, and the first survivor takes over.
+  const unseen = new Set<string>();
+  for (const members of groups.values()) {
+    for (const m of fitMembers(members).left) unseen.add(m.id);
   }
-  const allFindings = records.flatMap((r) => r.findings);
-  const secondWave = duplicatesOfRejected(allFindings);
+  const secondWave = duplicatesOfRejected(allFindings, unseen);
   if (secondWave.length > 0) {
-    console.log(`  Validating ${secondWave.length} duplicate(s) of rejected primaries`);
+    console.log(`  Validating ${secondWave.length} duplicate(s) a rejected group did not show`);
     await runConcurrent(secondWave, concurrency, async (finding) => {
       const record = recordOf.get(finding.id);
       if (record) await validateOne({ record, finding });
@@ -330,11 +338,17 @@ export async function runRevalidate(
   const promoted = promote(allFindings, () => true);
   if (promoted.length > 0) {
     const heirs = promoted.filter((f) => !f.dedup).length;
+    moved += heirs;
     console.log(`  Promoted ${heirs} finding(s) whose primary was rejected.`);
     for (const finding of promoted) {
       const record = recordOf.get(finding.id);
       if (record) dirtyRecords.add(record);
     }
+  }
+  if (moved > 0) {
+    console.log(
+      `  ${moved} group(s) have a new primary with no score. Run \`agentgg score ${outputDir}\` to score them.`,
+    );
   }
 
   // Write dirtied records back. Append a validate-phase AnalysisRun

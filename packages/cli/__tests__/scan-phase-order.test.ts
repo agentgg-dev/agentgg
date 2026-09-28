@@ -74,10 +74,16 @@ const detectorMock = vi.hoisted(() => ({
   })),
   checkPrecondition: vi.fn(async () => ({ relevant: true, reason: "stub" })),
   runAgent: vi.fn(async (_args: { agent: { slug: string } }) => [] as Finding[]),
-  validateFinding: vi.fn(async (_args: { finding: Finding }) => ({
-    verdict: "confirmed" as "confirmed" | "false-positive" | "out-of-scope" | "uncertain",
-    reasoning: "stub",
-  })),
+  validateFinding: vi.fn(
+    async (_args: {
+      finding: Finding;
+    }): Promise<{
+      verdict: "confirmed" | "false-positive" | "out-of-scope" | "uncertain";
+      reasoning: string;
+      leadId?: string;
+      primaryClaimHolds?: boolean;
+    }> => ({ verdict: "confirmed", reasoning: "stub" }),
+  ),
   scoreFinding: vi.fn(async (_args: { finding: Finding }) => ({}) as CvssScore),
   dedupeFindings: vi.fn(
     async (_args: { filePath: string; findings: Finding[] }) =>
@@ -216,25 +222,33 @@ describe("scan phase order", () => {
     expect(detectorMock.validateFinding).toHaveBeenCalledTimes(1);
   });
 
-  it("validates the duplicates of a rejected primary and promotes the survivor", async () => {
+  it("validates a group once and moves it to the lead when the primary's claim fails", async () => {
     detectorMock.runAgent.mockImplementation(async ({ agent }) =>
       agent.slug === "alpha" ? [mockFinding("alpha", "alpha-1")] : [mockFinding("beta", "beta-1")],
     );
     detectorMock.dedupeFindings.mockImplementation(async () => [
       { primaryId: "alpha-1", duplicateIds: ["beta-1"], reasoning: "same sink" },
     ]);
-    detectorMock.validateFinding.mockImplementation(async ({ finding }) =>
-      finding.id === "alpha-1"
-        ? { verdict: "false-positive" as const, reasoning: "not reachable" }
-        : { verdict: "confirmed" as const, reasoning: "reachable" },
-    );
+    detectorMock.validateFinding.mockImplementation(async () => ({
+      verdict: "confirmed" as const,
+      reasoning: "reachable",
+      leadId: "beta-1",
+      primaryClaimHolds: false,
+    }));
 
     await runScan(projectRoot, opts(), env);
 
-    // The rejected primary hands its place to the duplicate that survived.
+    const call = detectorMock.validateFinding.mock.calls[0][0] as {
+      finding: Finding;
+      members?: Finding[];
+    };
+    expect(detectorMock.validateFinding).toHaveBeenCalledTimes(1);
+    expect(call.finding.id).toBe("alpha-1");
+    expect(call.members?.map((m) => m.id)).toEqual(["beta-1"]);
+
     const demoted = findingOnDisk("alpha", "alpha-1");
     expect(demoted.dedup?.duplicateOf).toBe("beta-1");
-    expect(demoted.validation?.verdict).toBe("false-positive");
+    expect(demoted.validation).toBeUndefined();
     expect(demoted.cvss).toBeUndefined();
 
     const heir = findingOnDisk("beta", "beta-1");
@@ -243,7 +257,26 @@ describe("scan phase order", () => {
     expect(heir.cvss?.baseScore).toBe(9.8);
   });
 
-  it("keeps a promoted duplicate under --delete-duplicates and deletes the rest", async () => {
+  it("runs no second wave when a rejected group showed every member", async () => {
+    detectorMock.runAgent.mockImplementation(async ({ agent }) =>
+      agent.slug === "alpha" ? [mockFinding("alpha", "alpha-1")] : [mockFinding("beta", "beta-1")],
+    );
+    detectorMock.dedupeFindings.mockImplementation(async () => [
+      { primaryId: "alpha-1", duplicateIds: ["beta-1"], reasoning: "same sink" },
+    ]);
+    detectorMock.validateFinding.mockImplementation(async () => ({
+      verdict: "false-positive" as const,
+      reasoning: "not reachable",
+    }));
+
+    await runScan(projectRoot, opts(), env);
+
+    expect(detectorMock.validateFinding).toHaveBeenCalledTimes(1);
+    expect(findingOnDisk("alpha", "alpha-1").dedup).toBeUndefined();
+    expect(findingOnDisk("beta", "beta-1").dedup?.duplicateOf).toBe("alpha-1");
+  });
+
+  it("keeps the lead under --delete-duplicates and deletes the rest", async () => {
     detectorMock.runAgent.mockImplementation(async ({ agent }) =>
       agent.slug === "alpha"
         ? [mockFinding("alpha", "alpha-1"), mockFinding("alpha", "alpha-2")]
@@ -252,15 +285,16 @@ describe("scan phase order", () => {
     detectorMock.dedupeFindings.mockImplementation(async () => [
       { primaryId: "alpha-1", duplicateIds: ["beta-1", "alpha-2"], reasoning: "same sink" },
     ]);
-    detectorMock.validateFinding.mockImplementation(async ({ finding }) =>
-      finding.agentSlug === "alpha"
-        ? { verdict: "false-positive" as const, reasoning: "not reachable" }
-        : { verdict: "confirmed" as const, reasoning: "reachable" },
-    );
+    detectorMock.validateFinding.mockImplementation(async () => ({
+      verdict: "confirmed" as const,
+      reasoning: "reachable",
+      leadId: "beta-1",
+      primaryClaimHolds: false,
+    }));
 
     await runScan(projectRoot, { ...opts(), deleteDuplicates: true }, env);
 
-    // beta-1 took over from the rejected primary, so it survives deletion.
+    // beta-1 became the primary during validation, so it survives deletion.
     const heir = findingOnDisk("beta", "beta-1");
     expect(heir.dedup).toBeUndefined();
     expect(heir.cvss?.baseScore).toBe(9.8);

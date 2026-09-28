@@ -43,7 +43,7 @@ import { loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
 import { logError, logInfo, logWarn } from "../log.js";
 import { evaluatePreFilter } from "../pre-filter.js";
 import { selectAgents } from "../precondition.js";
-import { duplicatesOfRejected, promote } from "../promote.js";
+import { applyGroupVerdict, duplicatesOfRejected, membersOf, promote } from "../promote.js";
 import {
   buildCredentialsFromOpts,
   REGION_FLAG_HELP,
@@ -59,6 +59,7 @@ import { notLiveReproducible, proofRuleMap } from "../validation/proof-rules.js"
 import { runReproducePhase } from "../validation/reproduce.js";
 import { DEFAULT_SANDBOX_IMAGE } from "../validation/sandbox.js";
 import { parseTargetAuth } from "../validation/target-auth.js";
+import { fitMembers } from "../validator.js";
 import { DEFAULT_VIEWER_PORT, openBrowser, startViewer } from "../viewer-server.js";
 import { DEFAULT_EXCLUDES, pathMatches, type WalkConfig, walkForAgents } from "../walker.js";
 import { buildInvocation } from "./invocation.js";
@@ -1590,8 +1591,8 @@ export async function runScan(
     // and scoring off findings that would be collapsed anyway. Marks the
     // non-primary findings with a `dedup` field; the report render below
     // then collapses them. `--delete-duplicates` strips them from disk, but
-    // only after the promotion wave, since until then a duplicate may still
-    // turn out to be the finding that ships.
+    // only after validation, since until then a duplicate may still turn out
+    // to be the finding that ships.
     if (opts.dedup && findings.length > 0) {
       const comparable = dedupeCandidates(findings).filter(
         (f) => f.filePath && f.filePath !== "(unknown)",
@@ -1708,8 +1709,7 @@ export async function runScan(
     //     field untouched so a follow-up `revalidate` can do full
     //     classification.
     if ((opts.validate || scopeOnlyValidate) && findings.length > 0) {
-      // Primaries only: a duplicate is validated later, and only if its
-      // primary is rejected.
+      // Primaries only: a group is validated once, through its primary.
       const candidates = findings.filter(
         (f) => f.filePath && f.filePath !== "(unknown)" && !f.dedup,
       );
@@ -1732,6 +1732,12 @@ export async function runScan(
         // whole catalog, not the selection: a finding restored from a prior
         // run can come from an agent this run's `-t` filter left out.
         const agentBySlug = new Map(catalog.agents.map((a) => [a.slug, a]));
+        // Built once, before any swap. Safe: a swapped group is confirmed and
+        // never enters the second wave below, which is the only later reader.
+        const groups = membersOf(findings);
+        const canMark = (f: Finding) => selectedSlugs.has(f.agentSlug);
+        // Findings whose marker or verdict moved in a swap, persisted with the wave.
+        const swapped = new Map<string, Finding>();
         if (!scopeOnlyValidate) {
           const withCustomPrompt = validatable.filter(
             (f) => agentBySlug.get(f.agentSlug)?.validationPrompt,
@@ -1797,13 +1803,11 @@ export async function runScan(
               // Undefined when the agent declares none, or when its slug is no
               // longer in the catalog: the validator falls back to its defaults.
               validationPrompt: agentBySlug.get(finding.agentSlug)?.validationPrompt,
+              members: groups.get(finding.id),
               signal: scanAbortController.signal,
             });
-            finding.validation = {
-              verdict: result.verdict,
-              reasoning: result.reasoning,
-              ...(result.refused ? { refused: true } : {}),
-            };
+            const changed = applyGroupVerdict(findings, finding, result, canMark);
+            if (changed.length > 1) for (const f of changed) swapped.set(f.id, f);
             if (result.refused) {
               console.log(`    ${finding.filePath}: validation refused, recorded as uncertain`);
             } else if (opts.verbose) {
@@ -1840,12 +1844,15 @@ export async function runScan(
             record.findings = record.findings.map((rec) => {
               const live = inMemory.get(rec.id);
               if (!live) return rec;
-              // `dedup` is copied even when absent: that is how a promoted
-              // heir's marker is cleared on disk.
+              // Copied even when absent: that is how a swap clears the old
+              // primary's marker, verdict, score and live result on disk.
               return {
                 ...rec,
-                ...(live.validation ? { validation: live.validation } : {}),
+                validation: live.validation,
                 dedup: live.dedup,
+                cvss: live.cvss,
+                severity: live.severity,
+                live: live.live,
               };
             });
             record.analysisHistory.push({
@@ -1881,21 +1888,29 @@ export async function runScan(
             });
           }
         });
-        persistWave(validatable.filter((f) => f.validation));
+        const wave = new Map<string, Finding>();
+        for (const f of validatable) if (f.validation) wave.set(f.id, f);
+        for (const [id, f] of swapped) wave.set(id, f);
+        persistWave([...wave.values()]);
 
-        // Promotion wave: a rejected primary took its whole group out of the
-        // report, so give its duplicates their own verdict and hand the group
-        // to the first one that survives.
-        const secondWave = duplicatesOfRejected(findings);
+        // A rejected group covers only the members its prompt showed. Members
+        // the cap left out get their own verdict, and the first survivor
+        // takes over.
+        const unseen = new Set<string>();
+        for (const members of groups.values()) {
+          for (const m of fitMembers(members).left) unseen.add(m.id);
+        }
+        const secondWave = duplicatesOfRejected(findings, unseen);
         if (secondWave.length > 0) {
-          console.log(`  Validating ${secondWave.length} duplicate(s) of rejected primaries`);
+          console.log(
+            `  Validating ${secondWave.length} duplicate(s) a rejected group did not show`,
+          );
           await runConcurrent(secondWave, concurrency, validateOne);
         }
         // Outside that guard: a run interrupted after the wave's verdicts
         // reached disk resumes with an empty wave but a group still to hand
         // over. Promoting nothing costs one pass over `findings`.
-        const moved = promote(findings, (f) => selectedSlugs.has(f.agentSlug));
-        // Every heir had its marker cleared; every other member gained one.
+        const moved = promote(findings, canMark);
         const promoted = moved.filter((f) => !f.dedup).length;
         if (promoted > 0) console.log(`  Promoted ${promoted} finding(s)`);
         const toPersist = new Map<string, Finding>();
@@ -1943,9 +1958,9 @@ export async function runScan(
       });
     }
 
-    // `--delete-duplicates` strips the duplicates only here: the promotion
-    // wave above may have handed a group to one of them, so deleting any
-    // earlier can throw away the finding that ships.
+    // `--delete-duplicates` strips the duplicates only here: validation
+    // above may have made one of them the primary, so deleting any earlier
+    // can throw away the finding that ships.
     if (opts.dedup && opts.deleteDuplicates) {
       const doomed = findings.filter((f) => f.dedup);
       if (doomed.length > 0) {
@@ -2452,7 +2467,7 @@ export function registerScanCommand(program: Command): void {
     )
     .option(
       "--delete-duplicates",
-      "With --dedup, physically remove duplicate findings from their FileRecords instead of just marking them (default: keep + mark). Removal happens after validation, so a duplicate that takes over from a rejected primary is kept.",
+      "With --dedup, physically remove duplicate findings from their FileRecords instead of just marking them (default: keep + mark). Removal happens after validation, so a duplicate that validation made the primary is kept.",
     )
     .option(
       "--serve [port]",
