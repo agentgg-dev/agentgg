@@ -33,10 +33,16 @@ export function duplicatesOfRejected(findings: Finding[], only?: Set<string>): F
   return out;
 }
 
-/** Duplicates keyed by their primary's id, in stored order. */
+/** Duplicates keyed by their primary's id, sorted by id so a resumed run
+ *  splits a capped group the same way. */
 export function membersOf(findings: Finding[]): Map<string, Finding[]> {
   const out = new Map<string, Finding[]>();
-  for (const { primary, dupes } of clusters(findings).values()) out.set(primary.id, dupes);
+  for (const { primary, dupes } of clusters(findings).values()) {
+    out.set(
+      primary.id,
+      [...dupes].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
+    );
+  }
   return out;
 }
 

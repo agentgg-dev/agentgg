@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CvssScore, Finding, UserConfig } from "@agentgg/core";
-import { readFileRecord, saveUserConfig } from "@agentgg/core";
+import { readFileRecord, saveUserConfig, writeFileRecord } from "@agentgg/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const FILE = "app.js";
@@ -256,6 +256,44 @@ describe("scan phase order", () => {
     expect(heir.dedup).toBeUndefined();
     expect(heir.validation?.verdict).toBe("confirmed");
     expect(heir.cvss?.baseScore).toBe(9.8);
+  });
+
+  it("clears the demoted primary's prior verdict, score and live result on disk", async () => {
+    detectorMock.runAgent.mockImplementation(async ({ agent }) =>
+      agent.slug === "alpha" ? [mockFinding("alpha", "alpha-1")] : [mockFinding("beta", "beta-1")],
+    );
+    detectorMock.dedupeFindings.mockImplementation(async () => [
+      { primaryId: "alpha-1", duplicateIds: ["beta-1"], reasoning: "same sink" },
+    ]);
+    await runScan(projectRoot, opts(), env);
+
+    const record = readFileRecord(outputDir, "alpha", FILE);
+    if (!record) throw new Error("no alpha record");
+    record.findings = record.findings.map((f) => ({
+      ...f,
+      live: { result: "reproduced" as const, reasoning: "old", counterevidence: "" },
+    }));
+    writeFileRecord(outputDir, record);
+    const prior = findingOnDisk("alpha", "alpha-1");
+    expect(prior.validation?.verdict).toBe("confirmed");
+    expect(prior.cvss?.baseScore).toBe(9.8);
+    expect(prior.severity).toBeDefined();
+    expect(prior.live).toBeDefined();
+
+    detectorMock.validateFinding.mockImplementation(async () => ({
+      verdict: "confirmed" as const,
+      reasoning: "reachable",
+      leadId: "beta-1",
+      primaryClaimHolds: false,
+    }));
+    await runScan(projectRoot, { ...opts(), revalidateAll: true }, env);
+
+    const demoted = findingOnDisk("alpha", "alpha-1");
+    expect(demoted.dedup?.duplicateOf).toBe("beta-1");
+    expect(demoted.validation).toBeUndefined();
+    expect(demoted.cvss).toBeUndefined();
+    expect(demoted.severity).toBeUndefined();
+    expect(demoted.live).toBeUndefined();
   });
 
   it("runs no second wave when a rejected group showed every member", async () => {

@@ -132,6 +132,7 @@ function writeThreeAgentGroup(): void {
       validation: { verdict: "uncertain", reasoning: "old" },
       cvss: CVSS,
       severity: "CRITICAL",
+      live: { result: "reproduced", reasoning: "old", counterevidence: "" },
     }),
   ]);
   writeRecord("sql-b", [makeFinding("d1", "sql-b", dupeOf("p1"))]);
@@ -173,6 +174,7 @@ describe("group validation in revalidate", () => {
     expect(byId.get("p1")?.validation).toBeUndefined();
     expect(byId.get("p1")?.cvss).toBeUndefined();
     expect(byId.get("p1")?.severity).toBeUndefined();
+    expect(byId.get("p1")?.live).toBeUndefined();
     expect(byId.get("d2")?.dedup?.duplicateOf).toBe("d1");
     expect(logs.join("\n")).toContain(`agentgg score ${outputDir}`);
   });

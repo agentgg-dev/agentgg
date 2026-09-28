@@ -99,6 +99,14 @@ describe("applyGroupVerdict", () => {
     expect((membersOf(group()).get("p1") ?? []).map((x) => x.id)).toEqual(["d1", "d2"]);
   });
 
+  it("orders a group's duplicates the same whatever order they were loaded in", () => {
+    const [p1, d1, d2] = group();
+    const ids = (list: ReturnType<typeof group>) =>
+      (membersOf(list).get("p1") ?? []).map((x) => x.id);
+    expect(ids([d2, p1, d1])).toEqual(["d1", "d2"]);
+    expect(ids([p1, d1, d2])).toEqual(["d1", "d2"]);
+  });
+
   it("puts the verdict on the primary when leadId is absent", () => {
     const list = group();
     const changed = applyGroupVerdict(list, list[0], confirmed, () => true);
