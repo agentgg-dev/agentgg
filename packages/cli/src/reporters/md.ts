@@ -228,6 +228,12 @@ export function renderFindingMd(
       lines.push(`**Counterevidence:** ${live.counterevidence}`);
       lines.push("");
     }
+    // The control is what separates the effect from the agent's own setup, so
+    // it sits with the verdict rather than among the evidence files.
+    if ((live.negativeControl ?? "").trim().length > 0) {
+      lines.push(`**Negative control:** ${live.negativeControl}`);
+      lines.push("");
+    }
     const ev = live.evidence;
     if (ev) {
       const link = (name: string) =>

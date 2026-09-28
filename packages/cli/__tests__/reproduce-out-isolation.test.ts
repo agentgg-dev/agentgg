@@ -119,8 +119,6 @@ describe("evidence isolation between findings", () => {
       auth: {},
       image: "img",
       timeoutMs: 30_000,
-      budgetMs: 60_000,
-      max: 10,
       signal: new AbortController().signal,
     });
 
@@ -172,8 +170,6 @@ describe("evidence isolation between findings", () => {
       auth: {},
       image: "img",
       timeoutMs: 30_000,
-      budgetMs: 60_000,
-      max: 10,
       signal: new AbortController().signal,
     });
 
@@ -216,8 +212,6 @@ describe("evidence isolation between findings", () => {
       auth: {},
       image: "img",
       timeoutMs: 30_000,
-      budgetMs: 60_000,
-      max: 10,
       reproduceMaxTurns: 75,
       signal: new AbortController().signal,
     });

@@ -1,23 +1,41 @@
 import { describe, expect, it } from "vitest";
-import { proofRulesFor } from "../src/validation/proof-rules";
+import { PROOF_PRINCIPLE, proofRuleMap, proofRules } from "../src/validation/proof-rules";
 
-const f = (vulnSlug: string, references: string[] = []) =>
-  ({ vulnSlug, references, id: "i", agentSlug: "a", filePath: "p" }) as any;
-
-describe("proofRulesFor", () => {
-  it("requires a cross-origin request and a negative control for CSRF", () => {
-    const rules = proofRulesFor(f("csrf"));
-    expect(rules).toContain("different origin");
-    expect(rules).toContain("without the victim's session");
+describe("proofRules", () => {
+  it("states the principle when the reporting agent declares no rule", () => {
+    expect(proofRules()).toContain(PROOF_PRINCIPLE);
   });
 
-  it("matches on the CWE when the slug is free text", () => {
-    expect(proofRulesFor(f("forged-request", ["CWE-352"]))).toContain("different origin");
+  it("appends the agent's own rule after the principle", () => {
+    const rule = "The request MUST come from a different origin than the target.";
+    const out = proofRules(rule);
+    expect(out).toContain(rule);
+    expect(out.indexOf(PROOF_PRINCIPLE)).toBeLessThan(out.indexOf(rule));
   });
 
-  it("falls back to the generic rules for an unlisted class", () => {
-    const rules = proofRulesFor(f("open-redirect-ish"));
-    expect(rules).toContain("observed");
-    expect(rules).not.toContain("different origin");
+  it("keeps the principle when an agent declares a rule, so a rule can only add", () => {
+    expect(proofRules("Anything goes.")).toContain(PROOF_PRINCIPLE);
+  });
+
+  it("ignores an agent rule that is only whitespace", () => {
+    expect(proofRules("   \n  ")).toBe(proofRules());
+  });
+
+  it("tells the agent to return inconclusive when it cannot isolate the effect", () => {
+    expect(proofRules()).toContain("inconclusive");
+  });
+});
+
+describe("proofRuleMap", () => {
+  const agent = (slug, liveProofRule) => ({ slug, liveProofRule }) as any;
+
+  it("keys each declared rule by the agent slug that owns it", () => {
+    const map = proofRuleMap([agent("csrf", "Cross origin only."), agent("xss", undefined)]);
+    expect(map.get("csrf")).toBe("Cross origin only.");
+  });
+
+  it("leaves out an agent that declares no rule, so it falls to the principle", () => {
+    const map = proofRuleMap([agent("xss", undefined)]);
+    expect(map.has("xss")).toBe(false);
   });
 });

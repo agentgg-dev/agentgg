@@ -274,6 +274,20 @@ export const Agent = z.object({
    * (`--scope-validate`) ignores it, because it never reads the code.
    */
   validationPrompt: z.string().optional(),
+  /**
+   * What a live browser run must show before a finding from this agent counts
+   * as reproduced. Unlike `validationPrompt`, this ADDS to the proof principle
+   * and can never replace it. Write one only when a real run showed the
+   * principle was not enough for this class, and say which run in a comment.
+   */
+  liveProofRule: z.string().optional(),
+  /**
+   * False when this agent's class asserts a missing control rather than an
+   * effect an attacker can cause, so a browser has nothing to reproduce. Such
+   * findings skip the live run and record `not-reproducible`. Absent means
+   * true: a new agent is always tested unless its author opts out.
+   */
+  liveReproducible: z.boolean().optional(),
   /** Where this agent came from. Set by the loader, not by the author. */
   source: z
     .object({
@@ -358,8 +372,15 @@ export const CvssScore = z.object({
 export type CvssScore = z.infer<typeof CvssScore>;
 
 /** `error` is a run that broke (sandbox, MCP, provider) before the agent
- *  could answer. Unlike `inconclusive`, it says nothing about the code. */
-export const LiveResult = z.enum(["reproduced", "refuted", "inconclusive", "error"]);
+ *  could answer. `not-reproducible` is a class that asserts a missing control,
+ *  so no browser run was attempted. Neither says anything about the code. */
+export const LiveResult = z.enum([
+  "reproduced",
+  "refuted",
+  "inconclusive",
+  "error",
+  "not-reproducible",
+]);
 export type LiveResult = z.infer<typeof LiveResult>;
 
 export const LiveValidation = z.object({
@@ -367,6 +388,9 @@ export const LiveValidation = z.object({
   reasoning: z.string(),
   /** The strongest case the live agent could make against its own result. */
   counterevidence: z.string().default(""),
+  /** The control that separates the effect from the agent's own setup: the
+   *  same steps without the attacker's input, or without the session. */
+  negativeControl: z.string().optional(),
   refused: z.boolean().optional(),
   baseUrl: z.string().optional(),
   evidence: z

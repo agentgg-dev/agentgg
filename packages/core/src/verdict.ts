@@ -18,7 +18,8 @@ export function effectiveVerdict(
   const staticVerdict = f.validation?.verdict;
   const live = f.live?.result;
   if (staticVerdict === "out-of-scope") return "out-of-scope";
-  if (live === undefined || live === "error" || f.live?.refused) return staticVerdict;
+  if (live === undefined || live === "error" || live === "not-reproducible" || f.live?.refused)
+    return staticVerdict;
   if (staticVerdict === undefined) {
     if (live === "reproduced") return "confirmed";
     return live === "refuted" ? "uncertain" : undefined;

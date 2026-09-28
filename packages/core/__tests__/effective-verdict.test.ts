@@ -53,4 +53,14 @@ describe("effectiveVerdict", () => {
     f.live.refused = true;
     expect(effectiveVerdict(f)).toBe("confirmed");
   });
+
+  it("leaves the static verdict alone when the class has nothing to reproduce", () => {
+    const f = withBoth("uncertain", "not-reproducible");
+    expect(effectiveVerdict(f)).toBe("uncertain");
+  });
+
+  it("does not lower a confirmed finding whose class has nothing to reproduce", () => {
+    const f = withBoth("confirmed", "not-reproducible");
+    expect(effectiveVerdict(f)).toBe("confirmed");
+  });
 });

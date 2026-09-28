@@ -85,8 +85,6 @@ describe("live pass without a result", () => {
       auth: {},
       image: "img",
       timeoutMs: 50,
-      budgetMs: 60_000,
-      max: 10,
       signal: new AbortController().signal,
     });
     return finding;

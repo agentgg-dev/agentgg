@@ -1,13 +1,7 @@
 // The viewer shows these strings verbatim, so the rules that pick them are
 // pinned here: "we could not test it" must never read as "it is not real".
 import { describe, expect, it } from "vitest";
-import {
-  isWebReachable,
-  liveState,
-  TIMEOUT_PREFIX,
-  verdictConflict,
-  verdictStory,
-} from "../src/live.js";
+import { liveState, TIMEOUT_PREFIX, verdictConflict, verdictStory } from "../src/live.js";
 import type { Finding, LiveValidation, Validation } from "../src/types.js";
 
 const finding = (over: Partial<Finding> = {}): Finding =>
@@ -32,30 +26,9 @@ const live = (over: Partial<LiveValidation> = {}): LiveValidation =>
 const validation = (verdict: Validation["verdict"]): Validation =>
   ({ verdict, reasoning: "r" }) as Validation;
 
-describe("isWebReachable", () => {
-  it("accepts a known class by slug", () => {
-    expect(isWebReachable(finding({ vulnSlug: "sqli" }))).toBe(true);
-  });
-
-  it("accepts an unknown slug when a CWE reference names a web class", () => {
-    expect(
-      isWebReachable(finding({ vulnSlug: "weird-thing", references: ["CWE-89: SQL Injection"] })),
-    ).toBe(true);
-  });
-
-  it("rejects a class a browser cannot drive", () => {
-    expect(isWebReachable(finding({ vulnSlug: "missing-security-headers" }))).toBe(false);
-  });
-
-  it("rejects a duplicate, which the live pass never tests", () => {
-    const dup = finding({ dedup: { duplicateOf: "other", reasoning: "same root cause" } } as never);
-    expect(isWebReachable(dup)).toBe(false);
-  });
-});
-
 describe("liveState", () => {
-  it("separates a class that cannot be tested from one that was not tested", () => {
-    expect(liveState(finding({ vulnSlug: "missing-security-headers" })).kind).toBe("not-reachable");
+  it("calls any untested finding not-run, whatever its class", () => {
+    expect(liveState(finding({ vulnSlug: "missing-security-headers" })).kind).toBe("not-run");
     expect(liveState(finding()).kind).toBe("not-run");
   });
 
@@ -184,5 +157,18 @@ describe("verdictConflict", () => {
   it("is false when a broken run leaves the static verdict alone", () => {
     const f = finding({ validation: validation("confirmed"), live: live({ result: "error" }) });
     expect(verdictConflict(f)).toBe(false);
+  });
+});
+
+describe("a class with nothing to reproduce", () => {
+  it("is kept apart from a run that tried and failed", () => {
+    const f = finding({ live: live({ result: "not-reproducible" }) });
+    expect(liveState(f).kind).toBe("not-reproducible");
+    expect(liveState(f).tellsAboutCode).toBe(false);
+  });
+
+  it("never claims a browser tried it", () => {
+    const f = finding({ live: live({ result: "not-reproducible" }) });
+    expect(liveState(f).detail).not.toMatch(/could not|failed|ran out/i);
   });
 });

@@ -287,11 +287,13 @@ export class ClaudeAgentDetector implements Detector {
     maxTurns?: number;
     staticVerdict?: string;
     staticReasoning?: string;
+    proofRule?: string;
     signal?: AbortSignal;
   }): Promise<{
     result: LiveResult;
     reasoning: string;
     counterevidence: string;
+    negativeControl?: string;
     refused?: boolean;
     script?: string;
   }> {
@@ -305,6 +307,7 @@ export class ClaudeAgentDetector implements Detector {
       args.auth,
       args.context,
       staticReview,
+      args.proofRule,
     );
     // No built-in tools (no Read/Glob/Grep); this session works only against
     // the live target through the Playwright MCP server the sandbox hosts.
@@ -330,12 +333,14 @@ export class ClaudeAgentDetector implements Detector {
             result: result.result,
             reasoning: result.reasoning,
             counterevidence: result.counterevidence,
+            negativeControl: result.negativeControl,
             script: result.script,
           }
         : {
             result: result.result,
             reasoning: result.reasoning,
             counterevidence: result.counterevidence,
+            negativeControl: result.negativeControl,
           };
     } catch (err) {
       // Mirrors validateFinding: record the refusal instead of failing the

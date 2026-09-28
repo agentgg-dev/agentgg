@@ -1329,11 +1329,13 @@ export class VercelAgentDetector implements Detector {
     maxTurns?: number;
     staticVerdict?: string;
     staticReasoning?: string;
+    proofRule?: string;
     signal?: AbortSignal;
   }): Promise<{
     result: LiveResult;
     reasoning: string;
     counterevidence: string;
+    negativeControl?: string;
     refused?: boolean;
     script?: string;
   }> {
@@ -1348,6 +1350,7 @@ export class VercelAgentDetector implements Detector {
       args.auth,
       args.context,
       staticReview,
+      args.proofRule,
     )}\n\n${reproduceJsonInstruction()}`;
     // Tools come only from the sandbox's Playwright MCP server: no Read/Glob/
     // Grep, so the session works against the live target and nothing else.
@@ -1587,6 +1590,7 @@ export class VercelAgentDetector implements Detector {
     result: LiveResult;
     reasoning: string;
     counterevidence: string;
+    negativeControl?: string;
     refused?: boolean;
     script?: string;
   }> {
@@ -2674,9 +2678,9 @@ function reproduceJsonInstruction(): string {
 
 After you finish in the browser, output your result as a single JSON object matching EXACTLY this shape - no prose, no markdown fences, no trailing text:
 
-{"result":"reproduced","reasoning":"What you did in the browser and what you observed.","counterevidence":"The strongest case against this result.","script":"import { test, expect } from '@playwright/test';\\n\\ntest('repro', async ({ page }) => {\\n  await page.goto('/');\\n});\\n"}
+{"result":"reproduced","reasoning":"What you did in the browser and what you observed.","counterevidence":"The strongest case against this result.","negativeControl":"The same request without the session cookie returned 401.","script":"import { test, expect } from '@playwright/test';\\n\\ntest('repro', async ({ page }) => {\\n  await page.goto('/');\\n});\\n"}
 
-\`result\` MUST be "reproduced", "refuted", or "inconclusive". \`counterevidence\` is required on every result: the strongest case against your own result. \`script\` is the full source of a self-contained Playwright test that replays every step, written as ONE JSON string with newlines escaped as \\n. Include \`script\` only when the result is "reproduced"; omit the field entirely otherwise.`;
+\`result\` MUST be "reproduced", "refuted", or "inconclusive". \`counterevidence\` is required on every result: the strongest case against your own result. \`negativeControl\` is what happened when you ran the same steps without your input, or without the session; a "reproduced" without it is downgraded to "inconclusive". \`script\` is the full source of a self-contained Playwright test that replays every step, written as ONE JSON string with newlines escaped as \\n. Include \`script\` only when the result is "reproduced"; omit the field entirely otherwise.`;
 }
 
 /** Drop `script` unless the result is `reproduced`. The caller only runs a
@@ -2686,16 +2690,17 @@ export function asReproduceField(o: ReproduceFindingResult): {
   result: LiveResult;
   reasoning: string;
   counterevidence: string;
+  negativeControl?: string;
   script?: string;
 } {
-  if (o.result !== "reproduced")
-    return { result: o.result, reasoning: o.reasoning, counterevidence: o.counterevidence };
-  return {
+  const base = {
     result: o.result,
     reasoning: o.reasoning,
     counterevidence: o.counterevidence,
-    ...(o.script ? { script: o.script } : {}),
+    ...(o.negativeControl ? { negativeControl: o.negativeControl } : {}),
   };
+  if (o.result !== "reproduced") return base;
+  return { ...base, ...(o.script ? { script: o.script } : {}) };
 }
 
 function jsonOutputInstruction(multiAgent: boolean): string {

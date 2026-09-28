@@ -6,10 +6,10 @@ const STYLE: Record<LiveStateKind, string> = {
   "timed-out": "border-terminal-yellow/40 bg-terminal-yellow/10 text-terminal-yellow",
   inconclusive: "border-terminal-yellow/40 bg-terminal-yellow/10 text-terminal-yellow",
   error: "border-terminal-red/40 bg-terminal-red/10 text-terminal-red",
+  "not-reproducible": "border-bg-border bg-bg-panel/60 text-ink-dim",
   refused: "border-bg-border bg-bg-panel/60 text-ink-dim",
   duplicate: "border-bg-border bg-bg-panel/60 text-ink-dim",
   "out-of-scope": "border-bg-border bg-bg-panel/60 text-ink-dim",
-  "not-reachable": "border-bg-border bg-bg-panel/60 text-ink-dim",
   "not-run": "border-bg-border bg-bg-panel/60 text-ink-dim",
 };
 

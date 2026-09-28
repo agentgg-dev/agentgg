@@ -126,8 +126,6 @@ async function runPhase(
     auth: {},
     image: "img",
     timeoutMs: 30_000,
-    budgetMs: 60_000,
-    max: 10,
     signal: new AbortController().signal,
   });
 }

@@ -65,8 +65,6 @@ describe.runIf(url)("live validation e2e (external mode)", () => {
       auth: {},
       image: DEFAULT_SANDBOX_IMAGE,
       timeoutMs: 120_000,
-      budgetMs: 180_000,
-      max: 1,
       signal: new AbortController().signal,
     });
 

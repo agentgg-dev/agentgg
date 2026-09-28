@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { selectForReproduce } from "../src/validation/reproduce";
+import { selectForReproduce, splitLiveReproducible } from "../src/validation/reproduce";
 
 const f = (vulnSlug: string, extra: object = {}) =>
   ({
@@ -19,7 +19,7 @@ const f = (vulnSlug: string, extra: object = {}) =>
   }) as any;
 
 describe("selectForReproduce", () => {
-  it("keeps web-reachable primaries without a live result", () => {
+  it("keeps every primary without a live result, whatever its class", () => {
     const list = [
       f("xss"),
       f("secret"),
@@ -28,7 +28,15 @@ describe("selectForReproduce", () => {
         live: { result: "reproduced", reasoning: "d", counterevidence: "" },
       }),
     ];
-    expect(selectForReproduce(list).map((x) => x.vulnSlug)).toEqual(["xss"]);
+    expect(selectForReproduce(list).map((x) => x.vulnSlug)).toEqual(["xss", "secret"]);
+  });
+
+  it("puts a finding that names an HTTP entry point first, at an equal verdict", () => {
+    const list = [
+      f("secret", { poc: "The key is committed in config.yml." }),
+      f("xss", { poc: "GET /search?q=<script>alert(1)</script>" }),
+    ];
+    expect(selectForReproduce(list).map((x) => x.vulnSlug)).toEqual(["xss", "secret"]);
   });
 
   it("drops duplicates (dedup marker) even when web-reachable", () => {
@@ -79,5 +87,25 @@ describe("selectForReproduce", () => {
   it("skips a finding that already carries a live result", () => {
     const list = [f("xss", { live: { result: "refuted", reasoning: "r", counterevidence: "" } })];
     expect(selectForReproduce(list)).toEqual([]);
+  });
+});
+
+describe("splitLiveReproducible", () => {
+  it("holds back a finding whose agent declared its class has nothing to reproduce", () => {
+    const list = [
+      f("xss", { agentSlug: "xss" }),
+      f("headers", { agentSlug: "missing-security-headers" }),
+    ];
+    const { testable, skipped } = splitLiveReproducible(
+      list,
+      new Set(["missing-security-headers"]),
+    );
+    expect(testable.map((x) => x.vulnSlug)).toEqual(["xss"]);
+    expect(skipped.map((x) => x.vulnSlug)).toEqual(["headers"]);
+  });
+
+  it("tests everything when no agent opted out", () => {
+    const list = [f("xss", { agentSlug: "xss" })];
+    expect(splitLiveReproducible(list, new Set()).testable).toHaveLength(1);
   });
 });

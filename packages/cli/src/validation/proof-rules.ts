@@ -1,47 +1,42 @@
-import type { Finding } from "@agentgg/core";
-import { normalizeVulnSlug } from "./web-reachable.js";
+import type { Agent } from "@agentgg/core";
 
-const GENERIC = `- Show the vulnerable behavior you observed, not only that a page or an
-  endpoint responded.
-- Run one negative control: the same steps without the attacker's input, or
-  without the session, and show that the result differs.`;
+/**
+ * The bar a live claim must clear. It is stated once, for every class,
+ * because the shape of proof does not vary with the vulnerability: an
+ * effect the application must not allow, attributable to the attacker's
+ * input, and absent without it.
+ */
+export const PROOF_PRINCIPLE = `- You caused an effect the application must not allow. A page that
+  responded, or text that came back, is not an effect.
+- The effect is attributable to YOUR input. Name the input that carried it.
+- Run the same steps without your input, or without the session, and show
+  that the effect does not happen.
+- If you cannot isolate the effect to your own input, the result is
+  'inconclusive'. Never report an effect your own setup produced as proof.`;
 
-const RULES: Record<string, string> = {
-  csrf: `- The request MUST come from a different origin than the target. A request
-  the target's own page sends proves nothing here.
-- The victim's session must carry the request. Run the same request
-  without the victim's session: if it still succeeds, the bug is missing
-  authorization, not CSRF, so the result is 'inconclusive'.`,
-  idor: `- Use one account to read or change another account's object, and show the
-  data belongs to the other account.
-- Negative control: the same request with no session, or with a random id,
-  must not return the other account's data.`,
-  xss: `- Show the injected script executing in the page, not only reflected text.
-- Negative control: a benign value in the same parameter must render as text.`,
-  "sql-injection": `- Show a response that only a database-level change of the query explains,
-  for example a different row set or a database error naming the syntax.
-- Negative control: the same request with the payload escaped must behave
-  normally.`,
-  "open-redirect": `- Show the target issuing a redirect to the external host you supplied.
-- Negative control: an internal path in the same parameter must stay internal.`,
-};
+/**
+ * The reporting agent may add to the bar, never lower it, so its rule is
+ * appended to the principle rather than replacing it.
+ */
+export function proofRules(agentRule?: string): string {
+  const extra = agentRule?.trim();
+  return extra
+    ? `${PROOF_PRINCIPLE}\n\nFor this class, additionally:\n\n${extra}`
+    : PROOF_PRINCIPLE;
+}
 
-const BY_CWE: Record<number, string> = {
-  352: "csrf",
-  639: "idor",
-  862: "idor",
-  863: "idor",
-  79: "xss",
-  89: "sql-injection",
-  601: "open-redirect",
-};
+/** Agents whose class reports a missing control rather than an effect an
+ *  attacker can cause. Absent means testable, so opting out is deliberate. */
+export function notLiveReproducible(agents: readonly Agent[]): Set<string> {
+  const out = new Set<string>();
+  for (const a of agents) if (a.liveReproducible === false) out.add(a.slug);
+  return out;
+}
 
-export function proofRulesFor(finding: Finding): string {
-  for (const ref of finding.references ?? []) {
-    for (const m of ref.matchAll(/\bCWE-(\d+)\b/gi)) {
-      const key = BY_CWE[Number(m[1])];
-      if (key) return RULES[key] as string;
-    }
-  }
-  return RULES[normalizeVulnSlug(finding.vulnSlug)] ?? GENERIC;
+/** The agents that declare a rule, keyed by slug. An agent that declares none
+ *  is absent, and its findings run on the principle alone. */
+export function proofRuleMap(agents: readonly Agent[]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const a of agents) if (a.liveProofRule) map.set(a.slug, a.liveProofRule);
+  return map;
 }

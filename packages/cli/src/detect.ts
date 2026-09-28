@@ -6,7 +6,7 @@ import { z } from "zod";
 import type { AgentSpec } from "./agent-spec.js";
 import type { PreFilterHit, TaintStep } from "./pre-filter.js";
 import type { UsageMeter } from "./usage-meter.js";
-import { proofRulesFor } from "./validation/proof-rules.js";
+import { proofRules } from "./validation/proof-rules.js";
 import type { TargetAuth } from "./validation/target-auth.js";
 
 /**
@@ -167,6 +167,12 @@ export const ReproduceFindingResult = z.object({
       "Short prose explaining what you did in the browser and what you observed, and why that supports the result.",
     ),
   counterevidence: z.string().describe("The strongest case against your own result."),
+  negativeControl: z
+    .string()
+    .optional()
+    .describe(
+      "The control you ran and what happened: the same steps without your input, or without the session. Required when the result is 'reproduced'; a claim without one is downgraded to 'inconclusive'.",
+    ),
   script: z
     .string()
     .optional()
@@ -323,12 +329,18 @@ export interface Detector {
     staticVerdict?: string;
     /** Static validator's reasoning, quoted into the prompt verbatim. */
     staticReasoning?: string;
+    /** The reporting agent's `liveProofRule`. Adds to the proof principle;
+     *  no agent can replace it. */
+    proofRule?: string;
     signal?: AbortSignal;
   }): Promise<{
     result: LiveResult;
     reasoning: string;
     /** The strongest case the live agent could make against its own result. */
     counterevidence: string;
+    /** The control the agent ran to separate the effect from its own setup.
+     *  A `reproduced` without one is downgraded. */
+    negativeControl?: string;
     /** True when the model declined to reproduce (refusal); `result` is
      *  `inconclusive`. Mirrors `validateFinding`'s refusal handling. */
     refused?: boolean;
@@ -706,6 +718,9 @@ export function buildReproducePrompt(
   auth?: TargetAuth,
   context?: string,
   staticReview?: { verdict: string; reasoning: string },
+  /** The reporting agent's `liveProofRule`, when its catalog entry declares
+   *  one. It adds to the principle and can never replace it. */
+  agentRule?: string,
 ): string {
   const lineHint = finding.lineRange
     ? `lines ${finding.lineRange[0]}–${finding.lineRange[1]}`
@@ -724,7 +739,7 @@ If the target requires login, sign in first with:
 
   const contextBlock = context ? `\n## Additional context\n\n${context}\n` : "";
 
-  const proofRulesBlock = `\n## What counts as proof for this class\n\n${proofRulesFor(finding)}\n`;
+  const proofRulesBlock = `\n## What counts as proof\n\n${proofRules(agentRule)}\n`;
 
   const staticReviewBlock = staticReview
     ? `\n## Source review of this finding\n\nA reviewer with the source code reached the verdict \`${staticReview.verdict}\`:\n\n${staticReview.reasoning}\n\nYour result counts as 'reproduced' ONLY if what you observed answers this\nreview. Say in your reasoning how it does.\n`
@@ -760,17 +775,21 @@ ${proofRulesBlock}${staticReviewBlock}
 ## Your task
 
 1. Navigate to ${baseUrl} and, if credentials were given above, log in.
-2. Reproduce the PoC above against the live application.
+2. Reproduce the PoC above against the live application. If you cannot find
+   an HTTP way to reach it, say what you tried and return 'inconclusive'.
 3. At the point the vulnerable behavior would appear, take a screenshot
    as proof, whether or not it reproduces.
-4. Decide a result:
+4. Run the control the proof rules ask for: the same steps without your
+   input, or without the session. Report what happened in
+   \`negativeControl\`. A 'reproduced' result without it is downgraded.
+5. Decide a result:
    - 'reproduced': you observed the vulnerable behavior, it meets the proof
      rules above${reviewCriterion}.
    - 'refuted': the attack ran and a named control blocked it. Name the
      control.
    - 'inconclusive': anything else, including a run you could not finish and
      evidence that does not meet the proof rules.
-5. When 'reproduced', also write a self-contained Playwright test (the
+6. When 'reproduced', also write a self-contained Playwright test (the
    source for a \`repro.spec.ts\` file) that replays every step you just
    performed, including login, so someone else can re-run it and see the
    same result. Omit \`script\` otherwise. The script runs unattended, so

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { buildReproducePrompt } from "../src/detect";
+import { PROOF_PRINCIPLE } from "../src/validation/proof-rules";
 
 const finding = {
   id: "f1",
@@ -22,7 +23,6 @@ describe("buildReproducePrompt", () => {
     });
     expect(prompt).toContain("never checks the cookie");
     expect(prompt).toContain("uncertain");
-    expect(prompt).toContain("different origin");
     expect(prompt).toContain("answers the source review");
   });
 
@@ -34,5 +34,22 @@ describe("buildReproducePrompt", () => {
   it("does not ask the 'reproduced' criterion to answer a review that isn't there", () => {
     const prompt = buildReproducePrompt(finding, "http://t");
     expect(prompt).not.toContain("answers the source review");
+  });
+
+  it("states the principle when the reporting agent declares no rule", () => {
+    const prompt = buildReproducePrompt(finding, "http://t");
+    expect(prompt).toContain(PROOF_PRINCIPLE);
+    expect(prompt).not.toContain("different origin");
+  });
+
+  it("carries the reporting agent own proof rule when the catalog declares one", () => {
+    const rule = "The request MUST come from a different origin than the target.";
+    const prompt = buildReproducePrompt(finding, "http://t", undefined, undefined, undefined, rule);
+    expect(prompt).toContain(rule);
+    expect(prompt).toContain(PROOF_PRINCIPLE);
+  });
+
+  it("asks the agent to report the control it ran", () => {
+    expect(buildReproducePrompt(finding, "http://t")).toContain("negativeControl");
   });
 });

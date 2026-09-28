@@ -1,5 +1,6 @@
 // Live-validation "reproduce" sub-phase. Runs after dedup, over PRIMARY
-// web-reachable findings only, serially, inside a time + count budget. For
+// findings of any class, serially. Each finding is bounded by its own turn cap
+// and timeout; the phase itself ends only when the work or the run does. For
 // each finding it asks the backend to reproduce the exploit against a running
 // target (through the sandbox's Playwright MCP server), replays the generated
 // script once if it reproduced, copies the artifacts out of the sandbox for a
@@ -24,7 +25,6 @@ import {
   requestBodyPreview,
   type TraceResources,
 } from "./trace-requests.js";
-import { logSkips, selectWebReachable } from "./web-reachable.js";
 
 type Evidence = NonNullable<NonNullable<Finding["live"]>["evidence"]>;
 
@@ -38,18 +38,42 @@ const ORDER: Record<string, number> = {
   "false-positive": 2,
 };
 
+/** A finding that names an HTTP way in. This orders the queue and never
+ *  filters it: the signal is weak, and a weak signal must not drop a real
+ *  finding the way a class allowlist did. */
+const HTTP_ENTRY = /\b(?:GET|POST|PUT|PATCH|DELETE)\s+\/|https?:\/\/|\bendpoints?\b|\broutes?\b/i;
+
+function namesHttpEntry(f: Finding): boolean {
+  return HTTP_ENTRY.test(`${f.poc}\n${f.summary}\n${f.impact}`);
+}
+
 /** Primaries a live run may test, best use of the budget first. `out-of-scope`
- *  comes from the user's scope file, so it never reaches the browser. */
+ *  comes from the user's scope file, so it never reaches the browser. No class
+ *  is excluded: the reproduce agent decides reachability against the running
+ *  app, and a finding the budget never reached stays honestly untested. */
 export function selectForReproduce(findings: Finding[], force = false): Finding[] {
-  const reachable = selectWebReachable(findings).selected.filter(
-    (f) => f.validation?.verdict !== "out-of-scope",
-  );
+  const eligible = findings.filter((f) => !f.dedup && f.validation?.verdict !== "out-of-scope");
   // Default resume key: skip findings that already carry a live result.
-  // `force` re-reproduces every web-reachable primary (like revalidate --revalidate-all).
-  const work = force ? reachable : reachable.filter((f) => !f.live);
-  return [...work].sort(
-    (a, b) => (ORDER[a.validation?.verdict ?? ""] ?? 3) - (ORDER[b.validation?.verdict ?? ""] ?? 3),
-  );
+  // `force` re-reproduces every primary (like revalidate --revalidate-all).
+  const work = force ? eligible : eligible.filter((f) => !f.live);
+  return [...work].sort((a, b) => {
+    const byVerdict =
+      (ORDER[a.validation?.verdict ?? ""] ?? 3) - (ORDER[b.validation?.verdict ?? ""] ?? 3);
+    return byVerdict !== 0 ? byVerdict : Number(namesHttpEntry(b)) - Number(namesHttpEntry(a));
+  });
+}
+
+/** Split the queue on whether a browser can prove the class at all. The fact
+ *  comes from the reporting agent, which owns the class, so a new agent is
+ *  always testable unless its author opts out. */
+export function splitLiveReproducible(
+  findings: Finding[],
+  notLiveReproducible: ReadonlySet<string>,
+): { testable: Finding[]; skipped: Finding[] } {
+  const testable: Finding[] = [];
+  const skipped: Finding[] = [];
+  for (const f of findings) (notLiveReproducible.has(f.agentSlug) ? skipped : testable).push(f);
+  return { testable, skipped };
 }
 
 /** Whether the copy produced anything worth linking. An evidence block with
@@ -58,10 +82,17 @@ function hasArtifacts(e: Evidence): boolean {
   return Boolean(e.trace || e.video || e.script || e.requestsFile || e.screenshots.length > 0);
 }
 
-/** A live claim must point at traffic that was really captured. */
-export function gradeLiveResult(raw: LiveResult, evidence?: Evidence): LiveResult {
+/** A live claim must point at traffic that was really captured, and at a
+ *  control that separates the effect from the agent's own setup. Prose alone
+ *  is not proof, so both are checked here rather than asked for in the prompt. */
+export function gradeLiveResult(
+  raw: LiveResult,
+  evidence?: Evidence,
+  negativeControl?: string,
+): LiveResult {
   if (raw !== "reproduced") return raw;
-  return (evidence?.requests?.length ?? 0) > 0 ? "reproduced" : "inconclusive";
+  const captured = (evidence?.requests?.length ?? 0) > 0;
+  return captured && (negativeControl?.trim().length ?? 0) > 0 ? "reproduced" : "inconclusive";
 }
 
 export async function runReproducePhase(args: {
@@ -75,12 +106,16 @@ export async function runReproducePhase(args: {
   context?: string;
   image: string;
   timeoutMs: number;
-  budgetMs: number;
-  max: number;
   /** Per-finding browser turn cap. Threaded to the detector; when unset the
    *  detector's own default applies. */
   reproduceMaxTurns?: number;
-  /** Re-reproduce web-reachable findings that already have a live result. */
+  /** Each reporting agent's `liveProofRule`, keyed by slug. A slug with no
+   *  entry leaves the finding on the proof principle alone. */
+  agentProofRules?: ReadonlyMap<string, string>;
+  /** Agents whose class reports a missing control, so a browser has nothing to
+   *  reproduce. Their findings are answered without a run. */
+  notLiveReproducible?: ReadonlySet<string>;
+  /** Re-reproduce findings that already have a live result. */
   force?: boolean;
   signal: AbortSignal;
 }): Promise<void> {
@@ -99,16 +134,36 @@ export async function runReproducePhase(args: {
   // Duplicates are collapsed out of the report, so exclude them here too; the
   // live-validation counts then reconcile with the findings/ directory.
   const primaries = findings.filter((f) => !f.dedup);
-  const work = selectForReproduce(primaries, args.force ?? false);
-  logSkips(selectWebReachable(primaries).skipped);
-  const rejected = selectWebReachable(primaries).selected.filter(
-    (f) => f.validation?.verdict === "out-of-scope",
-  ).length;
+  const selected = selectForReproduce(primaries, args.force ?? false);
+  const rejected = primaries.filter((f) => f.validation?.verdict === "out-of-scope").length;
   if (rejected > 0) {
     console.log(`  live validation: skipped ${rejected} finding(s) validation marked out-of-scope`);
   }
+
+  // Classes that report a missing control have no effect to cause, so they are
+  // answered here rather than by a browser run that could only borrow another
+  // finding's effect. Recorded, not dropped: the reader sees why.
+  const { testable: work, skipped } = splitLiveReproducible(
+    selected,
+    args.notLiveReproducible ?? new Set(),
+  );
+  for (const finding of skipped) {
+    finding.live = {
+      result: "not-reproducible",
+      reasoning:
+        "This finding reports a missing control, not an effect an attacker can cause, so no live run was attempted.",
+      counterevidence: "",
+    };
+    persistFinding(outDir, finding, detector.name, `reproduce-skip-${finding.agentSlug}`);
+  }
+  if (skipped.length > 0) {
+    console.log(
+      `  live validation: ${skipped.length} finding(s) report a missing control, nothing to reproduce`,
+    );
+  }
+
   if (work.length === 0) {
-    console.log("  live validation: no web-reachable findings to reproduce");
+    console.log("  live validation: no findings to reproduce");
     return;
   }
 
@@ -133,8 +188,7 @@ export async function runReproducePhase(args: {
   }
 
   console.log(`  live validation: reproducing ${work.length} finding(s) against ${targetUrl}`);
-  const liveTotal = Math.min(work.length, args.max);
-  updateRunStage(outDir, scanRunId, "live", { done: 0, total: liveTotal });
+  updateRunStage(outDir, scanRunId, "live", { done: 0, total: work.length });
 
   // The browser runs inside the container, so a target the host publishes on
   // localhost must be reached via host.docker.internal. Probing stays on the
@@ -155,27 +209,20 @@ export async function runReproducePhase(args: {
     return;
   }
 
-  const phaseStart = Date.now();
   let done = 0;
   const counts: Record<LiveResult, number> = {
     reproduced: 0,
     refuted: 0,
     inconclusive: 0,
     error: 0,
+    // Answered before the loop, so the run's own tally never increments it.
+    "not-reproducible": 0,
   };
   try {
     for (const finding of work) {
       if (signal.aborted) break;
-      if (Date.now() - phaseStart >= args.budgetMs) {
-        console.log(`  live validation: budget reached, stopping after ${done} finding(s)`);
-        break;
-      }
-      if (done >= args.max) {
-        console.log(`  live validation: max (${args.max}) reached, stopping`);
-        break;
-      }
       done++;
-      updateRunStage(outDir, scanRunId, "live", { done, total: liveTotal });
+      updateRunStage(outDir, scanRunId, "live", { done, total: work.length });
 
       // Announce the finding BEFORE reproducing it, not only its verdict after,
       // so a run that vanishes names the finding it died on.
@@ -202,6 +249,7 @@ export async function runReproducePhase(args: {
           maxTurns: args.reproduceMaxTurns,
           staticVerdict: finding.validation?.verdict,
           staticReasoning: finding.validation?.reasoning,
+          proofRule: args.agentProofRules?.get(finding.agentSlug),
           signal: ac.signal,
         });
 
@@ -239,11 +287,12 @@ export async function runReproducePhase(args: {
           else rmSync(evidenceDir, { recursive: true, force: true });
         }
 
-        const graded = gradeLiveResult(res.result, evidence);
+        const graded = gradeLiveResult(res.result, evidence, res.negativeControl);
         finding.live = {
           result: graded,
           reasoning: redact(res.reasoning, auth),
           counterevidence: redact(res.counterevidence, auth),
+          ...(res.negativeControl ? { negativeControl: redact(res.negativeControl, auth) } : {}),
           ...(res.refused ? { refused: true } : {}),
           baseUrl: agentBaseUrl,
           ...(evidence ? { evidence } : {}),

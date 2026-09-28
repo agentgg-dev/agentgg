@@ -118,4 +118,21 @@ describe("renderFindingMd meta line and counterevidence", () => {
     });
     expect(md).not.toContain("**Counterevidence:**");
   });
+
+  it("shows the control that separates the effect from the agent own setup", () => {
+    const withControl = {
+      ...f,
+      live: {
+        ...f.live,
+        negativeControl: "Without the session cookie the same POST returned 401.",
+      },
+    } as any;
+    expect(renderFindingMd(withControl)).toContain(
+      "**Negative control:** Without the session cookie the same POST returned 401.",
+    );
+  });
+
+  it("omits the control line when the agent reported none", () => {
+    expect(renderFindingMd(f)).not.toContain("**Negative control:**");
+  });
 });

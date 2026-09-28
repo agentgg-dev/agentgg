@@ -8,6 +8,7 @@ import {
   writeRunMeta,
 } from "@agentgg/core";
 import type { Command } from "commander";
+import { loadAllAgents } from "../agent-catalog.js";
 import { loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
 import { logError } from "../log.js";
 import {
@@ -16,6 +17,7 @@ import {
   validateProviderFlags,
 } from "../providers/index.js";
 import { writeMarkdownReport } from "../reporters/md.js";
+import { notLiveReproducible, proofRuleMap } from "../validation/proof-rules.js";
 import { runReproducePhase } from "../validation/reproduce.js";
 import { DEFAULT_SANDBOX_IMAGE } from "../validation/sandbox.js";
 import { parseTargetAuth } from "../validation/target-auth.js";
@@ -27,8 +29,6 @@ interface LiveValidateOpts {
   targetContext?: string;
   targetImage?: string;
   reproduceTimeout?: number;
-  reproduceBudget?: number;
-  reproduceMax?: number;
   reproduceMaxTurns?: number;
   force?: boolean;
   provider?: string;
@@ -89,6 +89,20 @@ export async function runLiveValidate(
   console.log(`  Provider: ${detector.name}`);
   console.log("");
 
+  // A finding carries only `agentSlug`, so resolve its reporting agent from
+  // the catalog to pick up an agent-authored `liveProofRule`, exactly as
+  // `scan --live-validate` does. A catalog that fails to load leaves the map
+  // empty and every finding runs on the proof principle alone.
+  let agentProofRules = new Map<string, string>();
+  let skipLive = new Set<string>();
+  try {
+    const catalogAgents = loadAllAgents().agents;
+    agentProofRules = proofRuleMap(catalogAgents);
+    skipLive = notLiveReproducible(catalogAgents);
+  } catch (err) {
+    logError(`Could not load agents, using the proof principle alone: ${(err as Error).message}`);
+  }
+
   const startedAt = new Date();
   const abortController = new AbortController();
   await runReproducePhase({
@@ -101,9 +115,9 @@ export async function runLiveValidate(
     context: opts.targetContext,
     image: opts.targetImage ?? DEFAULT_SANDBOX_IMAGE,
     timeoutMs: Number(opts.reproduceTimeout ?? 600) * 1000,
-    budgetMs: Number(opts.reproduceBudget ?? 1800) * 1000,
-    max: Number(opts.reproduceMax ?? 50),
     reproduceMaxTurns: Number(opts.reproduceMaxTurns ?? 50),
+    agentProofRules,
+    notLiveReproducible: skipLive,
     force: opts.force ?? false,
     signal: abortController.signal,
   });
@@ -164,18 +178,6 @@ export function registerLiveValidateCommand(program: Command): void {
       "Per-finding reproduction timeout in seconds (default 600). A backstop only: the turn cap (--reproduce-max-turns) is meant to end a run first, because it stops cleanly with a verdict, while a timeout aborts and keeps no evidence.",
       (v) => parseInt(v, 10),
       600,
-    )
-    .option(
-      "--reproduce-budget <s>",
-      "Whole-phase reproduction budget in seconds; the phase stops cleanly once exceeded (default 1800).",
-      (v) => parseInt(v, 10),
-      1800,
-    )
-    .option(
-      "--reproduce-max <n>",
-      "Max findings to reproduce in one run (default 50).",
-      (v) => parseInt(v, 10),
-      50,
     )
     .option(
       "--reproduce-max-turns <n>",

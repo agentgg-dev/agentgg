@@ -55,6 +55,7 @@ import { getSemgrepRulesDir, isSemgrepSuppressed, runSemgrepProject } from "../s
 import { runSmartExclude } from "../smart-exclude.js";
 import { resolveTemplates } from "../template.js";
 import { createUsageMeter, type UsageMeter } from "../usage-meter.js";
+import { notLiveReproducible, proofRuleMap } from "../validation/proof-rules.js";
 import { runReproducePhase } from "../validation/reproduce.js";
 import { DEFAULT_SANDBOX_IMAGE } from "../validation/sandbox.js";
 import { parseTargetAuth } from "../validation/target-auth.js";
@@ -262,9 +263,7 @@ interface ScanOpts {
   /** Per-finding reproduction timeout in seconds (default 300). */
   reproduceTimeout?: number;
   /** Whole-phase reproduction budget in seconds (default 1800). */
-  reproduceBudget?: number;
   /** Max findings to reproduce in one run (default 50). */
-  reproduceMax?: number;
   /** Per-finding browser turn cap (default 50). */
   reproduceMaxTurns?: number;
 }
@@ -1937,9 +1936,9 @@ export async function runScan(
         context: opts.targetContext,
         image: opts.targetImage ?? DEFAULT_SANDBOX_IMAGE,
         timeoutMs: Number(opts.reproduceTimeout ?? 600) * 1000,
-        budgetMs: Number(opts.reproduceBudget ?? 1800) * 1000,
-        max: Number(opts.reproduceMax ?? 50),
         reproduceMaxTurns: Number(opts.reproduceMaxTurns ?? 50),
+        agentProofRules: proofRuleMap(catalog.agents),
+        notLiveReproducible: notLiveReproducible(catalog.agents),
         signal: scanAbortController.signal,
       });
     }
@@ -2516,18 +2515,6 @@ export function registerScanCommand(program: Command): void {
       "Per-finding reproduction timeout in seconds (default 600). A backstop only: the turn cap (--reproduce-max-turns) is meant to end a run first, because it stops cleanly with a verdict, while a timeout aborts and keeps no evidence.",
       (v) => parseInt(v, 10),
       600,
-    )
-    .option(
-      "--reproduce-budget <s>",
-      "Whole-phase reproduction budget in seconds; the phase stops cleanly once exceeded (default 1800).",
-      (v) => parseInt(v, 10),
-      1800,
-    )
-    .option(
-      "--reproduce-max <n>",
-      "Max findings to reproduce in one run (default 50).",
-      (v) => parseInt(v, 10),
-      50,
     )
     .option(
       "--reproduce-max-turns <n>",
