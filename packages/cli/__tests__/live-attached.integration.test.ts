@@ -7,6 +7,14 @@ import { execFileSync } from "node:child_process";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_SANDBOX_IMAGE, dockerAvailable } from "../src/validation/sandbox.js";
 
+// Best effort: a container may already be gone (--rm), and one failed removal
+// must never skip the other.
+function forceRemove(id: string): void {
+  try {
+    execFileSync("docker", ["rm", "-f", id]);
+  } catch {}
+}
+
 describe("attached sandbox (sidecar model)", () => {
   it("serves MCP and control on the shared localhost", async () => {
     if (!(await dockerAvailable())) return;
@@ -47,8 +55,8 @@ describe("attached sandbox (sidecar model)", () => {
       ]).toString();
       expect(out.trim()).toBe("ok");
     } finally {
-      if (sandbox) execFileSync("docker", ["rm", "-f", sandbox]);
-      execFileSync("docker", ["rm", "-f", main]);
+      if (sandbox) forceRemove(sandbox);
+      forceRemove(main);
     }
   }, 120_000);
 });
