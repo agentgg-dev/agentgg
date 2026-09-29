@@ -28,12 +28,17 @@ afterEach(() => {
 });
 
 describe("buildProviderRouting", () => {
-  it("defaults to fp8 + require_parameters + price sort", () => {
+  it("defaults to require_parameters + price sort, with no quantization filter", () => {
     const r = buildProviderRouting();
-    expect(r.quantizations).toEqual(["fp8"]);
+    expect(r.quantizations).toBeUndefined();
     expect(r.require_parameters).toBe(true);
     expect(r.sort).toBe("price");
     expect(r.order).toBeUndefined();
+  });
+
+  it("pins quantizations only when OPENROUTER_QUANTIZATIONS is set", () => {
+    process.env.OPENROUTER_QUANTIZATIONS = "fp8, bf16";
+    expect(buildProviderRouting().quantizations).toEqual(["fp8", "bf16"]);
   });
 
   it("uses an explicit provider order when set, dropping sort", () => {
@@ -79,11 +84,10 @@ describe("buildProviderRouting", () => {
 });
 
 describe("buildProviderRouting with --openrouter-routing override", () => {
-  it("merges the JSON override over env defaults, keeping fp8 + require_parameters", () => {
+  it("merges the JSON override over env defaults, keeping require_parameters", () => {
     const r = buildProviderRouting('{"order":["baseten"],"allow_fallbacks":false}');
     expect(r.order).toEqual(["baseten"]);
     expect(r.allow_fallbacks).toBe(false);
-    expect(r.quantizations).toEqual(["fp8"]); // default preserved
     expect(r.require_parameters).toBe(true); // default preserved
     expect(r.sort).toBeUndefined(); // pinned providers -> env-default sort dropped
   });

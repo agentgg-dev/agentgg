@@ -26,9 +26,11 @@ function csv(raw: string | undefined): string[] {
 /**
  * OpenRouter `provider` routing block, env-driven so ops can retune
  * without a CLI rebuild. Defaults are tuned for a code-analysis agent:
- * fp8 only (quality on coding/tool-use), require the params we send
- * (drops providers that would silently ignore tool-calls), and route by
- * price (a throughput sort walks up the price curve). An explicit
+ * require the params we send (drops providers that would silently ignore
+ * tool-calls) and route by price (a throughput sort walks up the price
+ * curve). No quantization filter by default: which quantizations exist
+ * depends on the model, and a filter no endpoint matches fails every call.
+ * Set OPENROUTER_QUANTIZATIONS to pin one. An explicit
  * OPENROUTER_PROVIDER_ORDER pins an allow-list and switches off open
  * fallback.
  *
@@ -47,10 +49,8 @@ function csv(raw: string | undefined): string[] {
  */
 export function buildProviderRouting(overrideJson?: string): Record<string, unknown> {
   const quant = csv(process.env.OPENROUTER_QUANTIZATIONS);
-  const routing: Record<string, unknown> = {
-    quantizations: quant.length > 0 ? quant : ["fp8"],
-    require_parameters: true,
-  };
+  const routing: Record<string, unknown> = { require_parameters: true };
+  if (quant.length > 0) routing.quantizations = quant;
   const ignore = csv(process.env.OPENROUTER_IGNORE);
   if (ignore.length > 0) routing.ignore = ignore;
   const order = csv(process.env.OPENROUTER_PROVIDER_ORDER);
@@ -71,8 +71,8 @@ export function buildProviderRouting(overrideJson?: string): Record<string, unkn
   if (process.env.OPENROUTER_ZDR === "1") routing.zdr = true;
 
   // --openrouter-routing JSON is authoritative: its keys override the
-  // env-derived defaults (fp8 + require_parameters survive unless the JSON
-  // sets them). A parse failure throws here, before any LLM call or spend.
+  // env-derived defaults (require_parameters survives unless the JSON sets
+  // it). A parse failure throws here, before any LLM call or spend.
   if (overrideJson != null && overrideJson.trim() !== "") {
     const override = parseRoutingOverride(readRoutingOverrideText(overrideJson));
     Object.assign(routing, override);
@@ -334,7 +334,7 @@ function maskValue(s: string): string {
 export const openrouterModule: ProviderModule = {
   name: "openrouter",
   label: "OpenRouter",
-  description: "OpenRouter-routed open models (default: GLM-5.2, fp8)",
+  description: "OpenRouter-routed models (default: GLM-5.2)",
   defaultModel: DEFAULT_MODEL,
   acceptedFlags: ["api-key"],
   curatedModels: ["z-ai/glm-5.2", "z-ai/glm-5.2:nitro", "z-ai/glm-5"],
