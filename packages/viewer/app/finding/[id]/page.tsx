@@ -17,6 +17,7 @@ import Markdown from "@/app/components/Markdown";
 import Nav from "@/app/components/Nav";
 import Section from "@/app/components/Section";
 import ValidationPanel from "@/app/components/ValidationPanel";
+import { findingToGhsaMarkdown } from "@/app/lib/ghsa";
 import { findFindingById, loadViewerState } from "@/app/lib/state";
 
 export const dynamic = "force-dynamic";
@@ -58,7 +59,7 @@ export default async function FindingPage({ params }: { params: Promise<{ id: st
               {finding.agentSlug}
             </span>
             <CopyMarkdownButton
-              markdown={findingToGhsaMarkdown(finding)}
+              markdown={findingToGhsaMarkdown(finding, holder)}
               label="Copy GHSA"
               title="Copy this finding as a GHSA-style advisory (title, summary, details, PoC, CVSS score, references)"
               className="ml-auto"
@@ -152,15 +153,15 @@ function DetailsPanel({ finding, holder }: { finding: Finding; holder: Finding }
         </Section>
       )}
 
-      {finding.cvss && (
+      {holder.cvss && (
         <Section title="CVSS 3.1">
-          <div className="font-mono text-xs text-cyan break-all mb-3">{finding.cvss.vector}</div>
+          <div className="font-mono text-xs text-cyan break-all mb-3">{holder.cvss.vector}</div>
           <div className="text-sm text-ink mb-3">
             Base score:{" "}
-            <span className="text-amber font-semibold">{finding.cvss.baseScore.toFixed(1)}</span> ·{" "}
-            <SeverityBadge severity={finding.cvss.severity} />
+            <span className="text-amber font-semibold">{holder.cvss.baseScore.toFixed(1)}</span> ·{" "}
+            <SeverityBadge severity={holder.cvss.severity} />
           </div>
-          <Markdown source={finding.cvss.justification} />
+          <Markdown source={holder.cvss.justification} />
         </Section>
       )}
 
@@ -200,34 +201,4 @@ function MetaField({ label, children }: { label: string; children: React.ReactNo
       {children}
     </div>
   );
-}
-
-/**
- * Serialize a finding as a GHSA-style advisory: only the fields a GitHub
- * Security Advisory body carries — title, summary, details, PoC, the CVSS
- * score + vector selections (no justification prose), and references. The
- * internal triage metadata (agent, verdict, dedup, confidence, finding ID)
- * is intentionally omitted.
- */
-function findingToGhsaMarkdown(f: Finding): string {
-  const out: string[] = [];
-  out.push(`# ${f.title}`, "");
-  out.push("## Summary", "", f.summary, "");
-  out.push("## Details", "", f.details, "");
-  out.push("## Proof of concept", "", f.poc, "");
-  if (f.cvss) {
-    // Two-space line breaks keep score + vector as one paragraph.
-    out.push(
-      "## CVSS",
-      "",
-      `Base score: ${f.cvss.baseScore.toFixed(1)}  \nVector: \`${f.cvss.vector}\``,
-      "",
-    );
-  }
-  if (f.references.length > 0) {
-    out.push("## References", "");
-    for (const ref of f.references) out.push(`- ${ref}`);
-    out.push("");
-  }
-  return out.join("\n").trimEnd();
 }
