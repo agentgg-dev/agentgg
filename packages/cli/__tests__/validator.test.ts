@@ -381,6 +381,7 @@ describe("group validation", () => {
     const out = buildValidatePrompt({ finding: makeFinding(), fileContent: "x" });
     expect(out).not.toContain("## Other reports of the same bug");
     expect(out).toContain("confirmedImpact");
+    expect(out).toMatch(/only\s+when the verdict is confirmed/);
   });
 
   // 5 members with only a long impact never exceed the 6000 cap after the

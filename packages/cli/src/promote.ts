@@ -65,12 +65,20 @@ function handOver(primary: Finding, dupes: Finding[], heir: Finding): void {
 }
 
 /** Hand a rejected primary's place to the first duplicate validation kept.
+ *  `onlyHeirs` limits heirs to ids the group verdict never saw: a member it
+ *  showed was rejected with the group, whatever verdict it carries.
  *  Returns every finding whose marker changed. */
-export function promote(findings: Finding[], canMark: (f: Finding) => boolean): Finding[] {
+export function promote(
+  findings: Finding[],
+  canMark: (f: Finding) => boolean,
+  onlyHeirs?: Set<string>,
+): Finding[] {
   const changed: Finding[] = [];
   for (const { primary, dupes } of clusters(findings).values()) {
     if (!isRejected(primary)) continue;
-    const heir = dupes.find((d) => d.validation && !isRejected(d));
+    const heir = dupes.find(
+      (d) => d.validation && !isRejected(d) && (!onlyHeirs || onlyHeirs.has(d.id)),
+    );
     if (!heir) continue;
     const cluster = [primary, ...dupes];
     if (!cluster.every(canMark)) continue;
@@ -101,16 +109,17 @@ export function applyGroupVerdict(
   canMark: (f: Finding) => boolean,
 ): Finding[] {
   const { leadId, primaryClaimHolds, ...rest } = result;
+  const confirmed = rest.verdict === "confirmed";
   const validation = {
     verdict: rest.verdict,
     reasoning: rest.reasoning,
-    ...(rest.confirmedImpact ? { confirmedImpact: rest.confirmedImpact } : {}),
-    ...(rest.unconfirmedImpact ? { unconfirmedImpact: rest.unconfirmedImpact } : {}),
+    ...(confirmed && rest.confirmedImpact ? { confirmedImpact: rest.confirmedImpact } : {}),
+    ...(confirmed && rest.unconfirmedImpact ? { unconfirmedImpact: rest.unconfirmedImpact } : {}),
     ...(rest.refused ? { refused: true } : {}),
   };
   const dupes = membersOf(findings).get(primary.id) ?? [];
   const heir =
-    rest.verdict === "confirmed" && primaryClaimHolds === false && leadId && leadId !== primary.id
+    confirmed && primaryClaimHolds === false && leadId && leadId !== primary.id
       ? dupes.find((d) => d.id === leadId)
       : undefined;
   if (!heir || ![primary, ...dupes].every(canMark)) {

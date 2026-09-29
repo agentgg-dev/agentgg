@@ -234,6 +234,28 @@ describe("group validation in revalidate", () => {
     expect(byId.get("p1")?.dedup?.duplicateOf).toBe(left[0].id);
   });
 
+  it("does not hand a rejected group to a member it showed, on that member's own older verdict", async () => {
+    writeRecord("sql-a", [makeFinding("p1", "sql-a")]);
+    writeRecord("sql-b", [
+      makeFinding("d1", "sql-b", {
+        ...dupeOf("p1"),
+        validation: { verdict: "confirmed", reasoning: "old" },
+      }),
+    ]);
+    detectorMock.validateFinding.mockImplementation(async () => ({
+      verdict: "false-positive",
+      reasoning: "no",
+    }));
+    vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await runRevalidate(outputDir, { force: true, concurrency: 1, summary: false }, env);
+
+    expect(calls()[0].members?.map((m) => m.id)).toEqual(["d1"]);
+    const byId = findingsById();
+    expect(byId.get("p1")?.dedup).toBeUndefined();
+    expect(byId.get("d1")?.dedup?.duplicateOf).toBe("p1");
+  });
+
   it("runs no second wave when the rejected group showed every member", async () => {
     writeRecord("sql-a", [makeFinding("p1", "sql-a")]);
     writeRecord("sql-b", [makeFinding("d1", "sql-b", dupeOf("p1"))]);

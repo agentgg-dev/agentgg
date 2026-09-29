@@ -5,6 +5,23 @@ import type { CvssScore, Finding, UserConfig } from "@agentgg/core";
 import { readFileRecord, saveUserConfig, writeFileRecord } from "@agentgg/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// Pass-through spy, so a test can read the order shards were written in.
+const coreMock = vi.hoisted(() => ({ writes: [] as { agentSlug: string; dedup: string[] }[] }));
+vi.mock("@agentgg/core", async () => {
+  const actual = await vi.importActual<typeof import("@agentgg/core")>("@agentgg/core");
+  return {
+    ...actual,
+    writeFileRecord: (...args: Parameters<typeof actual.writeFileRecord>) => {
+      const [, record] = args;
+      coreMock.writes.push({
+        agentSlug: record.agentSlug,
+        dedup: record.findings.map((f) => `${f.id}->${f.dedup?.duplicateOf ?? ""}`),
+      });
+      return actual.writeFileRecord(...args);
+    },
+  };
+});
+
 const FILE = "app.js";
 
 /** An agent that anchors on every `TARGET` line, so the fixture controls
@@ -137,6 +154,7 @@ beforeEach(() => {
   saveUserConfig(cfg, env);
 
   detectorMock.scoreFinding.mockImplementation(async () => CVSS);
+  coreMock.writes.length = 0;
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -256,6 +274,71 @@ describe("scan phase order", () => {
     expect(heir.dedup).toBeUndefined();
     expect(heir.validation?.verdict).toBe("confirmed");
     expect(heir.cvss?.baseScore).toBe(9.8);
+  });
+
+  const swapScan = async () => {
+    detectorMock.runAgent.mockImplementation(async ({ agent }) =>
+      agent.slug === "alpha" ? [mockFinding("alpha", "alpha-1")] : [mockFinding("beta", "beta-1")],
+    );
+    detectorMock.dedupeFindings.mockImplementation(async () => [
+      { primaryId: "alpha-1", duplicateIds: ["beta-1"], reasoning: "same sink" },
+    ]);
+    detectorMock.validateFinding.mockImplementation(async () => ({
+      verdict: "confirmed" as const,
+      reasoning: "reachable",
+      leadId: "beta-1",
+      primaryClaimHolds: false,
+    }));
+    await runScan(projectRoot, opts(), env);
+  };
+
+  it("logs the groups that moved to a member", async () => {
+    const logs: string[] = [];
+    vi.mocked(console.log).mockImplementation((...args) => {
+      logs.push(args.join(" "));
+    });
+    await swapScan();
+    expect(logs).toContain("  Moved 1 group(s) to a member whose claim held");
+  });
+
+  it("writes the heir's shard before the demoted primary's", async () => {
+    await swapScan();
+    // A kill between the two writes leaves two primaries, never a cycle.
+    const writes = coreMock.writes.map((w) => w.dedup);
+    const marked = writes.findLastIndex((d) => d.includes("beta-1->alpha-1"));
+    const heirWrite = writes.findIndex((d, i) => i > marked && d.includes("beta-1->"));
+    const demotedWrite = writes.findIndex((d) => d.includes("alpha-1->beta-1"));
+    expect(marked).toBeGreaterThanOrEqual(0);
+    expect(heirWrite).toBeGreaterThan(marked);
+    expect(heirWrite).toBeLessThan(demotedWrite);
+  });
+
+  it("does not hand a rejected group to a member it showed, on that member's own older verdict", async () => {
+    detectorMock.runAgent.mockImplementation(async ({ agent }) =>
+      agent.slug === "alpha" ? [mockFinding("alpha", "alpha-1")] : [mockFinding("beta", "beta-1")],
+    );
+    detectorMock.dedupeFindings.mockImplementation(async () => [
+      { primaryId: "alpha-1", duplicateIds: ["beta-1"], reasoning: "same sink" },
+    ]);
+    await runScan(projectRoot, opts(), env);
+
+    // An older output dir: the duplicate carries a verdict of its own.
+    const record = readFileRecord(outputDir, "beta", FILE);
+    if (!record) throw new Error("no beta record");
+    record.findings = record.findings.map((f) => ({
+      ...f,
+      validation: { verdict: "confirmed" as const, reasoning: "old" },
+    }));
+    writeFileRecord(outputDir, record);
+
+    detectorMock.validateFinding.mockImplementation(async () => ({
+      verdict: "false-positive" as const,
+      reasoning: "not reachable",
+    }));
+    await runScan(projectRoot, { ...opts(), revalidateAll: true }, env);
+
+    expect(findingOnDisk("alpha", "alpha-1").dedup).toBeUndefined();
+    expect(findingOnDisk("beta", "beta-1").dedup?.duplicateOf).toBe("alpha-1");
   });
 
   it("clears the demoted primary's prior verdict, score and live result on disk", async () => {

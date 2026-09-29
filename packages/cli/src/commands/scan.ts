@@ -1738,6 +1738,7 @@ export async function runScan(
         const canMark = (f: Finding) => selectedSlugs.has(f.agentSlug);
         // Findings whose marker or verdict moved in a swap, persisted with the wave.
         const swapped = new Map<string, Finding>();
+        let swaps = 0;
         if (!scopeOnlyValidate) {
           const withCustomPrompt = validatable.filter(
             (f) => agentBySlug.get(f.agentSlug)?.validationPrompt,
@@ -1807,7 +1808,10 @@ export async function runScan(
               signal: scanAbortController.signal,
             });
             const changed = applyGroupVerdict(findings, finding, result, canMark);
-            if (changed.length > 1) for (const f of changed) swapped.set(f.id, f);
+            if (changed.length > 1) {
+              swaps++;
+              for (const f of changed) swapped.set(f.id, f);
+            }
             if (result.refused) {
               console.log(`    ${finding.filePath}: validation refused, recorded as uncertain`);
             } else if (opts.verbose) {
@@ -1825,7 +1829,10 @@ export async function runScan(
             string,
             { agentSlug: string; filePath: string; findings: Finding[] }
           >();
-          for (const f of wave) {
+          // Heirs first: a kill between shard writes then leaves two
+          // primaries, never two findings marked as each other's duplicate.
+          const heirsFirst = [...wave].sort((a, b) => Number(!!a.dedup) - Number(!!b.dedup));
+          for (const f of heirsFirst) {
             const normalized = f.filePath.replace(/\\/g, "/");
             if (isAbsolute(normalized)) continue;
             const key = `${f.agentSlug} ${normalized}`;
@@ -1892,6 +1899,7 @@ export async function runScan(
         for (const f of validatable) if (f.validation) wave.set(f.id, f);
         for (const [id, f] of swapped) wave.set(id, f);
         persistWave([...wave.values()]);
+        if (swaps > 0) console.log(`  Moved ${swaps} group(s) to a member whose claim held`);
 
         // A rejected group covers only the members its prompt showed. Members
         // the cap left out get their own verdict, and the first survivor
@@ -1910,7 +1918,7 @@ export async function runScan(
         // Outside that guard: a run interrupted after the wave's verdicts
         // reached disk resumes with an empty wave but a group still to hand
         // over. Promoting nothing costs one pass over `findings`.
-        const moved = promote(findings, canMark);
+        const moved = promote(findings, canMark, unseen);
         const promoted = moved.filter((f) => !f.dedup).length;
         if (promoted > 0) console.log(`  Promoted ${promoted} finding(s)`);
         const toPersist = new Map<string, Finding>();

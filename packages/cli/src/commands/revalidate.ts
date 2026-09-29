@@ -335,7 +335,7 @@ export async function runRevalidate(
       if (record) await validateOne({ record, finding });
     });
   }
-  const promoted = promote(allFindings, () => true);
+  const promoted = promote(allFindings, () => true, unseen);
   if (promoted.length > 0) {
     const heirs = promoted.filter((f) => !f.dedup).length;
     moved += heirs;

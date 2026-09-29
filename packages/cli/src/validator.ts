@@ -341,8 +341,9 @@ ${tracingBlock}${scopeBlock}
 ## Your task
 
 Return a verdict (${verdictOptions}), a short reasoning (max 4
-sentences, cite a specific code element), your confidence, and in
-\`confirmedImpact\` the impact you confirmed in one or two sentences.${leadNote}
+sentences, cite a specific code element), your confidence, and, only
+when the verdict is confirmed, in \`confirmedImpact\` the impact you
+confirmed in one or two sentences.${leadNote}
 ${scopeVerdictNote}${tailBlock}`;
 }
 

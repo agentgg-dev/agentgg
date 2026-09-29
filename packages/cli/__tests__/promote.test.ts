@@ -65,6 +65,27 @@ describe("promotion", () => {
     expect(promote(list, (x) => x.id === "never")).toEqual([]);
   });
 
+  it("promotes only a duplicate in onlyHeirs", () => {
+    // d1's confirmed verdict is its own, older one; the group verdict that
+    // rejected p1 showed d1, so d1 cannot inherit the group.
+    const list = [
+      f("p1", { validation: { verdict: "false-positive", reasoning: "r" } }),
+      f("d1", {
+        dedup: { duplicateOf: "p1", reasoning: "same" },
+        validation: { verdict: "confirmed", reasoning: "old" },
+      }),
+      f("d2", {
+        dedup: { duplicateOf: "p1", reasoning: "same" },
+        validation: { verdict: "confirmed", reasoning: "r" },
+      }),
+    ];
+    expect(promote(list, () => true, new Set())).toEqual([]);
+    expect(list[1].dedup?.duplicateOf).toBe("p1");
+    promote(list, () => true, new Set(["d2"]));
+    expect(list[2].dedup).toBeUndefined();
+    expect(list[1].dedup?.duplicateOf).toBe("d2");
+  });
+
   it("leaves a marker chain alone instead of promoting into it", () => {
     // d1 → p1 → n1: an older run marked d1 under p1, a later one marked p1
     // under n1. p1 is not a primary any more, so its group is not a cluster.
@@ -220,6 +241,28 @@ describe("applyGroupVerdict", () => {
       f("d2", { dedup: { duplicateOf: "p1", reasoning: "same" } }),
     ];
     expect(duplicatesOfRejected(list, new Set(["d2"])).map((x) => x.id)).toEqual(["d2"]);
+  });
+
+  it.each([
+    "uncertain",
+    "false-positive",
+    "out-of-scope",
+  ] as const)("drops the impact fields on a %s verdict", (verdict) => {
+    const list = group();
+    applyGroupVerdict(
+      list,
+      list[0],
+      { verdict, reasoning: "r", confirmedImpact: "ci", unconfirmedImpact: "ui" },
+      () => true,
+    );
+    expect(list[0].validation).toEqual({ verdict, reasoning: "r" });
+  });
+
+  it("keeps both impact fields on a confirmed verdict", () => {
+    const list = group();
+    applyGroupVerdict(list, list[0], { ...confirmed, unconfirmedImpact: "ui" }, () => true);
+    expect(list[0].validation?.confirmedImpact).toBe("ci");
+    expect(list[0].validation?.unconfirmedImpact).toBe("ui");
   });
 
   it("keeps the refused flag", () => {
