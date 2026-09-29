@@ -1,4 +1,4 @@
-import { effectiveVerdict, type Finding } from "@agentgg/core";
+import { effectiveVerdict, type Finding, groupPrimary } from "@agentgg/core";
 import { liveState } from "@agentgg/core/live";
 import { ArrowLeft, ExternalLink, Hash } from "lucide-react";
 import Link from "next/link";
@@ -29,6 +29,13 @@ export default async function FindingPage({ params }: { params: Promise<{ id: st
   const { finding, file } = hit;
   const state = loadViewerState();
 
+  // A duplicate carries no verdict, CVSS, or confirmed impact of its own;
+  // resolve them from its primary when it was loaded.
+  const primaryHit = finding.dedup ? findFindingById(finding.dedup.duplicateOf) : null;
+  const byId = new Map<string, Finding>([[finding.id, finding]]);
+  if (primaryHit) byId.set(primaryHit.finding.id, primaryHit.finding);
+  const holder = groupPrimary(finding, byId);
+
   return (
     <>
       <Nav rootPath={state.scan?.root} />
@@ -43,7 +50,7 @@ export default async function FindingPage({ params }: { params: Promise<{ id: st
         {/* header card */}
         <div className="rounded-xl border border-bg-border bg-bg-panel/40 p-6 md:p-8 mb-6">
           <div className="flex flex-wrap items-center gap-2 mb-4">
-            <SeverityBadge severity={finding.severity} />
+            <SeverityBadge severity={holder.severity} />
             <VerdictBadge verdict={effectiveVerdict(finding)} />
             {finding.live && <LiveResultBadge state={liveState(finding)} />}
             <DuplicateBadge dedup={finding.dedup} />
@@ -63,6 +70,19 @@ export default async function FindingPage({ params }: { params: Promise<{ id: st
           </h1>
 
           <p className="mt-4 text-base text-ink-muted leading-relaxed">{finding.summary}</p>
+
+          {holder !== finding && (
+            <p className="mt-3 flex items-center gap-1.5 text-xs text-ink-dim">
+              Verdict and score come from finding{" "}
+              <Link
+                href={`/finding/${holder.id}`}
+                className="inline-flex items-center gap-1 font-mono text-cyan hover:text-cyan-glow transition-colors"
+              >
+                <Hash className="w-3 h-3" />
+                {holder.id}
+              </Link>
+            </p>
+          )}
 
           <div className="mt-6 flex flex-wrap items-center gap-5 text-xs">
             <MetaField label="File">
@@ -86,7 +106,7 @@ export default async function FindingPage({ params }: { params: Promise<{ id: st
 
         <FindingTabs
           details={<DetailsPanel finding={finding} />}
-          validation={<ValidationPanel finding={finding} />}
+          validation={<ValidationPanel finding={holder} />}
           evidence={<EvidencePanel finding={finding} />}
         />
       </main>
@@ -106,6 +126,12 @@ function DetailsPanel({ finding }: { finding: Finding }) {
       </Section>
 
       <Section title="Impact">
+        {finding.validation?.confirmedImpact && (
+          <p className="mb-3 text-sm text-ink">
+            <strong className="text-ink">Confirmed impact:</strong>{" "}
+            {finding.validation.confirmedImpact}
+          </p>
+        )}
         <Markdown source={finding.impact} />
       </Section>
 

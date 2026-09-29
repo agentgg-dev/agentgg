@@ -1,7 +1,7 @@
 import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { Finding, Severity } from "@agentgg/core";
-import { effectiveVerdict, getEvidenceDir } from "@agentgg/core";
+import { effectiveVerdict, getEvidenceDir, groupPrimary } from "@agentgg/core";
 
 /**
  * Sort order for rendered findings: severity bucket descending, then
@@ -90,6 +90,7 @@ export function writeMarkdownReport(input: ScanReportInput): ScanReportOutput {
     if (list) list.push(f);
     else duplicatesByPrimary.set(f.dedup.duplicateOf, [f]);
   }
+  const byId = new Map(input.findings.map((f) => [f.id, f] as const));
 
   // False-positives get their own `.md` by default (and always stay
   // in the FileRecord state as an audit trail). The caller can opt out
@@ -125,7 +126,11 @@ export function writeMarkdownReport(input: ScanReportInput): ScanReportOutput {
         evidenceDirs.set(f.id, evidenceDir);
       }
     }
-    writeFileSync(fullPath, renderFindingMd(f, duplicatesByPrimary.get(f.id), evidenceDir), "utf8");
+    writeFileSync(
+      fullPath,
+      renderFindingMd(f, duplicatesByPrimary.get(f.id), evidenceDir, byId),
+      "utf8",
+    );
     findingPaths.push(fullPath);
   }
 
@@ -179,10 +184,17 @@ export function renderFindingMd(
   /** Relative directory holding the copied evidence. Absent when nothing was
    *  copied, in which case the artifacts are named but not linked. */
   evidenceDir?: string,
+  /** id -> finding, for resolving a duplicate's primary. Defaults to empty,
+   *  in which case a duplicate stands for itself (see `groupPrimary`). */
+  byId: Map<string, Finding> = new Map(),
 ): string {
   const lines: string[] = [];
   lines.push(`# ${f.title}`);
   lines.push("");
+
+  // A duplicate carries no verdict or score of its own; it reads its
+  // group's primary when one was loaded into byId.
+  const holder = groupPrimary(f, byId);
 
   const meta: string[] = [];
   meta.push(`**Agent:** \`${f.agentSlug}\``);
@@ -190,15 +202,18 @@ export function renderFindingMd(
   meta.push(`**File:** \`${f.filePath}\``);
   if (f.lineRange) meta.push(`**Lines:** ${f.lineRange[0]}–${f.lineRange[1]}`);
   meta.push(`**Confidence:** ${(f.confidence * 100).toFixed(0)}%`);
-  if (f.severity) {
-    meta.push(`**Severity:** ${f.severity}`);
+  if (holder.severity) {
+    meta.push(`**Severity:** ${holder.severity}`);
   } else {
     meta.push("**Severity:** _pending (scoring phase not yet run)_");
   }
-  if (f.cvss) {
-    meta.push(`**CVSS:** ${f.cvss.baseScore.toFixed(1)} (\`${f.cvss.vector}\`)`);
+  if (holder.cvss) {
+    meta.push(`**CVSS:** ${holder.cvss.baseScore.toFixed(1)} (\`${holder.cvss.vector}\`)`);
   }
-  if (f.validation || f.live) {
+  if (holder !== f && (holder.validation || holder.live)) {
+    const v = effectiveVerdict(holder);
+    meta.push(`**Validation:** ${v ? `\`${v}\`` : "_not settled_"} (from \`${holder.id}\`)`);
+  } else if (f.validation || f.live) {
     // Undefined here means no static verdict plus an inconclusive live
     // result, which settles on no verdict at all.
     const verdict = effectiveVerdict(f);
@@ -215,6 +230,14 @@ export function renderFindingMd(
     lines.push("");
     lines.push(f.validation.reasoning);
     lines.push("");
+    if (f.validation.confirmedImpact) {
+      lines.push(`**Confirmed impact:** ${f.validation.confirmedImpact}`);
+      lines.push("");
+    }
+    if (f.validation.unconfirmedImpact) {
+      lines.push(`**Claimed, not confirmed:** ${f.validation.unconfirmedImpact}`);
+      lines.push("");
+    }
   }
 
   const live = f.live;
@@ -299,6 +322,13 @@ export function renderFindingMd(
     lines.push("");
     lines.push(f.dedup.reasoning);
     lines.push("");
+    // Restate the inherited verdict here too, next to the reasoning a
+    // reader is checking when they scroll down to "why is this a dupe".
+    if (holder !== f && (holder.validation || holder.live)) {
+      const v = effectiveVerdict(holder);
+      lines.push(`**Validation:** ${v ? `\`${v}\`` : "_not settled_"} (from \`${holder.id}\`)`);
+      lines.push("");
+    }
   }
 
   lines.push("### Summary");

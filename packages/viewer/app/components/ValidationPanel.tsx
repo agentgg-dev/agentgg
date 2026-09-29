@@ -39,6 +39,18 @@ export default function ValidationPanel({ finding }: { finding: Finding }) {
               )}
             </div>
             <Markdown source={finding.validation.reasoning} />
+            {finding.validation.confirmedImpact && (
+              <p className="mt-3 text-sm text-ink-muted leading-relaxed">
+                <strong className="text-ink">Confirmed impact:</strong>{" "}
+                {finding.validation.confirmedImpact}
+              </p>
+            )}
+            {finding.validation.unconfirmedImpact && (
+              <p className="mt-2 text-sm text-ink-muted leading-relaxed">
+                <strong className="text-ink">Claimed, not confirmed:</strong>{" "}
+                {finding.validation.unconfirmedImpact}
+              </p>
+            )}
           </>
         ) : (
           <p className="text-sm text-ink-dim">
