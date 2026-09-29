@@ -60,6 +60,10 @@ export async function runLiveValidate(
       `No scan state at ${outputDir}. Run \`agentgg scan <path> -o ${outputArg}\` first.`,
     );
   }
+  // Fail fast on a missing $AGENTGG_SANDBOX_TOKEN or bad --sandbox-endpoint
+  // before any LLM/catalog work runs below, not only once the reproduce
+  // phase itself starts.
+  const attach = attachFromOpts(opts, env);
 
   const config = loadOrSynthesizeConfig(env, opts.provider);
   const activeProvider = (opts.provider ?? config.provider) as Provider;
@@ -121,7 +125,7 @@ export async function runLiveValidate(
     agentProofRules,
     notLiveReproducible: skipLive,
     force: opts.force ?? false,
-    attach: attachFromOpts(opts),
+    attach,
     signal: abortController.signal,
   });
   const completedAt = new Date();

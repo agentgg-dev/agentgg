@@ -320,6 +320,10 @@ export async function runScan(
   if (opts.liveValidate && !opts.targetUrl) {
     throw new Error("--live-validate requires --target-url");
   }
+  // Same reason: a missing $AGENTGG_SANDBOX_TOKEN or bad --sandbox-endpoint
+  // must fail before detect/validate/dedup spend anything, not only once the
+  // reproduce phase itself starts.
+  const attach = opts.liveValidate ? attachFromOpts(opts, env) : undefined;
 
   const root = resolve(rootArg);
   const outDir = resolve(opts.output ?? "./scan-results/");
@@ -1966,7 +1970,7 @@ export async function runScan(
         reproduceMaxTurns: Number(opts.reproduceMaxTurns ?? 50),
         agentProofRules: proofRuleMap(catalog.agents),
         notLiveReproducible: notLiveReproducible(catalog.agents),
-        attach: attachFromOpts(opts),
+        attach,
         signal: scanAbortController.signal,
       });
     }

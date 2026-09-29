@@ -230,13 +230,21 @@ export async function startAttachedSandbox(opts: {
   const control = opts.controlUrl.replace(/\/+$/, "");
   const headers = { Authorization: `Bearer ${opts.token}` };
 
-  const call = async (path: string, init: RequestInit = {}): Promise<Response> => {
+  // 404 is only ever a legitimate outcome for `GET /file` (a missing file);
+  // everywhere else (the readiness handshake, /exec, a write) it means the
+  // control server doesn't recognize the route at all — e.g. --sandbox-control
+  // pointed at the wrong port — and must fail loudly, not look like success.
+  const call = async (
+    path: string,
+    init: RequestInit & { allow404?: boolean } = {},
+  ): Promise<Response> => {
+    const { allow404, ...reqInit } = init;
     const res = await fetch(`${control}${path}`, {
-      ...init,
-      headers: { ...headers, ...init.headers },
+      ...reqInit,
+      headers: { ...headers, ...reqInit.headers },
     });
     if (res.status === 504) throw new Error("sandbox command timed out");
-    if (!res.ok && res.status !== 404)
+    if (!res.ok && !(allow404 && res.status === 404))
       throw new Error(`sandbox control ${path} failed: HTTP ${res.status}`);
     return res;
   };
@@ -272,7 +280,7 @@ export async function startAttachedSandbox(opts: {
       await call(file(path), { method: "PUT", body: buf as BodyInit });
     },
     async readFile(path) {
-      const res = await call(file(path));
+      const res = await call(file(path), { allow404: true });
       if (res.status === 404) throw new Error(`sandbox file not found: ${path}`);
       return Buffer.from(await res.arrayBuffer());
     },
@@ -283,13 +291,16 @@ export async function startAttachedSandbox(opts: {
 }
 
 // Build the reproduce-phase `attach` arg from CLI opts, or undefined for the
-// default (start-our-own-Docker) mode.
-export function attachFromOpts(opts: {
-  sandboxEndpoint?: string;
-  sandboxControl?: string;
-}): { endpoint: string; controlUrl: string; token: string } | undefined {
+// default (start-our-own-Docker) mode. Call this next to a command's other
+// early flag checks (before any detect/LLM work), not inline in the
+// reproduce-phase call, so a missing token or bad URL fails before the run
+// spends anything.
+export function attachFromOpts(
+  opts: { sandboxEndpoint?: string; sandboxControl?: string },
+  env: NodeJS.ProcessEnv = process.env,
+): { endpoint: string; controlUrl: string; token: string } | undefined {
   if (!opts.sandboxEndpoint) return undefined;
-  const token = process.env.AGENTGG_SANDBOX_TOKEN;
+  const token = env.AGENTGG_SANDBOX_TOKEN;
   if (!token) throw new Error("--sandbox-endpoint requires $AGENTGG_SANDBOX_TOKEN");
   const u = new URL(opts.sandboxEndpoint);
   const controlUrl = opts.sandboxControl ?? `${u.protocol}//${u.hostname}:8932`;
