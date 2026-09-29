@@ -58,7 +58,7 @@ import { createUsageMeter, type UsageMeter } from "../usage-meter.js";
 import { notLiveReproducible, proofRuleMap } from "../validation/proof-rules.js";
 import { runReproducePhase } from "../validation/reproduce.js";
 import { DEFAULT_SANDBOX_IMAGE } from "../validation/sandbox.js";
-import { parseTargetAuth } from "../validation/target-auth.js";
+import { parseTargetAuth, readTargetContext } from "../validation/target-auth.js";
 import { fitMembers } from "../validator.js";
 import { DEFAULT_VIEWER_PORT, openBrowser, startViewer } from "../viewer-server.js";
 import { DEFAULT_EXCLUDES, pathMatches, type WalkConfig, walkForAgents } from "../walker.js";
@@ -1956,7 +1956,7 @@ export async function runScan(
         runId: runMeta.runId,
         targetUrl: opts.targetUrl,
         auth: parseTargetAuth(opts),
-        context: opts.targetContext,
+        context: readTargetContext(opts.targetContext),
         image: opts.targetImage ?? DEFAULT_SANDBOX_IMAGE,
         timeoutMs: Number(opts.reproduceTimeout ?? 600) * 1000,
         reproduceMaxTurns: Number(opts.reproduceMaxTurns ?? 50),
@@ -2527,7 +2527,7 @@ export function registerScanCommand(program: Command): void {
     )
     .option(
       "--target-context <ctx>",
-      "Free-form scope/context notes folded into the reproduce prompt (e.g. which flows are in scope).",
+      "Free-form scope/context notes for the reproduce prompt, or @path/to/file.",
     )
     .option(
       "--target-image <ref>",
