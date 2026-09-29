@@ -218,6 +218,84 @@ async function forceRemove(id: string): Promise<void> {
   }
 }
 
+// A sandbox something else already started (a Cloud Run sidecar, a CI
+// service container). Commands and files go through its control server.
+export async function startAttachedSandbox(opts: {
+  endpoint: string;
+  controlUrl: string;
+  token: string;
+  readyTimeoutMs?: number;
+}): Promise<Sandbox> {
+  const endpoint = `${opts.endpoint.replace(/\/+$/, "")}/sse`;
+  const control = opts.controlUrl.replace(/\/+$/, "");
+  const headers = { Authorization: `Bearer ${opts.token}` };
+
+  const call = async (path: string, init: RequestInit = {}): Promise<Response> => {
+    const res = await fetch(`${control}${path}`, {
+      ...init,
+      headers: { ...headers, ...init.headers },
+    });
+    if (res.status === 504) throw new Error("sandbox command timed out");
+    if (!res.ok && res.status !== 404)
+      throw new Error(`sandbox control ${path} failed: HTTP ${res.status}`);
+    return res;
+  };
+
+  await call("/logs");
+  const deadline = Date.now() + (opts.readyTimeoutMs ?? READY_TIMEOUT_MS);
+  for (;;) {
+    try {
+      await fetch(endpoint, { signal: AbortSignal.timeout(2_000) }).then((r) => r.body?.cancel());
+      break;
+    } catch {
+      if (Date.now() > deadline)
+        throw new Error(`attached sandbox MCP endpoint ${endpoint} not ready`);
+      await delay(500);
+    }
+  }
+
+  const file = (path: string) => `/file?path=${encodeURIComponent(path)}`;
+  return {
+    browserEndpoint: () => endpoint,
+    async exec(cmd, execOpts) {
+      const res = await call("/exec", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cmd, timeoutMs: execOpts?.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS }),
+      });
+      return (await res.json()) as { code: number; stdout: string; stderr: string };
+    },
+    async writeFile(path, bytes) {
+      const buf = typeof bytes === "string" ? Buffer.from(bytes) : bytes;
+      // Buffer satisfies BodyInit at runtime (it's a Uint8Array); the DOM lib's
+      // ArrayBufferView type just doesn't line up with @types/node's generic Buffer.
+      await call(file(path), { method: "PUT", body: buf as BodyInit });
+    },
+    async readFile(path) {
+      const res = await call(file(path));
+      if (res.status === 404) throw new Error(`sandbox file not found: ${path}`);
+      return Buffer.from(await res.arrayBuffer());
+    },
+    logs: async () => (await call("/logs")).text().catch(() => ""),
+    // The owner of the sidecar stops it; only clear this run's output.
+    dispose: async () => {},
+  };
+}
+
+// Build the reproduce-phase `attach` arg from CLI opts, or undefined for the
+// default (start-our-own-Docker) mode.
+export function attachFromOpts(opts: {
+  sandboxEndpoint?: string;
+  sandboxControl?: string;
+}): { endpoint: string; controlUrl: string; token: string } | undefined {
+  if (!opts.sandboxEndpoint) return undefined;
+  const token = process.env.AGENTGG_SANDBOX_TOKEN;
+  if (!token) throw new Error("--sandbox-endpoint requires $AGENTGG_SANDBOX_TOKEN");
+  const u = new URL(opts.sandboxEndpoint);
+  const controlUrl = opts.sandboxControl ?? `${u.protocol}//${u.hostname}:8932`;
+  return { endpoint: opts.sandboxEndpoint, controlUrl, token };
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }

@@ -17,7 +17,7 @@ import type { Detector } from "../detect.js";
 import { logWarn } from "../log.js";
 import { ensureSandboxImage } from "./image.js";
 import { runReproScript } from "./repro-script.js";
-import { type Sandbox, startLocalDockerSandbox } from "./sandbox.js";
+import { type Sandbox, startAttachedSandbox, startLocalDockerSandbox } from "./sandbox.js";
 import { redact, redactBytes, type TargetAuth } from "./target-auth.js";
 import {
   parseTraceRequests,
@@ -117,6 +117,9 @@ export async function runReproducePhase(args: {
   notLiveReproducible?: ReadonlySet<string>;
   /** Re-reproduce findings that already have a live result. */
   force?: boolean;
+  /** Attach to a sandbox something else already started (a Cloud Run
+   *  sidecar) instead of starting Docker locally. */
+  attach?: { endpoint: string; controlUrl: string; token: string };
   signal: AbortSignal;
 }): Promise<void> {
   const {
@@ -180,25 +183,36 @@ export async function runReproducePhase(args: {
   // Preflight Docker and the image here, not at phase entry: a target that
   // never answered should not cost a multi-minute image build. Must also run
   // before the "reproducing N finding(s)" log below, so a skip is never
-  // announced as work already under way.
-  const preflight = await ensureSandboxImage(image);
-  if (!preflight.ok) {
-    console.log(`  live validation: skipping, keeping static verdicts.\n  ${preflight.reason}`);
-    return;
+  // announced as work already under way. Skipped when attaching: the sandbox
+  // is already running and its image is the platform's concern, not ours.
+  if (!args.attach) {
+    const preflight = await ensureSandboxImage(image);
+    if (!preflight.ok) {
+      console.log(`  live validation: skipping, keeping static verdicts.\n  ${preflight.reason}`);
+      return;
+    }
   }
 
   console.log(`  live validation: reproducing ${work.length} finding(s) against ${targetUrl}`);
   updateRunStage(outDir, scanRunId, "live", { done: 0, total: work.length });
 
-  // The browser runs inside the container, so a target the host publishes on
-  // localhost must be reached via host.docker.internal. Probing stays on the
-  // host-side URL; the agent (and the recorded baseUrl) gets the container one.
-  const agentBaseUrl = toContainerBaseUrl(targetUrl);
-
   const runId = `reproduce-${randomUUID()}`;
   let sandbox: Sandbox;
+  let agentBaseUrl: string;
   try {
-    sandbox = await startLocalDockerSandbox({ image });
+    if (args.attach) {
+      // Attached mode: no container to redirect a localhost target into, so
+      // the target is reached exactly as given.
+      agentBaseUrl = targetUrl;
+      sandbox = await startAttachedSandbox(args.attach);
+    } else {
+      // The browser runs inside the container, so a target the host
+      // publishes on localhost must be reached via host.docker.internal.
+      // Probing stays on the host-side URL; the agent (and the recorded
+      // baseUrl) gets the container one.
+      agentBaseUrl = toContainerBaseUrl(targetUrl);
+      sandbox = await startLocalDockerSandbox({ image });
+    }
   } catch (err) {
     // The preflight above already built a missing image, so this now only
     // catches port conflicts or other docker/SSE failures.
@@ -360,6 +374,11 @@ export async function runReproducePhase(args: {
     const msg = err instanceof Error ? err.message : String(err);
     logWarn(`live validation: stopped early, keeping static verdicts: ${redact(msg, auth)}`);
   } finally {
+    try {
+      await clearSandboxOut(sandbox);
+    } catch (clearErr) {
+      logWarn(`live validation: could not clear /out: ${(clearErr as Error).message}`);
+    }
     await sandbox.dispose();
   }
 }

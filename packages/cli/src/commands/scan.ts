@@ -57,7 +57,7 @@ import { resolveTemplates } from "../template.js";
 import { createUsageMeter, type UsageMeter } from "../usage-meter.js";
 import { notLiveReproducible, proofRuleMap } from "../validation/proof-rules.js";
 import { runReproducePhase } from "../validation/reproduce.js";
-import { DEFAULT_SANDBOX_IMAGE } from "../validation/sandbox.js";
+import { attachFromOpts, DEFAULT_SANDBOX_IMAGE } from "../validation/sandbox.js";
 import { parseTargetAuth, readTargetContext } from "../validation/target-auth.js";
 import { fitMembers } from "../validator.js";
 import { DEFAULT_VIEWER_PORT, openBrowser, startViewer } from "../viewer-server.js";
@@ -261,6 +261,10 @@ interface ScanOpts {
   targetContext?: string;
   /** Sandbox image tag. Defaults to the pinned `DEFAULT_SANDBOX_IMAGE`. */
   targetImage?: string;
+  /** Attach to an already-running sandbox instead of starting Docker. */
+  sandboxEndpoint?: string;
+  /** Control server of the attached sandbox (default: same host, port 8932). */
+  sandboxControl?: string;
   /** Per-finding reproduction timeout in seconds (default 300). */
   reproduceTimeout?: number;
   /** Whole-phase reproduction budget in seconds (default 1800). */
@@ -1962,6 +1966,7 @@ export async function runScan(
         reproduceMaxTurns: Number(opts.reproduceMaxTurns ?? 50),
         agentProofRules: proofRuleMap(catalog.agents),
         notLiveReproducible: notLiveReproducible(catalog.agents),
+        attach: attachFromOpts(opts),
         signal: scanAbortController.signal,
       });
     }
@@ -2532,6 +2537,14 @@ export function registerScanCommand(program: Command): void {
     .option(
       "--target-image <ref>",
       `Sandbox image tag hosting Playwright + the MCP server. Defaults to the pinned ${DEFAULT_SANDBOX_IMAGE}.`,
+    )
+    .option(
+      "--sandbox-endpoint <url>",
+      "Attach to an already-running sandbox's MCP server (e.g. http://127.0.0.1:8931) instead of starting Docker. Reads the control token from $AGENTGG_SANDBOX_TOKEN.",
+    )
+    .option(
+      "--sandbox-control <url>",
+      "Control server of the attached sandbox (default: same host, port 8932).",
     )
     .option(
       "--reproduce-timeout <s>",

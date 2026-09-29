@@ -19,7 +19,7 @@ import {
 import { writeMarkdownReport } from "../reporters/md.js";
 import { notLiveReproducible, proofRuleMap } from "../validation/proof-rules.js";
 import { runReproducePhase } from "../validation/reproduce.js";
-import { DEFAULT_SANDBOX_IMAGE } from "../validation/sandbox.js";
+import { attachFromOpts, DEFAULT_SANDBOX_IMAGE } from "../validation/sandbox.js";
 import { parseTargetAuth, readTargetContext } from "../validation/target-auth.js";
 import { buildInvocation } from "./invocation.js";
 
@@ -28,6 +28,8 @@ interface LiveValidateOpts {
   targetCredentials?: string;
   targetContext?: string;
   targetImage?: string;
+  sandboxEndpoint?: string;
+  sandboxControl?: string;
   reproduceTimeout?: number;
   reproduceMaxTurns?: number;
   force?: boolean;
@@ -119,6 +121,7 @@ export async function runLiveValidate(
     agentProofRules,
     notLiveReproducible: skipLive,
     force: opts.force ?? false,
+    attach: attachFromOpts(opts),
     signal: abortController.signal,
   });
   const completedAt = new Date();
@@ -174,6 +177,14 @@ export function registerLiveValidateCommand(program: Command): void {
       `Sandbox image tag hosting Playwright + the MCP server. Defaults to the pinned ${DEFAULT_SANDBOX_IMAGE}.`,
     )
     .option(
+      "--sandbox-endpoint <url>",
+      "Attach to an already-running sandbox's MCP server (e.g. http://127.0.0.1:8931) instead of starting Docker. Reads the control token from $AGENTGG_SANDBOX_TOKEN.",
+    )
+    .option(
+      "--sandbox-control <url>",
+      "Control server of the attached sandbox (default: same host, port 8932).",
+    )
+    .option(
       "--reproduce-timeout <s>",
       "Per-finding reproduction timeout in seconds (default 600). A backstop only: the turn cap (--reproduce-max-turns) is meant to end a run first, because it stops cleanly with a verdict, while a timeout aborts and keeps no evidence.",
       (v) => parseInt(v, 10),
@@ -191,7 +202,7 @@ export function registerLiveValidateCommand(program: Command): void {
     )
     .option(
       "--provider <name>",
-      "LLM provider for this run: anthropic | openai | ollama | bedrock (overrides saved default)",
+      "LLM provider for this run: anthropic | openai | ollama | bedrock | openrouter (overrides saved default)",
     )
     .option("--api-key <key>", "One-shot API key (not persisted). Valid for: anthropic, openai.")
     .option(
