@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Starts the control server when a token is set (attached mode), then the MCP server.
 set -e
 LOG=/tmp/mcp.log
@@ -10,4 +10,4 @@ set -- mcp-server-playwright --port 8931 --host 0.0.0.0 --headless --isolated --
 if [ -n "$ALLOWED_ORIGINS" ]; then
   set -- "$@" --allowed-origins "$ALLOWED_ORIGINS"
 fi
-exec "$@" 2>&1 | tee "$LOG"
+exec "$@" > >(tee -a "$LOG") 2>&1
