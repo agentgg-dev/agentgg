@@ -18,7 +18,7 @@ import { logWarn } from "../log.js";
 import { ensureSandboxImage } from "./image.js";
 import { runReproScript } from "./repro-script.js";
 import { type Sandbox, startLocalDockerSandbox } from "./sandbox.js";
-import { redact, type TargetAuth } from "./target-auth.js";
+import { redact, redactBytes, type TargetAuth } from "./target-auth.js";
 import {
   parseTraceRequests,
   renderRequestsHttp,
@@ -258,14 +258,14 @@ export async function runReproducePhase(args: {
         if (res.result === "reproduced" && res.script) {
           const script = await runReproScript(sandbox, res.script);
           const evidenceDir = getEvidenceDir(outDir, finding.agentSlug, finding.id);
-          evidence = await copyEvidence(sandbox, evidenceDir);
+          evidence = await copyEvidence(sandbox, evidenceDir, { auth });
           // Save the generated script next to the trace/video so the report's
           // evidence.script.path link resolves.
           mkdirSync(evidenceDir, { recursive: true });
-          writeFileSync(join(evidenceDir, "repro.spec.ts"), res.script);
+          writeFileSync(join(evidenceDir, "repro.spec.ts"), redact(res.script, auth));
           // The runner's own words, next to the script. Without them a replay
           // that never started looks the same as an exploit that stopped working.
-          writeFileSync(join(evidenceDir, "repro-run.log"), script.output);
+          writeFileSync(join(evidenceDir, "repro-run.log"), redact(script.output, auth));
           if (!script.passed) {
             logWarn(
               `[reproduce:${finding.id}] the replay ${script.executed ? "did not pass" : "never ran"}: ${script.output.split("\n")[0] ?? ""}`,
@@ -277,9 +277,9 @@ export async function runReproducePhase(args: {
           // needs to check it. Not the video: its value is the "watch it fire"
           // moment, and it is the one artifact that costs tens of megabytes.
           const evidenceDir = getEvidenceDir(outDir, finding.agentSlug, finding.id);
-          const captured = await copyEvidence(sandbox, evidenceDir, { keepVideo: false });
+          const captured = await copyEvidence(sandbox, evidenceDir, { keepVideo: false, auth });
           if (res.script) {
-            writeFileSync(join(evidenceDir, "repro.spec.ts"), res.script);
+            writeFileSync(join(evidenceDir, "repro.spec.ts"), redact(res.script, auth));
             // Never replayed: a negative control that passes contradicts the
             // verdict it was written to support.
             captured.script = { path: "repro.spec.ts", executed: false, passed: false };
@@ -409,7 +409,7 @@ const VIDEO_POLL_MS = 250;
 export async function copyEvidence(
   sandbox: Sandbox,
   evidenceDir: string,
-  opts: { videoWaitMs?: number; pollMs?: number; keepVideo?: boolean } = {},
+  opts: { videoWaitMs?: number; pollMs?: number; keepVideo?: boolean; auth?: TargetAuth } = {},
 ): Promise<Evidence> {
   const keepVideo = opts.keepVideo ?? true;
   const evidence: Evidence = { screenshots: [] };
@@ -443,12 +443,18 @@ export async function copyEvidence(
     }
   }
 
-  const traced = await copyTrace(sandbox, evidenceDir);
+  const traced = await copyTrace(sandbox, evidenceDir, opts.auth);
   if (traced?.trace) evidence.trace = traced.trace;
   if (traced?.networkText) {
     const requests = parseTraceRequests(traced.networkText, traced.resources);
     if (requests.length > 0) {
-      writeFileSync(join(evidenceDir, "requests.http"), renderRequestsHttp(requests));
+      const http = renderRequestsHttp(requests);
+      writeFileSync(
+        join(evidenceDir, "requests.http"),
+        // Redacted already at the byte level in copyTrace; a second guard here
+        // catches anything a codec boundary let through.
+        opts.auth ? redact(http, opts.auth) : http,
+      );
       evidence.requests = requests.map((r) => ({
         method: r.method,
         url: r.url,
@@ -493,6 +499,7 @@ async function listOut(sandbox: Sandbox, waitMs: number, pollMs: number): Promis
 async function copyTrace(
   sandbox: Sandbox,
   evidenceDir: string,
+  auth?: TargetAuth,
 ): Promise<{ trace?: string; networkText?: string; resources?: TraceResources } | undefined> {
   const { code, stdout } = await sandbox.exec(["sh", "-c", "find /out/traces -type f 2>/dev/null"]);
   if (code !== 0) return undefined;
@@ -515,11 +522,14 @@ async function copyTrace(
       continue;
     }
     const name = path.slice(prefix.length);
-    zip.addFile(name, buf);
+    // .trace files can carry typed input, so every file added to the zip is
+    // redacted, not just the request/response log.
+    const safe = auth ? redactBytes(buf, auth) : buf;
+    zip.addFile(name, safe);
     // The .network file carries the request/response snapshots for the report.
-    if (path.endsWith(".network")) networkText = buf.toString("utf8");
+    if (path.endsWith(".network")) networkText = safe.toString("utf8");
     // Bodies live here; the snapshots only point at them by sha1 name.
-    else if (name.startsWith("resources/")) resources.set(name.slice("resources/".length), buf);
+    else if (name.startsWith("resources/")) resources.set(name.slice("resources/".length), safe);
   }
   if (zip.getEntries().length === 0) return undefined;
   zip.writeZip(join(evidenceDir, "trace.zip"));

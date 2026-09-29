@@ -2,7 +2,13 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { parseTargetAuth, readTargetContext, redact } from "../src/validation/target-auth";
+import {
+  credentialVariants,
+  parseTargetAuth,
+  readTargetContext,
+  redact,
+  redactBytes,
+} from "../src/validation/target-auth";
 
 describe("target auth", () => {
   it("parses user:pass", () => {
@@ -18,6 +24,32 @@ describe("target auth", () => {
     const a = parseTargetAuth({});
     expect(a.password).toBeUndefined();
     expect(redact("text with nothing to redact", a)).toBe("text with nothing to redact");
+  });
+});
+
+describe("credential redaction", () => {
+  const auth = { username: "alice", password: "p@ss word&1" };
+  it("covers raw, percent-encoded, form-encoded and basic-auth forms", () => {
+    const v = credentialVariants(auth);
+    expect(v).toContain("p@ss word&1");
+    expect(v).toContain(encodeURIComponent("p@ss word&1"));
+    expect(v).toContain("p%40ss+word%261");
+    expect(v).toContain(Buffer.from("alice:p@ss word&1").toString("base64"));
+  });
+  it("redacts a JSON-escaped password", () => {
+    const body = JSON.stringify({ password: 'a"b\\c' });
+    expect(redact(body, { password: 'a"b\\c' })).not.toContain('a\\"b\\\\c');
+  });
+  it("redacts every variant in bytes", () => {
+    const text = `password=p%40ss+word%261&x=1\nAuthorization: Basic ${Buffer.from("alice:p@ss word&1").toString("base64")}`;
+    const out = redactBytes(Buffer.from(text), auth).toString("utf8");
+    expect(out).not.toContain("p%40ss");
+    expect(out).not.toContain(Buffer.from("alice:p@ss word&1").toString("base64"));
+    expect(out).toContain("***");
+  });
+  it("leaves bytes alone when there is no password", () => {
+    const b = Buffer.from("nothing");
+    expect(redactBytes(b, {})).toBe(b);
   });
 });
 
