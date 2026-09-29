@@ -268,7 +268,7 @@ export async function runReproducePhase(args: {
           writeFileSync(join(evidenceDir, "repro-run.log"), redact(script.output, auth));
           if (!script.passed) {
             logWarn(
-              `[reproduce:${finding.id}] the replay ${script.executed ? "did not pass" : "never ran"}: ${script.output.split("\n")[0] ?? ""}`,
+              `[reproduce:${finding.id}] the replay ${script.executed ? "did not pass" : "never ran"}: ${redact(script.output.split("\n")[0] ?? "", auth)}`,
             );
           }
           evidence.script = { path: script.path, executed: script.executed, passed: script.passed };

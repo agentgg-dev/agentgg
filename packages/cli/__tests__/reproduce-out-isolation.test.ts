@@ -10,6 +10,10 @@ import type { Sandbox } from "../src/validation/sandbox.js";
 /** /out, shared across findings exactly as the real container's is. */
 const out = new Map<string, Buffer>();
 
+/** Set by the failed-replay-warning test to control what the (real,
+ *  unmocked) repro-script runner sees from `npx playwright test`. */
+let playwrightResult: { code: number; stdout: string; stderr: string } | undefined;
+
 const sandbox: Sandbox = {
   browserEndpoint: () => "http://localhost:8931/sse",
   async exec(cmd) {
@@ -23,6 +27,7 @@ const sandbox: Sandbox = {
       out.clear();
       return { code: 0, stdout: "", stderr: "" };
     }
+    if (line.startsWith("npx playwright test") && playwrightResult) return playwrightResult;
     return { code: 0, stdout: "", stderr: "" };
   },
   async readFile(path) {
@@ -70,6 +75,7 @@ describe("evidence isolation between findings", () => {
 
   beforeEach(() => {
     out.clear();
+    playwrightResult = undefined;
     outDir = mkdtempSync(join(tmpdir(), "agentgg-iso-"));
     fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("ok"));
   });
@@ -217,5 +223,55 @@ describe("evidence isolation between findings", () => {
     });
 
     expect(seen).toBe(75);
+  });
+
+  it("redacts the target password from the failed-replay warning", async () => {
+    const pw = "hunter2secret";
+    playwrightResult = { code: 1, stdout: `password leaked: ${pw}\n1 failed`, stderr: "" };
+    const a = finding("aaa", "agent-a");
+    writeFileRecord(outDir, {
+      agentSlug: a.agentSlug,
+      filePath: a.filePath,
+      contentHash: "h",
+      findings: [a],
+      analysisHistory: [],
+      candidates: [],
+      status: "analyzed",
+    } as never);
+
+    const detector = {
+      name: "fake",
+      async reproduceFinding() {
+        // A video in /out lets the copy skip its wait for one to appear.
+        out.set("/out/page-1.webm", Buffer.from("video"));
+        return {
+          result: "reproduced" as const,
+          reasoning: "r",
+          counterevidence: "",
+          script: "// s",
+        };
+      },
+    };
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await runReproducePhase({
+        findings: [a],
+        // biome-ignore lint/suspicious/noExplicitAny: only reproduceFinding is exercised
+        detector: detector as any,
+        outDir,
+        runId: "test-run",
+        targetUrl: "http://localhost:3000",
+        auth: { username: "alice", password: pw },
+        image: "img",
+        timeoutMs: 30_000,
+        signal: new AbortController().signal,
+      });
+      const warned = warnSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(warned).toContain("***");
+      expect(warned).not.toContain(pw);
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });
