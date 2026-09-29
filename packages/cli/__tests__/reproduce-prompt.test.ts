@@ -52,4 +52,14 @@ describe("buildReproducePrompt", () => {
   it("asks the agent to report the control it ran", () => {
     expect(buildReproducePrompt(finding, "http://t")).toContain("negativeControl");
   });
+
+  it("asks the agent to reproduce the confirmed impact", () => {
+    const out = buildReproducePrompt(finding, "http://localhost:3000", undefined, undefined, {
+      verdict: "confirmed",
+      reasoning: "r",
+      confirmedImpact: "Reads any user's notes.",
+    });
+    expect(out).toContain("The impact to reproduce is the one the review confirmed");
+    expect(out).toContain("Reads any user's notes.");
+  });
 });

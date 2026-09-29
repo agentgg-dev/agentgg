@@ -249,6 +249,7 @@ export async function runReproducePhase(args: {
           maxTurns: args.reproduceMaxTurns,
           staticVerdict: finding.validation?.verdict,
           staticReasoning: finding.validation?.reasoning,
+          staticConfirmedImpact: finding.validation?.confirmedImpact,
           proofRule: args.agentProofRules?.get(finding.agentSlug),
           signal: ac.signal,
         });

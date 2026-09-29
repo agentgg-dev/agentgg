@@ -1331,6 +1331,7 @@ export class VercelAgentDetector implements Detector {
     maxTurns?: number;
     staticVerdict?: string;
     staticReasoning?: string;
+    staticConfirmedImpact?: string;
     proofRule?: string;
     signal?: AbortSignal;
   }): Promise<{
@@ -1344,7 +1345,11 @@ export class VercelAgentDetector implements Detector {
     const label = sessionLabel(`reproduce:${args.finding.id}`);
     const staticReview =
       args.staticVerdict != null && args.staticReasoning != null
-        ? { verdict: args.staticVerdict, reasoning: args.staticReasoning }
+        ? {
+            verdict: args.staticVerdict,
+            reasoning: args.staticReasoning,
+            ...(args.staticConfirmedImpact ? { confirmedImpact: args.staticConfirmedImpact } : {}),
+          }
         : undefined;
     const prompt = `${buildReproducePrompt(
       args.finding,

@@ -340,6 +340,8 @@ export interface Detector {
     staticVerdict?: string;
     /** Static validator's reasoning, quoted into the prompt verbatim. */
     staticReasoning?: string;
+    /** The impact static validation confirmed; the agent tests this one. */
+    staticConfirmedImpact?: string;
     /** The reporting agent's `liveProofRule`. Adds to the proof principle;
      *  no agent can replace it. */
     proofRule?: string;
@@ -728,7 +730,7 @@ export function buildReproducePrompt(
   baseUrl: string,
   auth?: TargetAuth,
   context?: string,
-  staticReview?: { verdict: string; reasoning: string },
+  staticReview?: { verdict: string; reasoning: string; confirmedImpact?: string },
   /** The reporting agent's `liveProofRule`, when its catalog entry declares
    *  one. It adds to the principle and can never replace it. */
   agentRule?: string,
@@ -753,7 +755,7 @@ If the target requires login, sign in first with:
   const proofRulesBlock = `\n## What counts as proof\n\n${proofRules(agentRule)}\n`;
 
   const staticReviewBlock = staticReview
-    ? `\n## Source review of this finding\n\nA reviewer with the source code reached the verdict \`${staticReview.verdict}\`:\n\n${staticReview.reasoning}\n\nYour result counts as 'reproduced' ONLY if what you observed answers this\nreview. Say in your reasoning how it does.\n`
+    ? `\n## Source review of this finding\n\nA reviewer with the source code reached the verdict \`${staticReview.verdict}\`:\n\n${staticReview.reasoning}\n\nYour result counts as 'reproduced' ONLY if what you observed answers this\nreview. Say in your reasoning how it does.\n${staticReview.confirmedImpact ? `\nThe impact to reproduce is the one the review confirmed:\n\n${staticReview.confirmedImpact}\n\nTest that impact. The finding text below may claim more.\n` : ""}`
     : "";
 
   // Only a run given a static review owes it an answer; the majority of
