@@ -1,6 +1,6 @@
 # Live-validation sandbox: Playwright + Chromium + @playwright/mcp SSE server.
 # Build with this file's own directory as the context (it COPYs url-banner.js):
-#   docker build -f packages/cli/src/validation/sandbox.Dockerfile -t agentgg/live-sandbox:pw1.56.0-mcp0.0.41-4 packages/cli/src/validation
+#   docker build -f packages/cli/src/validation/sandbox.Dockerfile -t agentgg/live-sandbox:pw1.56.0-mcp0.0.41-5 packages/cli/src/validation
 #
 # @playwright/mcp 0.0.41 pinned: it depends on playwright 1.56.0-alpha, so the
 # image installs that exact playwright and its matching chromium on top of the
@@ -27,8 +27,6 @@ RUN mkdir -p /out
 # Top strip for the recording: current URL plus the newest fetch/XHR call.
 COPY url-banner.js /srv/url-banner.js
 
-EXPOSE 8931
-
 # --browser chromium: the MCP server defaults to the Google Chrome channel, which
 # this image does not ship; without this the first navigation fails and the agent
 # has to repair it with a 435MB browser_install.
@@ -36,14 +34,9 @@ EXPOSE 8931
 # --no-sandbox: Chromium runs as root in the container.
 # --isolated: fresh in-memory profile per run.
 # --save-trace/--save-video: Playwright trace (includes network activity) + video into /out.
-CMD ["mcp-server-playwright", \
-  "--port", "8931", \
-  "--host", "0.0.0.0", \
-  "--headless", \
-  "--isolated", \
-  "--no-sandbox", \
-  "--browser", "chromium", \
-  "--init-script", "/srv/url-banner.js", \
-  "--save-trace", \
-  "--save-video", "800x600", \
-  "--output-dir", "/out"]
+# 8932 is the control server (attached/sidecar mode only, gated on SANDBOX_CONTROL_TOKEN).
+COPY sandbox-control.mjs /srv/sandbox-control.mjs
+COPY sandbox-entry.sh /srv/sandbox-entry.sh
+RUN chmod +x /srv/sandbox-entry.sh
+EXPOSE 8931 8932
+CMD ["/srv/sandbox-entry.sh"]

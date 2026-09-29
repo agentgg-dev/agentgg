@@ -95,7 +95,12 @@ const validationSrc = resolve(cliRoot, "src", "validation");
 const validationDest = resolve(cliRoot, "dist", "validation");
 try {
   mkdirSync(validationDest, { recursive: true });
-  for (const name of ["sandbox.Dockerfile", "url-banner.js"]) {
+  for (const name of [
+    "sandbox.Dockerfile",
+    "url-banner.js",
+    "sandbox-control.mjs",
+    "sandbox-entry.sh",
+  ]) {
     cpSync(resolve(validationSrc, name), resolve(validationDest, name));
   }
   log(`Copied sandbox build inputs → ${validationDest}`);
