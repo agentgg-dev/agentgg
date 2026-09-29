@@ -28,13 +28,13 @@ function renderOne(f: Finding): string {
 }
 
 /**
- * Renders every finding in the group, including duplicates (normally
- * collapsed out of `writeMarkdownReport`'s output), with a `byId` map built
- * from the whole group so a duplicate resolves its primary.
+ * Renders one finding (normally a duplicate, collapsed out of
+ * `writeMarkdownReport`'s output) with a `byId` map built from the whole
+ * group, so a duplicate resolves its primary through `groupPrimary`.
  */
-function renderWithDuplicatesShown(findings: Finding[]): string {
-  const byId = new Map(findings.map((f) => [f.id, f] as const));
-  return findings.map((f) => renderFindingMd(f, undefined, undefined, byId)).join("\n\n---\n\n");
+function renderWithGroup(f: Finding, group: ReadonlyArray<Finding>): string {
+  const byId = new Map(group.map((g) => [g.id, g] as const));
+  return renderFindingMd(f, undefined, undefined, byId);
 }
 
 describe("renderFindingMd confirmed impact and group verdict", () => {
@@ -58,8 +58,7 @@ describe("renderFindingMd confirmed impact and group verdict", () => {
   it("gives a rendered duplicate its primary's verdict", () => {
     const p = makeFinding({ id: "p1", validation: { verdict: "confirmed", reasoning: "r" } });
     const d = makeFinding({ id: "d1", dedup: { duplicateOf: "p1", reasoning: "same" } });
-    const md = renderWithDuplicatesShown([p, d]);
-    const dupSection = md.slice(md.indexOf("**Duplicate of:** `p1`"));
-    expect(dupSection).toContain("**Validation:** `confirmed` (from `p1`)");
+    const md = renderWithGroup(d, [p, d]);
+    expect(md).toContain("**Validation:** `confirmed` (from `p1`)");
   });
 });

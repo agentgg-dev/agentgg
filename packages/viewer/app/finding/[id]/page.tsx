@@ -51,7 +51,7 @@ export default async function FindingPage({ params }: { params: Promise<{ id: st
         <div className="rounded-xl border border-bg-border bg-bg-panel/40 p-6 md:p-8 mb-6">
           <div className="flex flex-wrap items-center gap-2 mb-4">
             <SeverityBadge severity={holder.severity} />
-            <VerdictBadge verdict={effectiveVerdict(finding)} />
+            <VerdictBadge verdict={effectiveVerdict(holder)} />
             {finding.live && <LiveResultBadge state={liveState(finding)} />}
             <DuplicateBadge dedup={finding.dedup} />
             <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider border border-bg-border bg-bg/40 text-amber">
@@ -105,7 +105,7 @@ export default async function FindingPage({ params }: { params: Promise<{ id: st
         </div>
 
         <FindingTabs
-          details={<DetailsPanel finding={finding} />}
+          details={<DetailsPanel finding={finding} holder={holder} />}
           validation={<ValidationPanel finding={holder} />}
           evidence={<EvidencePanel finding={finding} />}
         />
@@ -114,7 +114,7 @@ export default async function FindingPage({ params }: { params: Promise<{ id: st
   );
 }
 
-function DetailsPanel({ finding }: { finding: Finding }) {
+function DetailsPanel({ finding, holder }: { finding: Finding; holder: Finding }) {
   return (
     <>
       <Section title="Details">
@@ -126,10 +126,10 @@ function DetailsPanel({ finding }: { finding: Finding }) {
       </Section>
 
       <Section title="Impact">
-        {finding.validation?.confirmedImpact && (
+        {holder.validation?.confirmedImpact && (
           <p className="mb-3 text-sm text-ink">
             <strong className="text-ink">Confirmed impact:</strong>{" "}
-            {finding.validation.confirmedImpact}
+            {holder.validation.confirmedImpact}
           </p>
         )}
         <Markdown source={finding.impact} />

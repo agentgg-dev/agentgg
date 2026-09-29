@@ -322,13 +322,6 @@ export function renderFindingMd(
     lines.push("");
     lines.push(f.dedup.reasoning);
     lines.push("");
-    // Restate the inherited verdict here too, next to the reasoning a
-    // reader is checking when they scroll down to "why is this a dupe".
-    if (holder !== f && (holder.validation || holder.live)) {
-      const v = effectiveVerdict(holder);
-      lines.push(`**Validation:** ${v ? `\`${v}\`` : "_not settled_"} (from \`${holder.id}\`)`);
-      lines.push("");
-    }
   }
 
   lines.push("### Summary");
