@@ -731,6 +731,10 @@ export const UserConfig = z
         model: z.string().optional(),
         /** Override the API base. Defaults to https://openrouter.ai/api/v1. */
         baseUrl: z.string().url().optional(),
+        /** Saved OpenRouter `provider` routing block, set with
+         *  `agentgg config --openrouter-routing` or `agentgg init`. $OPENROUTER_*
+         *  env vars and the scan-time `--openrouter-routing` flag override it. */
+        routing: z.record(z.string(), z.unknown()).optional(),
       })
       .optional(),
     ollama: z

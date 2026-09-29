@@ -226,6 +226,7 @@ export interface InitOpts {
   awsSessionToken?: string;
   project?: string;
   model?: string;
+  openrouterRouting?: string;
 }
 
 /**
@@ -246,6 +247,10 @@ export function mergeUserConfig(fresh: UserConfig, existing: UserConfig | null):
     // otherwise keep whatever was already saved.
     (merged as Record<string, unknown>)[key] =
       (fresh as Record<string, unknown>)[key] ?? (existing as Record<string, unknown>)[key];
+  }
+  // A re-init that saved no routing keeps the routing saved before.
+  if (merged.openrouter && !merged.openrouter.routing && existing.openrouter?.routing) {
+    merged.openrouter = { ...merged.openrouter, routing: existing.openrouter.routing };
   }
   return merged;
 }
@@ -298,6 +303,7 @@ export async function runInit(
     awsSessionToken: opts.awsSessionToken,
     project: opts.project,
     model: opts.model,
+    openrouterRouting: opts.openrouterRouting,
   };
 
   const mod = getProviderModule(provider);
@@ -416,6 +422,10 @@ export function registerInitCommand(program: Command): void {
       "(Vertex) GCP project ID hosting the Vertex AI Model Garden endpoint. Falls back to $GOOGLE_CLOUD_PROJECT / $GCLOUD_PROJECT at scan time if unset.",
     )
     .option("--model <name>", "Default model for the chosen provider")
+    .option(
+      "--openrouter-routing <json|file>",
+      '(OpenRouter) routing to save as the default, as inline JSON or a JSON file path, for example {"quantizations":["fp8"]}. Change it later with `agentgg config --openrouter-routing`.',
+    )
     .action(async (opts: InitOpts) => {
       try {
         await runInit(opts);

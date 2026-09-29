@@ -72,6 +72,8 @@ export interface InitInputs {
   /** GCP project ID for the Vertex provider. */
   project?: string;
   model?: string;
+  /** (OpenRouter) routing to save: inline JSON, a JSON file path, or `none`. */
+  openrouterRouting?: string;
 }
 
 export interface CollectCredentialsArgs {

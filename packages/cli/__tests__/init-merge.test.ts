@@ -94,3 +94,32 @@ describe("buildUserConfig", () => {
     ).toThrow(/pick one/);
   });
 });
+
+describe("mergeUserConfig with OpenRouter routing", () => {
+  const saved: UserConfig = {
+    provider: "openrouter",
+    openrouter: { apiKey: "sk-or-old", routing: { quantizations: ["fp8"] } },
+    schemaVersion: 1,
+  };
+
+  it("a re-init with no routing keeps the saved routing", () => {
+    const fresh: UserConfig = {
+      provider: "openrouter",
+      openrouter: { apiKey: "sk-or-new" },
+      schemaVersion: 1,
+    };
+    expect(mergeUserConfig(fresh, saved).openrouter).toEqual({
+      apiKey: "sk-or-new",
+      routing: { quantizations: ["fp8"] },
+    });
+  });
+
+  it("a re-init with new routing replaces it", () => {
+    const fresh: UserConfig = {
+      provider: "openrouter",
+      openrouter: { apiKey: "sk-or-new", routing: { sort: "latency" } },
+      schemaVersion: 1,
+    };
+    expect(mergeUserConfig(fresh, saved).openrouter?.routing).toEqual({ sort: "latency" });
+  });
+});

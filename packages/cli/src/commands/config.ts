@@ -8,6 +8,7 @@ import {
 import type { Command } from "commander";
 import { logError } from "../log.js";
 import { allProviderModules, listConfiguredProviders } from "../providers/index.js";
+import { parseSavedRouting } from "../providers/openrouter.js";
 /**
  * Format the saved config for stdout. Returns a string so the same
  * helper drives both `--json` mode and the friendly text view, and so
@@ -52,6 +53,20 @@ function redactSecrets(cfg: UserConfig): UserConfig {
 
 const VALID_PROVIDERS = new Set<string>(allProviderModules().map((m) => m.name));
 
+/** Saves or clears (`routing: null`) the OpenRouter routing default. */
+export function applyRoutingUpdate(
+  cfg: UserConfig,
+  routing: Record<string, unknown> | null,
+): UserConfig {
+  if (!cfg.openrouter) {
+    throw new Error(
+      "openrouter is not configured. Run `agentgg init --provider openrouter` first.",
+    );
+  }
+  const { routing: _old, ...rest } = cfg.openrouter;
+  return { ...cfg, openrouter: routing ? { ...rest, routing } : rest };
+}
+
 function applyModelUpdate(cfg: UserConfig, provider: Provider, model: string): UserConfig {
   // Each provider's block lives at UserConfig[name]. We dynamically
   // index so adding a new provider doesn't require a new switch arm.
@@ -81,59 +96,78 @@ export function registerConfigCommand(program: Command): void {
       `switch the default provider (must already be configured via init): ${providerList}`,
     )
     .option("--model <name>", "update the model for the specified --provider (requires --provider)")
-    .action((opts: { json?: boolean; provider?: string; model?: string }) => {
-      const env = process.env;
-      const configPath = getConfigPath(env);
+    .option(
+      "--openrouter-routing <json|file|none>",
+      'save the default OpenRouter routing, as inline JSON or a JSON file path, for example {"quantizations":["fp8"]}. `none` clears it. OPENROUTER_* env vars and the scan flag override it.',
+    )
+    .action(
+      (opts: { json?: boolean; provider?: string; model?: string; openrouterRouting?: string }) => {
+        const env = process.env;
+        const configPath = getConfigPath(env);
 
-      if (opts.provider || opts.model) {
-        if (opts.model && !opts.provider) {
-          logError(
-            "--model requires --provider. Example: agentgg config --provider ollama --model llama3.1:8b",
-          );
-          process.exit(1);
-        }
-
-        let cfg = loadUserConfig(env);
-        if (!cfg) {
-          logError("No config found. Run `agentgg init` first.");
-          process.exit(1);
-        }
-
-        if (opts.provider) {
-          if (!VALID_PROVIDERS.has(opts.provider)) {
+        if (opts.provider || opts.model || opts.openrouterRouting !== undefined) {
+          if (opts.model && !opts.provider) {
             logError(
-              `Unknown provider "${opts.provider}". Must be one of: ${[...VALID_PROVIDERS].join(", ")}`,
+              "--model requires --provider. Example: agentgg config --provider ollama --model llama3.1:8b",
             );
             process.exit(1);
           }
-          const p = opts.provider as Provider;
-          const key = p as keyof UserConfig;
-          if (!(cfg as Record<string, unknown>)[key]) {
-            logError(`${p} is not configured — run \`agentgg init --provider ${p}\` first.`);
+
+          let cfg = loadUserConfig(env);
+          if (!cfg) {
+            logError("No config found. Run `agentgg init` first.");
             process.exit(1);
           }
-          cfg = { ...cfg, provider: p };
-        }
 
-        if (opts.model) {
-          try {
-            cfg = applyModelUpdate(cfg, cfg.provider, opts.model);
-          } catch (err) {
-            logError((err as Error).message);
-            process.exit(1);
+          if (opts.provider) {
+            if (!VALID_PROVIDERS.has(opts.provider)) {
+              logError(
+                `Unknown provider "${opts.provider}". Must be one of: ${[...VALID_PROVIDERS].join(", ")}`,
+              );
+              process.exit(1);
+            }
+            const p = opts.provider as Provider;
+            const key = p as keyof UserConfig;
+            if (!(cfg as Record<string, unknown>)[key]) {
+              logError(`${p} is not configured — run \`agentgg init --provider ${p}\` first.`);
+              process.exit(1);
+            }
+            cfg = { ...cfg, provider: p };
           }
+
+          if (opts.model) {
+            try {
+              cfg = applyModelUpdate(cfg, cfg.provider, opts.model);
+            } catch (err) {
+              logError((err as Error).message);
+              process.exit(1);
+            }
+          }
+
+          if (opts.openrouterRouting !== undefined) {
+            try {
+              cfg = applyRoutingUpdate(cfg, parseSavedRouting(opts.openrouterRouting));
+            } catch (err) {
+              logError((err as Error).message);
+              process.exit(1);
+            }
+          }
+
+          saveUserConfig(cfg, env);
+          console.log(`✓ Updated ${configPath}`);
+          if (opts.provider) console.log(`  Default provider → ${cfg.provider}`);
+          if (opts.model) console.log(`  Model (${cfg.provider}) → ${opts.model}`);
+          if (opts.openrouterRouting !== undefined) {
+            const saved = cfg.openrouter?.routing;
+            console.log(`  OpenRouter routing → ${saved ? JSON.stringify(saved) : "default"}`);
+          }
+          return;
         }
 
-        saveUserConfig(cfg, env);
-        console.log(`✓ Updated ${configPath}`);
-        if (opts.provider) console.log(`  Default provider → ${cfg.provider}`);
-        if (opts.model) console.log(`  Model (${cfg.provider}) → ${opts.model}`);
-        return;
-      }
-
-      const cfg = loadUserConfig(env);
-      console.log(formatConfig(cfg, configPath, Boolean(opts.json)));
-    });
+        const cfg = loadUserConfig(env);
+        console.log(formatConfig(cfg, configPath, Boolean(opts.json)));
+      },
+    );
 }
 
 // Re-exported for use by the init wizard (provider listing line).

@@ -8,6 +8,8 @@ import {
   createCostMeter,
   createRoutingFetch,
   openrouterModule,
+  parseQuantizations,
+  parseSavedRouting,
 } from "../src/providers/openrouter.js";
 import { UsageMeter } from "../src/usage-meter.js";
 
@@ -341,5 +343,67 @@ describe("createRoutingFetch output caps", () => {
   it("ignores a cap that is not a positive number", async () => {
     process.env.OPENROUTER_MAX_TOKENS = "nope";
     expect((await send({})).max_tokens).toBe(64_000);
+  });
+});
+
+describe("buildProviderRouting with saved routing", () => {
+  it("applies the saved routing over the built-in defaults", () => {
+    const r = buildProviderRouting(undefined, { quantizations: ["fp8"], sort: "latency" });
+    expect(r.quantizations).toEqual(["fp8"]);
+    expect(r.sort).toBe("latency");
+    expect(r.require_parameters).toBe(true);
+  });
+
+  it("env vars override the saved routing, key by key", () => {
+    process.env.OPENROUTER_QUANTIZATIONS = "bf16";
+    const r = buildProviderRouting(undefined, { quantizations: ["fp8"], zdr: true });
+    expect(r.quantizations).toEqual(["bf16"]);
+    expect(r.zdr).toBe(true);
+  });
+
+  it("the scan flag overrides both", () => {
+    process.env.OPENROUTER_QUANTIZATIONS = "bf16";
+    const r = buildProviderRouting('{"quantizations":["fp16"]}', { quantizations: ["fp8"] });
+    expect(r.quantizations).toEqual(["fp16"]);
+  });
+
+  it("a saved provider pin drops the default sort", () => {
+    const r = buildProviderRouting(undefined, { only: ["deepinfra"] });
+    expect(r.only).toEqual(["deepinfra"]);
+    expect(r.sort).toBeUndefined();
+  });
+});
+
+describe("parseSavedRouting", () => {
+  it("parses inline JSON and treats none as clear", () => {
+    expect(parseSavedRouting('{"quantizations":["fp8"]}')).toEqual({ quantizations: ["fp8"] });
+    expect(parseSavedRouting("none")).toBeNull();
+    expect(parseSavedRouting(" NONE ")).toBeNull();
+  });
+
+  it("rejects a value that is neither JSON nor a file", () => {
+    expect(() => parseSavedRouting("fp8")).toThrow(/neither inline JSON/);
+  });
+});
+
+describe("parseQuantizations", () => {
+  it("accepts a comma-separated list and an empty answer", () => {
+    expect(parseQuantizations("FP8, bf16")).toEqual(["fp8", "bf16"]);
+    expect(parseQuantizations("  ")).toEqual([]);
+  });
+
+  it("rejects an unknown value", () => {
+    expect(() => parseQuantizations("fp7")).toThrow(/not a quantization/);
+  });
+});
+
+describe("openrouterModule.formatForList", () => {
+  it("shows the saved routing", () => {
+    const line = openrouterModule.formatForList({
+      provider: "openrouter",
+      openrouter: { apiKey: "sk-or-v1-x", routing: { quantizations: ["fp8"] } },
+      schemaVersion: 1,
+    });
+    expect(line).toContain('routing={"quantizations":["fp8"]}');
   });
 });
