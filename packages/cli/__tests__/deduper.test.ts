@@ -1,6 +1,6 @@
 import type { Finding } from "@agentgg/core";
 import { describe, expect, it } from "vitest";
-import { buildDedupePrompt, resolveDedup } from "../src/deduper.js";
+import { buildDedupePrompt, dedupeCandidates, resolveDedup } from "../src/deduper.js";
 
 function makeFinding(id: string, overrides: Partial<Finding> = {}): Finding {
   return {
@@ -19,6 +19,10 @@ function makeFinding(id: string, overrides: Partial<Finding> = {}): Finding {
     notifications: [],
     ...overrides,
   };
+}
+
+function f(id: string, agentSlug: string): Finding {
+  return makeFinding(id, { agentSlug });
 }
 
 describe("resolveDedup", () => {
@@ -87,6 +91,20 @@ describe("resolveDedup", () => {
       { id: "c", duplicateOf: "a", reasoning: "ac" },
     ]);
   });
+
+  it("never marks a finding the run may not write", () => {
+    const findings = [f("a1", "alpha"), f("b1", "beta")];
+    const clusters = [{ primaryId: "a1", duplicateIds: ["b1"], reasoning: "same sink" }];
+    const kept = resolveDedup(findings, clusters, { canMark: (x) => x.agentSlug === "alpha" });
+    expect(kept).toEqual([]);
+  });
+
+  it("marks a finding the run owns", () => {
+    const findings = [f("a1", "alpha"), f("b1", "beta")];
+    const clusters = [{ primaryId: "b1", duplicateIds: ["a1"], reasoning: "same sink" }];
+    const kept = resolveDedup(findings, clusters, { canMark: (x) => x.agentSlug === "alpha" });
+    expect(kept.map((x) => x.id)).toEqual(["a1"]);
+  });
 });
 
 describe("buildDedupePrompt", () => {
@@ -108,5 +126,59 @@ describe("buildDedupePrompt", () => {
       findings: [makeFinding("aaa"), makeFinding("bbb")],
     });
     expect(prompt).not.toContain("## The source file");
+  });
+
+  it("ranks candidates without a verdict, using confidence only as a tiebreak", () => {
+    const prompt = buildDedupePrompt({
+      filePath: "src/db.ts",
+      findings: [makeFinding("aaa"), makeFinding("bbb")],
+    });
+    expect(prompt).not.toContain("verdict:");
+    expect(prompt).toContain("Confidence");
+  });
+});
+
+describe("buildDedupePrompt primary ranking", () => {
+  it("shows each finding's impact", () => {
+    const out = buildDedupePrompt({
+      filePath: "src/login.ts",
+      findings: [makeFinding("id1", { impact: "Attacker dumps the users table." })],
+    });
+    expect(out).toContain("**Impact:** Attacker dumps the users table.");
+  });
+
+  it("ranks the root-cause class first and the claimed impact second", () => {
+    const out = buildDedupePrompt({ filePath: "src/login.ts", findings: [makeFinding("id2")] });
+    const cls = out.indexOf("the vulnerability class that names the root");
+    const impact = out.indexOf("the most severe impact claimed");
+    const sink = out.indexOf("the most exact location");
+    expect(cls).toBeGreaterThan(-1);
+    expect(impact).toBeGreaterThan(cls);
+    expect(sink).toBeGreaterThan(impact);
+  });
+});
+
+describe("dedupeCandidates", () => {
+  it("drops findings that already carry a marker", () => {
+    const list = [
+      makeFinding("solo"),
+      makeFinding("d1", { dedup: { duplicateOf: "elsewhere", reasoning: "same" } }),
+    ];
+    expect(dedupeCandidates(list).map((x) => x.id)).toEqual(["solo"]);
+  });
+
+  it("drops a finding another one already points at", () => {
+    // p1 is somebody's primary; comparing it again could chain d1 → p1 → n1.
+    const list = [
+      makeFinding("p1"),
+      makeFinding("d1", { dedup: { duplicateOf: "p1", reasoning: "same" } }),
+      makeFinding("n1"),
+    ];
+    expect(dedupeCandidates(list).map((x) => x.id)).toEqual(["n1"]);
+  });
+
+  it("keeps every finding when nothing is deduped yet", () => {
+    const list = [makeFinding("a"), makeFinding("b")];
+    expect(dedupeCandidates(list).map((x) => x.id)).toEqual(["a", "b"]);
   });
 });

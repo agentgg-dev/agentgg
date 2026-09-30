@@ -9,6 +9,7 @@ import {
   listRuns,
   readFileRecord,
   saveUserConfig,
+  updateRunStage,
   upsertScanMeta,
   writeFileRecord,
   writeRunMeta,
@@ -201,6 +202,35 @@ describe("runStatus", () => {
     expect(out.recentRuns).toHaveLength(1);
     expect(out.recentRuns[0].runId).toBe(run.runId);
   });
+
+  it("--json carries the same stage, progress and duplicate count as the text output", async () => {
+    upsertScanMeta(outputDir, projectRoot);
+    const primary = makeFinding({ id: "primary-1" });
+    const duplicate = makeFinding({
+      id: "dupe-1",
+      dedup: { duplicateOf: "primary-1", reasoning: "same sink" },
+    });
+    writeFileRecord(outputDir, makeRecord("a.ts", [primary, duplicate]));
+    const run = createRunMeta({ type: "scan" });
+    writeRunMeta(outputDir, run);
+    updateRunStage(outputDir, run.runId, "validate", { done: 3, total: 7 });
+    const logs: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...args) => {
+      logs.push(args.join(" "));
+    });
+
+    await runStatus(outputDir, { json: true });
+    const out = JSON.parse(logs[0]);
+    expect(out.findings.duplicates).toBe(1);
+    expect(out.recentRuns[0].stage).toBe("validate");
+    expect(out.recentRuns[0].progress).toEqual({ done: 3, total: 7 });
+
+    logs.length = 0;
+    await runStatus(outputDir, {});
+    const text = logs.join("\n");
+    expect(text).toContain("duplicates: 1");
+    expect(text).toContain("Stage: validate (3/7)");
+  });
 });
 
 // ---------- revalidate ----------
@@ -362,5 +392,37 @@ describe("runRevalidate", () => {
     // …but the verdict landed on disk.
     const reloaded = readFileRecord(outputDir, "sql-injection", "server.js");
     expect(reloaded?.findings[0].validation?.verdict).toBe("false-positive");
+  });
+  it("moves a group to a lead in another shard when the primary's claim fails", async () => {
+    saveAnthropicConfig();
+    upsertScanMeta(outputDir, projectRoot);
+    writeFile("server.js", "const x = 1;");
+    const primary = makeFinding({ id: "primary-1", agentSlug: "alpha" });
+    const duplicate = makeFinding({
+      id: "dupe-1",
+      agentSlug: "beta",
+      dedup: { duplicateOf: "primary-1", reasoning: "same sink" },
+    });
+    writeFileRecord(outputDir, makeRecord("server.js", [primary]));
+    writeFileRecord(outputDir, makeRecord("server.js", [duplicate]));
+    detectorMock.validateFinding.mockImplementation(async () => ({
+      verdict: "confirmed",
+      reasoning: "reachable",
+      leadId: "dupe-1",
+      primaryClaimHolds: false,
+    }));
+    vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await runRevalidate(outputDir, { concurrency: 1, summary: false }, env);
+
+    expect(detectorMock.validateFinding).toHaveBeenCalledTimes(1);
+
+    const heir = readFileRecord(outputDir, "beta", "server.js")?.findings[0];
+    expect(heir?.validation?.verdict).toBe("confirmed");
+    expect(heir?.dedup).toBeUndefined();
+
+    const demoted = readFileRecord(outputDir, "alpha", "server.js")?.findings[0];
+    expect(demoted?.validation).toBeUndefined();
+    expect(demoted?.dedup?.duplicateOf).toBe("dupe-1");
   });
 });

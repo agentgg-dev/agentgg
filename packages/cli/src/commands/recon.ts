@@ -174,7 +174,7 @@ export async function runReconCommand(
           ? resolveTemplates(defaultDirs, catalog.agents, officialAgentsDir)
           : catalog.agents;
     if (selectedAgents.length === 0) {
-      throw new Error("No agents selected — nothing to plan.");
+      throw new Error("No agents selected, nothing to plan.");
     }
 
     const project = fingerprint(root);
@@ -240,7 +240,7 @@ export async function runReconCommand(
     console.log("");
 
     // -------- PHASE 1 — recon --------
-    console.log("[1/2] Recon — surveying the project…");
+    console.log("[1/2] Recon: surveying the project...");
     const recon = await runRecon({
       rootDir: root,
       outDir,
@@ -266,7 +266,7 @@ export async function runReconCommand(
     }
 
     // -------- PHASE 2 — precondition plan --------
-    console.log("\n[2/2] Preconditions — deciding which agents would run…");
+    console.log("\n[2/2] Preconditions: deciding which agents would run...");
     const selection = await selectAgents(selectedAgents, {
       rootDir: root,
       walkCfg,
@@ -351,11 +351,11 @@ export function registerReconCommand(program: Command): void {
     )
     .option(
       "--api-key <key>",
-      "One-shot API key (not persisted). Valid for: anthropic, openai. For Anthropic, also accepts an sk-ant-oat… OAuth token.",
+      "One-shot API key (not persisted). Valid for: anthropic, openai. For Anthropic, also accepts an sk-ant-oat... OAuth token.",
     )
     .option(
       "--oauth-token <token>",
-      "One-shot Anthropic OAuth token (sk-ant-oat…). Not persisted. Anthropic only.",
+      "One-shot Anthropic OAuth token (sk-ant-oat...). Not persisted. Anthropic only.",
     )
     .option("--base-url <url>", "One-shot Ollama base URL (not persisted). Ollama only.")
     .option("--region <name>", REGION_FLAG_HELP)

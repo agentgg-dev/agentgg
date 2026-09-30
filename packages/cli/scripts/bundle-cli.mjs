@@ -15,7 +15,7 @@
  * hook in cli/package.json.
  */
 
-import { chmodSync, cpSync, readFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -85,6 +85,28 @@ try {
   log(`Copied default scope → ${scopeDest}`);
 } catch (err) {
   log(`WARNING: failed to copy default scope: ${err.message}`);
+}
+
+// The live-validation sandbox image is built from these at runtime, resolved
+// relative to the bundle via import.meta.url — same explicit-copy reason as above.
+// Fatal (unlike the copies above): a missing Dockerfile only surfaces when a
+// user's first live-validation run tries `docker build` against it.
+const validationSrc = resolve(cliRoot, "src", "validation");
+const validationDest = resolve(cliRoot, "dist", "validation");
+try {
+  mkdirSync(validationDest, { recursive: true });
+  for (const name of [
+    "sandbox.Dockerfile",
+    "url-banner.js",
+    "sandbox-control.mjs",
+    "sandbox-entry.sh",
+  ]) {
+    cpSync(resolve(validationSrc, name), resolve(validationDest, name));
+  }
+  log(`Copied sandbox build inputs → ${validationDest}`);
+} catch (err) {
+  log(`ERROR: failed to copy sandbox build inputs: ${err.message}`);
+  throw err;
 }
 
 // chmod +x is a no-op on Windows but matters on macOS/Linux installs.

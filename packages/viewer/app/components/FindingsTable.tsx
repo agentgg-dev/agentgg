@@ -1,6 +1,8 @@
 "use client";
 
 import type { Finding, Severity } from "@agentgg/core";
+import { type LiveStateKind, liveState } from "@agentgg/core/live";
+import { effectiveVerdict } from "@agentgg/core/verdict";
 import { ChevronRight, Search } from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
@@ -24,6 +26,9 @@ type SeverityFilter = "all" | Severity | "unscored";
 // confirmed AND a duplicate), so it gets its own axis: show both, only the
 // duplicates, or only the uniques (primaries + never-duplicated findings).
 type DedupFilter = "all" | "duplicate" | "unique";
+// The live result is its own axis too: a reviewer often wants "show me what a
+// browser actually reproduced", which no verdict filter answers.
+type LiveFilter = "all" | LiveStateKind;
 
 const SEVERITY_RANK: Record<string, number> = {
   CRITICAL: 5,
@@ -41,6 +46,7 @@ export default function FindingsTable({ findings, agents }: Props) {
   const [verdict, setVerdict] = useState<VerdictFilter>("confirmed");
   const [severity, setSeverity] = useState<SeverityFilter>("all");
   const [dedup, setDedup] = useState<DedupFilter>("unique");
+  const [liveFilter, setLiveFilter] = useState<LiveFilter>("all");
   const [query, setQuery] = useState("");
 
   const filtered = useMemo(() => {
@@ -50,9 +56,10 @@ export default function FindingsTable({ findings, agents }: Props) {
       .filter(({ f }) => {
         if (agent !== "all" && f.agentSlug !== agent) return false;
         if (verdict !== "all") {
-          const v = f.validation?.verdict ?? "pending";
+          const v = effectiveVerdict(f) ?? "pending";
           if (v !== verdict) return false;
         }
+        if (liveFilter !== "all" && liveState(f).kind !== liveFilter) return false;
         if (dedup === "duplicate" && !f.dedup) return false;
         if (dedup === "unique" && f.dedup) return false;
         if (severity !== "all") {
@@ -74,9 +81,10 @@ export default function FindingsTable({ findings, agents }: Props) {
     });
 
     return result.map((x) => x.f);
-  }, [findings, agent, verdict, severity, dedup, query]);
+  }, [findings, agent, verdict, severity, dedup, liveFilter, query]);
 
   const anyDuplicates = useMemo(() => findings.some((f) => f.dedup), [findings]);
+  const anyLive = useMemo(() => findings.some((f) => f.live), [findings]);
 
   return (
     <div className="rounded-xl border border-bg-border bg-bg-panel/30 overflow-hidden">
@@ -124,6 +132,21 @@ export default function FindingsTable({ findings, agents }: Props) {
             { value: "pending", label: "Pending" },
           ]}
         />
+        {anyLive && (
+          <Selector
+            value={liveFilter}
+            onChange={(v) => setLiveFilter(v as LiveFilter)}
+            options={[
+              { value: "all", label: "Any live result" },
+              { value: "reproduced", label: "Reproduced live" },
+              { value: "refuted", label: "Refuted live" },
+              { value: "inconclusive", label: "Inconclusive" },
+              { value: "timed-out", label: "Timed out" },
+              { value: "error", label: "Run failed" },
+              { value: "not-run", label: "Not tested live" },
+            ]}
+          />
+        )}
         {anyDuplicates && (
           <Selector
             value={dedup}
@@ -150,7 +173,7 @@ export default function FindingsTable({ findings, agents }: Props) {
             >
               <div className="flex flex-col items-center gap-2 pt-1 min-w-[88px]">
                 <SeverityBadge severity={f.severity} />
-                <VerdictBadge verdict={f.validation?.verdict} />
+                <VerdictBadge verdict={effectiveVerdict(f)} />
                 <DuplicateBadge dedup={f.dedup} />
               </div>
 

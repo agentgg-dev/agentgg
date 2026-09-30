@@ -1,8 +1,11 @@
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { type FileHandle, open, readdir, readFile } from "node:fs/promises";
-import { join, relative, resolve } from "node:path";
-import type { CvssScore, Finding, ReconReport } from "@agentgg/core";
+import { basename, join, relative, resolve } from "node:path";
+import type { CvssScore, Finding, LiveResult, ReconReport } from "@agentgg/core";
 import {
   type CoreMessage,
+  experimental_createMCPClient,
   generateObject,
   generateText,
   type LanguageModelV1,
@@ -21,19 +24,24 @@ import {
   buildCreateAgentPrompt,
   buildExcludePrompt,
   buildPreconditionPrompt,
+  buildProofScriptPrompt,
   buildReconPrompt,
+  buildReproducePrompt,
   type CreateAgentArgs,
   DetectionResult,
   type DetectionResult as DetectionResultType,
   type Detector,
   findUnverifiedExcerpts,
+  GeneratedProofScript,
   hydrateFinding,
   languageFromPath,
   normalizeCode,
   PreconditionCheck,
   type PreconditionCheckArgs,
+  REPRODUCE_CUT_SHORT,
   type ReconArgs,
   ReconResult,
+  ReproduceFindingResult,
   type RunAgentArgs,
   repairFindingExcerpts,
   repairFindingPath,
@@ -45,6 +53,7 @@ import { ExpectedDetectorError, isInFlightCreditError } from "../diagnostics.js"
 import { logError, logInfo, logWarn } from "../log.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import type { CallUsage, UsageMeter } from "../usage-meter.js";
+import type { TargetAuth } from "../validation/target-auth.js";
 import {
   asValidationField,
   buildScopeValidatePrompt,
@@ -330,6 +339,9 @@ export interface VercelAgentDetectorOpts {
    *  from the `--validate-max-turns` CLI flag (same knob the claude detector
    *  uses); defaults to 50 when unset. */
   validateMaxTurns?: number;
+  /** Turn cap for one live-validation reproduce session. Higher than
+   *  validation's: driving a browser costs a turn per click. */
+  reproduceMaxTurns?: number;
   /** Model used to re-shape malformed final JSON from a tool-loop into the
    *  target schema (via strict `generateObject`). Defaults to the primary model
    *  when unset, so every provider recovers from a weak model's schema slip
@@ -394,7 +406,7 @@ const TOOL_OUTPUT_BUDGET_BYTES = 400_000;
 
 /** Which pass owns this tool loop. Selects the artifact the model is told to
  *  emit when the budget runs out, and when a call repeats. See ARTIFACT. */
-export type ToolLoopPhase = "detect" | "validate" | "recon" | "create-agent";
+export type ToolLoopPhase = "detect" | "validate" | "recon" | "create-agent" | "reproduce";
 
 /**
  * What each phase must output, worded to match that phase's own `## Output
@@ -410,6 +422,7 @@ const ARTIFACT: Record<ToolLoopPhase, string> = {
   validate: "verdict JSON",
   recon: "brief JSON",
   "create-agent": "agent spec JSON",
+  reproduce: "reproduction result JSON",
 };
 
 /** Env suffix per phase for the budget override below. */
@@ -418,6 +431,7 @@ const BUDGET_ENV_SUFFIX: Record<ToolLoopPhase, string> = {
   validate: "VALIDATE",
   recon: "RECON",
   "create-agent": "CREATE_AGENT",
+  reproduce: "REPRODUCE",
 };
 
 /**
@@ -624,6 +638,7 @@ export class VercelAgentDetector implements Detector {
   private readonly thinking?: Thinking;
   private readonly verbose: boolean;
   private readonly validateMaxTurns: number;
+  private readonly reproduceMaxTurns: number;
   /** Object-generation mode for `generateObject`. Bedrock's SDK only supports
    *  tool-mode; every other provider we drive supports json mode. */
   private readonly objectMode: "json" | "tool";
@@ -646,6 +661,7 @@ export class VercelAgentDetector implements Detector {
     this.thinking = opts.thinking;
     this.verbose = opts.verbose ?? false;
     this.validateMaxTurns = opts.validateMaxTurns ?? 50;
+    this.reproduceMaxTurns = opts.reproduceMaxTurns ?? 50;
     this.costSource = opts.costSource;
   }
 
@@ -1183,6 +1199,8 @@ export class VercelAgentDetector implements Detector {
     maxFileSizeKb?: number;
     /** The reporting agent's own validation rules; replaces the defaults. */
     validationPrompt?: string;
+    /** The group's duplicates; the verdict then covers the whole group. */
+    members?: Finding[];
     signal?: AbortSignal;
   }) {
     try {
@@ -1306,6 +1324,139 @@ export class VercelAgentDetector implements Detector {
     }
   }
 
+  async generateReproScript(args: {
+    finding: Finding;
+    baseUrl: string;
+    auth?: TargetAuth;
+    context?: string;
+    proofRule?: string;
+    staticVerdict?: string;
+    staticReasoning?: string;
+    signal?: AbortSignal;
+  }): Promise<string> {
+    const staticReview =
+      args.staticVerdict != null && args.staticReasoning != null
+        ? { verdict: args.staticVerdict, reasoning: args.staticReasoning }
+        : undefined;
+    const { object } = await this.metered(
+      () =>
+        generateObject({
+          model: this.model,
+          schema: GeneratedProofScript,
+          mode: this.objectMode,
+          prompt: buildProofScriptPrompt(
+            args.finding,
+            args.baseUrl,
+            args.auth,
+            args.context,
+            args.proofRule,
+            staticReview,
+          ),
+          providerOptions: this.providerOptionsArg(),
+          abortSignal: args.signal,
+        }),
+      { label: `proof-script:${args.finding.id}`, signal: args.signal },
+    );
+    return object.script;
+  }
+
+  async reproduceFinding(args: {
+    finding: Finding;
+    baseUrl: string;
+    auth?: TargetAuth;
+    browserEndpoint: string;
+    context?: string;
+    maxTurns?: number;
+    staticVerdict?: string;
+    staticReasoning?: string;
+    staticConfirmedImpact?: string;
+    proofRule?: string;
+    signal?: AbortSignal;
+  }): Promise<{
+    result: LiveResult;
+    reasoning: string;
+    counterevidence: string;
+    negativeControl?: string;
+    refused?: boolean;
+    script?: string;
+  }> {
+    const label = sessionLabel(`reproduce:${args.finding.id}`);
+    const staticReview =
+      args.staticVerdict != null && args.staticReasoning != null
+        ? {
+            verdict: args.staticVerdict,
+            reasoning: args.staticReasoning,
+            ...(args.staticConfirmedImpact ? { confirmedImpact: args.staticConfirmedImpact } : {}),
+          }
+        : undefined;
+    const prompt = `${buildReproducePrompt(
+      args.finding,
+      args.baseUrl,
+      args.auth,
+      args.context,
+      staticReview,
+      args.proofRule,
+    )}\n\n${reproduceJsonInstruction()}`;
+    // Tools come only from the sandbox's Playwright MCP server: no Read/Glob/
+    // Grep, so the session works against the live target and nothing else.
+    let client: Awaited<ReturnType<typeof experimental_createMCPClient>> | undefined;
+    try {
+      client = await experimental_createMCPClient({
+        transport: { type: "sse", url: args.browserEndpoint },
+      });
+      const mcpTools = await client.tools();
+      // The Claude path gets an MCP status line from its SDK; this is the
+      // equivalent signal that the browser tools actually attached.
+      console.log(`  live validation: MCP playwright: ${Object.keys(mcpTools).length} tool(s)`);
+      const maxTurns = args.maxTurns ?? this.reproduceMaxTurns;
+      const stop = hardStop(label, maxTurns + 1);
+      const tools = guardMcpTools(
+        mcpTools,
+        repeatGuard({ label, phase: "reproduce", onStall: stop.onStall }),
+      );
+      const gen = await this.metered(
+        () =>
+          generateText({
+            model: this.model,
+            prompt,
+            tools,
+            maxSteps: maxTurns + 1,
+            experimental_prepareStep: stop.prepareStep,
+            experimental_repairToolCall: this.toolCallRepair(label),
+            providerOptions: this.providerOptionsArg(),
+            abortSignal: args.signal,
+          }),
+        { label, signal: args.signal },
+      );
+      warnIfTurnCapped(label, gen, maxTurns);
+      let answer = gen.text;
+      if (!answer.trim()) {
+        logUnparseableGeneration(label, gen);
+        answer = await this.answerWithoutTools(
+          label,
+          prompt,
+          gen,
+          "reproduce",
+          ReproduceFindingResult,
+          (o) => `result ${o.result}`,
+          args.signal,
+        );
+      }
+      return await this.parseReproduce(answer, args.finding.id, args.signal);
+    } catch (err) {
+      debugLog("VercelAgentDetector.reproduceFinding", err);
+      throw err;
+    } finally {
+      // The caller disposes the sandbox either way; closing here releases the
+      // SSE stream between findings.
+      try {
+        await client?.close();
+      } catch {
+        // already gone
+      }
+    }
+  }
+
   async scoreFinding(args: {
     finding: Finding;
     fileContent: string;
@@ -1410,6 +1561,10 @@ export class VercelAgentDetector implements Detector {
   ): Promise<{
     verdict: "confirmed" | "false-positive" | "out-of-scope" | "uncertain";
     reasoning: string;
+    confirmedImpact?: string;
+    unconfirmedImpact?: string;
+    leadId?: string;
+    primaryClaimHolds?: boolean;
     refused?: boolean;
   }> {
     // Nothing to parse and nothing to reformat. The reformat prompt below
@@ -1472,6 +1627,66 @@ export class VercelAgentDetector implements Detector {
           verdict: salvaged,
           reasoning: "Recovered from an unparseable model response; the reasoning text was lost.",
         };
+      }
+    }
+  }
+
+  private async parseReproduce(
+    text: string,
+    findingId: string,
+    signal?: AbortSignal,
+  ): Promise<{
+    result: LiveResult;
+    reasoning: string;
+    counterevidence: string;
+    negativeControl?: string;
+    refused?: boolean;
+    script?: string;
+  }> {
+    // Same guard as parseValidation: the reformat prompt carries only this
+    // text, so an empty answer would be reformatted into an invented result.
+    if (!text.trim()) {
+      logWarn(
+        `[reproduce:${findingId}] the reproduce loop stopped before it reported a verdict; recording inconclusive`,
+      );
+      return { result: "inconclusive", reasoning: REPRODUCE_CUT_SHORT, counterevidence: "" };
+    }
+    try {
+      return asReproduceField(ReproduceFindingResult.parse(extractJSON(text)));
+    } catch (extractErr) {
+      if (looksLikeRefusal(text)) {
+        logWarn(
+          `[reproduce:${findingId}] model refused to reproduce; recording inconclusive+refused`,
+        );
+        return {
+          result: "inconclusive",
+          reasoning: "Model declined to reproduce this finding (refusal).",
+          counterevidence: "",
+          refused: true,
+        };
+      }
+      if (!this.structuredModel) throw extractErr;
+      try {
+        const reformat = await generateObject({
+          model: this.structuredModel,
+          schema: ReproduceFindingResult,
+          mode: this.objectMode,
+          prompt: `The following is a completed live reproduction attempt against a running application. Extract the verdict into structured JSON.\n\n${forReformat(text)}\n\n${reproduceJsonInstruction()}`,
+          abortSignal: signal,
+        });
+        this.meter?.record(extractCallUsage(reformat), this.structuredModel.modelId);
+        logGenerationIds(`reproduce:${findingId}:reformat`, reformat);
+        return asReproduceField(reformat.object);
+      } catch (reformatErr) {
+        if (signal?.aborted) throw reformatErr;
+        this.meter?.record(extractCallUsage(reformatErr), this.structuredModel.modelId);
+        logFailedCallIds(`reproduce:${findingId}:reformat`, reformatErr, signal);
+        const recovered = recoverFromError(ReproduceFindingResult, reformatErr);
+        if (recovered) {
+          logWarn(`[reproduce:${findingId}] reformat failed; recovered the verdict from its text`);
+          return asReproduceField(recovered);
+        }
+        throw reformatErr;
       }
     }
   }
@@ -1640,6 +1855,118 @@ interface ToolLoopOpts {
   onStall?: () => void;
 }
 
+/** Field separator inside a tool-call signature. A NUL cannot appear in a path,
+ *  a pattern, or a glob, so `Grep "a b"` cannot collide with `Grep "a"` scoped to
+ *  `b`. Never printed raw: a NUL byte makes grep treat a whole log as binary and
+ *  refuse to match it, so the warn below swaps it for a space. */
+export const SIG_SEP = "\u0000";
+
+/**
+ * Repeated identical tool calls are the signature of a stalled loop: the model
+ * re-issues the same call, gets the same bytes back, and never advances. A
+ * validator can run the same Grep dozens of times, spend its whole turn budget,
+ * and answer with nothing.
+ *
+ * A repeat re-executes nothing, so the loop becomes cheap; the warn makes it
+ * visible; and a stalled repeat feeds `hardStop`, which ends it.
+ */
+export function repeatGuard(opts: { label: string; phase: ToolLoopPhase; onStall?: () => void }) {
+  const { label, phase } = opts;
+  const callCounts = new Map<string, number>();
+  // Every repeat in this loop, across all signatures. A model that cycles
+  // A,B,A,B stalls just as hard as one that repeats A, but no single
+  // signature climbs fast enough to show it.
+  let totalRepeats = 0;
+  return {
+    repeated(
+      toolName: string,
+      signature: string,
+      notice?: (stalled: boolean) => string,
+    ): string | null {
+      const n = (callCounts.get(signature) ?? 0) + 1;
+      callCounts.set(signature, n);
+      if (n === 1) return null;
+      totalRepeats++;
+      // One repeat early in a long session is a slip, not a stall, and telling
+      // that model to finalize invites the empty answer this guard exists to
+      // prevent. Only escalate once the loop looks genuinely stuck.
+      const stalled = n >= REPEAT_STALL_PER_CALL || totalRepeats >= REPEAT_STALL_TOTAL;
+      if (stalled) opts.onStall?.();
+      // The signature keys on a NUL separator so a pattern containing a space
+      // cannot collide with a scoped search. Never print it raw: a NUL byte makes
+      // grep treat the whole log as binary and refuse to match it.
+      logWarn(
+        `[${label}] repeated ${toolName} call #${n}: ${signature.split(SIG_SEP).join(" ").slice(0, 120)}` +
+          (stalled ? " (stalled; telling it to finalize)" : ""),
+      );
+      return notice ? notice(stalled) : repeatNotice(toolName, phase, stalled);
+    },
+    /** Record a signature the loop has already answered once, with no warn. */
+    seed(signature: string): void {
+      if (!callCounts.has(signature)) callCounts.set(signature, 1);
+    },
+  };
+}
+
+/**
+ * The browser tools come from the sandbox's MCP server, not from `buildTools`,
+ * so nothing counts their repeats: a model that re-issues one wait call spends
+ * its whole turn budget unseen.
+ *
+ * The file guard keys on the call alone, because a repeated Read of an
+ * unchanged repository returns the same bytes by definition. A browser does
+ * not work that way: `/` before a login and `/` after it are two different
+ * pages, and reading the second as a repeat ends a session that was making
+ * progress. So the call always runs, and only an UNCHANGED result counts.
+ * Running it costs no model turn.
+ */
+export function guardMcpTools<T extends Record<string, { execute?: unknown }>>(
+  tools: T,
+  guard: Pick<ReturnType<typeof repeatGuard>, "repeated" | "seed">,
+): T {
+  const lastResult = new Map<string, string>();
+  const out: Record<string, unknown> = {};
+  for (const [name, tool] of Object.entries(tools)) {
+    const run = tool.execute as ((args: unknown, ctx: unknown) => unknown) | undefined;
+    out[name] =
+      typeof run === "function"
+        ? {
+            ...tool,
+            execute: async (args: unknown, ctx: unknown) => {
+              const signature = `${name}${SIG_SEP}${stableArgs(args)}`;
+              const result = await run(args, ctx);
+              const shape = fingerprint(result);
+              if (lastResult.get(signature) === shape) {
+                // Seeded on the first call, so this counts as call #2 and the
+                // thresholds match the file tools.
+                const dup = guard.repeated(name, signature);
+                if (dup) return dup;
+              }
+              lastResult.set(signature, shape);
+              guard.seed(signature);
+              return result;
+            },
+          }
+        : tool;
+  }
+  return out as T;
+}
+
+/** Stand-in for a tool result, small enough to keep for a whole session. */
+function fingerprint(result: unknown): string {
+  const text = typeof result === "string" ? result : (JSON.stringify(result) ?? "");
+  return createHash("sha1").update(text).digest("hex");
+}
+
+/** Argument key for a signature: same arguments in any key order, one key. */
+function stableArgs(args: unknown): string {
+  if (args === null || typeof args !== "object") return JSON.stringify(args) ?? "";
+  const entries = Object.entries(args as Record<string, unknown>).sort(([a], [b]) =>
+    a < b ? -1 : a > b ? 1 : 0,
+  );
+  return JSON.stringify(entries);
+}
+
 export function buildTools(opts: ToolLoopOpts) {
   const { cwd, maxFileSizeKb, verbose, label, phase } = opts;
   const exclude = opts.exclude ?? [];
@@ -1686,50 +2013,10 @@ export function buildTools(opts: ToolLoopOpts) {
     return out;
   };
 
-  // Repeated identical tool calls are the signature of a stalled loop: the
-  // model re-issues the same search, gets the same bytes back, and never
-  // advances. A validator can run the same Grep dozens of times, spend its
-  // whole turn budget, and answer with nothing.
-  // A repeat re-executes nothing and is not charged to the byte
-  // budget, so the loop becomes cheap; the warn makes it visible.
-  //
   // Keyed on what actually EXECUTES rather than the raw arguments: Grep's
   // `path` is an alias for `glob` and both resolve to one scope, so two
   // spellings of the same search collapse to a single signature.
-  /** Field separator inside a tool-call signature. A NUL cannot appear in a path,
-   *  a pattern, or a glob, so `Grep "a b"` cannot collide with `Grep "a"` scoped to
-   *  `b`. Never printed raw: a NUL byte makes grep treat a whole log as binary and
-   *  refuse to match it, so the warn below swaps it for a space. */
-  const SIG_SEP = "\u0000";
-
-  const callCounts = new Map<string, number>();
-  // Every repeat in this loop, across all signatures. A model that cycles
-  // A,B,A,B stalls just as hard as one that repeats A, but no single
-  // signature climbs fast enough to show it.
-  let totalRepeats = 0;
-  const repeated = (
-    toolName: string,
-    signature: string,
-    notice?: (stalled: boolean) => string,
-  ): string | null => {
-    const n = (callCounts.get(signature) ?? 0) + 1;
-    callCounts.set(signature, n);
-    if (n === 1) return null;
-    totalRepeats++;
-    // One repeat early in a long session is a slip, not a stall, and telling
-    // that model to finalize invites the empty answer this guard exists to
-    // prevent. Only escalate once the loop looks genuinely stuck.
-    const stalled = n >= REPEAT_STALL_PER_CALL || totalRepeats >= REPEAT_STALL_TOTAL;
-    if (stalled) opts.onStall?.();
-    // The signature keys on a NUL separator so a pattern containing a space
-    // cannot collide with a scoped search. Never print it raw: a NUL byte makes
-    // grep treat the whole log as binary and refuse to match it.
-    logWarn(
-      `[${label}] repeated ${toolName} call #${n}: ${signature.split(SIG_SEP).join(" ").slice(0, 120)}` +
-        (stalled ? " (stalled; telling it to finalize)" : ""),
-    );
-    return notice ? notice(stalled) : repeatNotice(toolName, phase, stalled);
-  };
+  const { repeated, seed } = repeatGuard({ label, phase, onStall: opts.onStall });
 
   // Which lines of which file this loop already returned. The signature guard
   // above cannot see a re-read: every window is a distinct `(path, offset,
@@ -1749,10 +2036,10 @@ export function buildTools(opts: ToolLoopOpts) {
         "Read the contents of a file. Path must be relative to the repository root. " +
         "A large file comes back one part at a time; the note at the end gives the offset of the next part.",
       parameters: ReadParameters,
-      execute: async ({ path, offset, limit }) => {
+      execute: async ({ path: requestedPath, offset, limit }) => {
         const started = Date.now();
         const shown = [
-          path,
+          requestedPath,
           offset != null && `offset=${offset}`,
           limit != null && `limit=${limit}`,
         ]
@@ -1760,6 +2047,7 @@ export function buildTools(opts: ToolLoopOpts) {
           .join(" ");
         const emit = (out: string) => logCall("Read", shown, started, out);
         if (budgetExhausted()) return emit(budgetNotice(phase, budgetBytes));
+        const path = resolveReadPath(requestedPath, cwd);
         const start = Math.max(1, offset ?? 1);
         const lineLimit = limit ?? null;
         // Signed on the range too, so the next part of a file is not a repeat.
@@ -1791,7 +2079,7 @@ export function buildTools(opts: ToolLoopOpts) {
           coverage.add(path, got.range[0], got.range[1], got.total);
           // This read is occurrence #1 for the path, so the first covered
           // re-read counts as a repeat rather than as a fresh call.
-          if (!callCounts.has(coveredSig(path))) callCounts.set(coveredSig(path), 1);
+          seed(coveredSig(path));
         }
         return emit(account(got.text));
       },
@@ -2092,6 +2380,18 @@ function countLines(content: string): number {
   return lines.length;
 }
 
+/** Models prefix the repository's own folder name onto a path that is already
+ *  relative to the root (`myrepo/src/a.ts` when the root IS `myrepo`). Drop
+ *  that segment, but only when it points at nothing and the shorter path does:
+ *  a repository that really holds a folder of its own name keeps working. */
+function resolveReadPath(path: string, cwd: string): string {
+  const segments = path.split(/[\\/]/);
+  if (segments.length < 2 || segments[0] !== basename(resolve(cwd))) return path;
+  if (existsSync(resolve(cwd, path))) return path;
+  const stripped = segments.slice(1).join("/");
+  return existsSync(resolve(cwd, stripped)) ? stripped : path;
+}
+
 async function readToolExecute(
   path: string,
   cwd: string,
@@ -2124,7 +2424,14 @@ async function readToolExecute(
     }
     return readPage(content, start, limit);
   } catch (err) {
-    return failedRead(`Error reading file: ${(err as Error).message}`);
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      return failedRead(`Error reading file: ${(err as Error).message}`);
+    }
+    // The raw ENOENT names an absolute host path the model cannot use; this
+    // says what a usable path looks like instead.
+    return failedRead(
+      `Error: No such file: ${path}. Paths are relative to the repository root, e.g. src/server.ts.`,
+    );
   }
 }
 
@@ -2410,9 +2717,39 @@ function validationJsonInstruction(): string {
 
 After tracing the finding across the code, output your verdict as a single JSON object matching EXACTLY this shape — no prose, no markdown fences, no trailing text:
 
-{"verdict":"confirmed","reasoning":"Short reasoning citing a specific code element.","confidence":0.9}
+{"verdict":"confirmed","reasoning":"Short reasoning citing a specific code element.","confidence":0.9,"confirmedImpact":"The impact you confirmed.","leadId":"id-of-the-report-you-confirmed","primaryClaimHolds":true}
 
-\`verdict\` MUST be one of "confirmed", "false-positive", "out-of-scope", or "uncertain". \`confidence\` is a decimal 0.0–1.0 (not a percentage).`;
+\`verdict\` MUST be one of "confirmed", "false-positive", "out-of-scope", or "uncertain". \`confidence\` is a decimal 0.0–1.0 (not a percentage). \`confirmedImpact\`, \`unconfirmedImpact\`, \`leadId\` and \`primaryClaimHolds\` are optional: omit a field that does not apply.`;
+}
+
+function reproduceJsonInstruction(): string {
+  return `## Output format
+
+After you finish in the browser, output your result as a single JSON object matching EXACTLY this shape - no prose, no markdown fences, no trailing text:
+
+{"result":"reproduced","reasoning":"What you did in the browser and what you observed.","counterevidence":"The strongest case against this result.","negativeControl":"The same request without the session cookie returned 401.","script":"import { test, expect } from '@playwright/test';\\n\\ntest('repro', async ({ page }) => {\\n  await page.goto('/');\\n});\\n"}
+
+\`result\` MUST be "reproduced", "refuted", or "inconclusive". \`counterevidence\` is required on every result: the strongest case against your own result. \`negativeControl\` is what happened when you ran the same steps without your input, or without the session; a "reproduced" without it is downgraded to "inconclusive". \`script\` is the full source of a self-contained Playwright test that replays every step, written as ONE JSON string with newlines escaped as \\n. Include \`script\` only when the result is "reproduced"; omit the field entirely otherwise.`;
+}
+
+/** Drop `script` unless the result is `reproduced`. The caller only runs a
+ *  script for a reproduction, and a script attached to any other result
+ *  would be replayed as if it proved something. */
+export function asReproduceField(o: ReproduceFindingResult): {
+  result: LiveResult;
+  reasoning: string;
+  counterevidence: string;
+  negativeControl?: string;
+  script?: string;
+} {
+  const base = {
+    result: o.result,
+    reasoning: o.reasoning,
+    counterevidence: o.counterevidence,
+    ...(o.negativeControl ? { negativeControl: o.negativeControl } : {}),
+  };
+  if (o.result !== "reproduced") return base;
+  return { ...base, ...(o.script ? { script: o.script } : {}) };
 }
 
 function jsonOutputInstruction(multiAgent: boolean): string {

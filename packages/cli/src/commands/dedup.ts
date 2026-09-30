@@ -11,10 +11,11 @@ import {
 } from "@agentgg/core";
 import type { Command } from "commander";
 import { runConcurrent } from "../concurrent.js";
-import { resolveDedup } from "../deduper.js";
+import { dedupeCandidates, resolveDedup } from "../deduper.js";
 import { handleDetectorError } from "../diagnostics.js";
 import { loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
 import { logError } from "../log.js";
+import { promote } from "../promote.js";
 import {
   buildCredentialsFromOpts,
   REGION_FLAG_HELP,
@@ -38,8 +39,9 @@ interface DedupOpts {
   force?: boolean;
   /**
    * Physically remove duplicate findings from their FileRecords instead of
-   * just marking them. Off by default — the safe default keeps every
-   * finding on disk and only adds the `dedup` marker.
+   * just marking them, once the promotion pass has run. Off by default —
+   * the safe default keeps every finding on disk and only adds the `dedup`
+   * marker.
    */
   deleteDuplicates?: boolean;
   verbose?: boolean;
@@ -53,14 +55,8 @@ interface DedupOpts {
   concurrency?: number;
 }
 
-/** A finding is disqualified (won't ship) when validation rejected it. */
-function isDisqualified(f: Finding): boolean {
-  const v = f.validation?.verdict;
-  return v === "false-positive" || v === "out-of-scope";
-}
-
 /**
- * De-duplication phase — the final gather pass over persisted findings.
+ * De-duplication phase over persisted findings.
  *
  * Findings are sharded on disk by `(agentSlug, filePath)`, so the same
  * source file's full finding set is the union of every agent's record for
@@ -71,12 +67,18 @@ function isDisqualified(f: Finding): boolean {
  * verdict — a `confirmed` finding can still be a duplicate.
  *
  * This cannot run distributed: it needs every finding for a file
- * co-located. Run it after scan/validate/score have all completed.
+ * co-located. It runs on whatever findings exist, independent of whether
+ * they've been validated yet.
  *
  * By default a duplicate is only MARKED (kept on disk); `--delete-
- * duplicates` strips it from its FileRecord instead. Files that already
- * carry dedup markers are skipped unless `--force` (which clears the old
- * markers and recomputes).
+ * duplicates` strips it from its FileRecord instead. A finding that
+ * already carries a dedup marker, or that another finding already points
+ * at, is excluded from the candidate set unless `--force` clears markers
+ * first.
+ *
+ * Findings reaching this command often already carry verdicts, so it ends
+ * with a promotion pass: a primary the validator rejected hands its place
+ * to the first duplicate a verdict kept.
  */
 export async function runDedup(
   outputArg: string,
@@ -114,11 +116,11 @@ export async function runDedup(
     return;
   }
 
-  // Index every finding by id → {finding, record}, and group the
-  // shippable findings by source filePath (unioning across agent shards).
+  // Index every finding by id → {finding, record}, then group the
+  // comparable ones by source filePath (unioning across agent shards).
   const index = new Map<string, { finding: Finding; record: FileRecord }>();
-  const byFile = new Map<string, Finding[]>();
   const dirtyRecords = new Set<FileRecord>();
+  const allFindings: Finding[] = [];
   for (const record of records) {
     for (const finding of record.findings) {
       index.set(finding.id, { finding, record });
@@ -127,31 +129,29 @@ export async function runDedup(
         finding.dedup = undefined;
         dirtyRecords.add(record);
       }
-      if (isDisqualified(finding)) continue;
-      const bucket = byFile.get(finding.filePath);
-      if (bucket) bucket.push(finding);
-      else byFile.set(finding.filePath, [finding]);
+      allFindings.push(finding);
     }
   }
+  const alreadyMarked = allFindings.filter((f) => f.dedup).length;
+  const byFile = new Map<string, Finding[]>();
+  for (const finding of dedupeCandidates(allFindings)) {
+    const bucket = byFile.get(finding.filePath);
+    if (bucket) bucket.push(finding);
+    else byFile.set(finding.filePath, [finding]);
+  }
 
-  // Candidate files: 2+ shippable findings. Without --force, skip files
-  // that already carry any dedup marker (already processed).
+  // Candidate files: 2+ findings not yet deduped.
   type Task = { filePath: string; findings: Finding[] };
   const tasks: Task[] = [];
-  let skippedAlready = 0;
   for (const [filePath, findings] of byFile) {
     if (findings.length < 2) continue;
-    if (!opts.force && findings.some((f) => f.dedup)) {
-      skippedAlready++;
-      continue;
-    }
     tasks.push({ filePath, findings });
   }
 
   if (tasks.length === 0) {
     console.log(
-      `Nothing to de-duplicate. ${byFile.size} file(s) with shippable findings; none have 2+ to compare${
-        skippedAlready > 0 ? ` (${skippedAlready} already de-duplicated)` : ""
+      `Nothing to de-duplicate. ${byFile.size} file(s) still to compare; none have 2 or more findings${
+        alreadyMarked > 0 ? ` (${alreadyMarked} finding(s) already de-duplicated)` : ""
       }.`,
     );
     console.log("  Pass --force to re-run de-duplication over already-processed files.");
@@ -161,7 +161,9 @@ export async function runDedup(
   console.log(`De-duplicating findings across ${tasks.length} file(s) in ${outputDir}`);
   console.log(`  Root:        ${rootPath}`);
   console.log(`  Provider:    ${detector.name}`);
-  if (skippedAlready > 0) console.log(`  Skipped:     ${skippedAlready} already de-duplicated`);
+  if (alreadyMarked > 0) {
+    console.log(`  Skipped:     ${alreadyMarked} finding(s) already de-duplicated`);
+  }
   if (opts.force) console.log(`  Force:       cleared prior markers, recomputing`);
   if (opts.deleteDuplicates) console.log(`  Mode:        deleting duplicates (not just marking)`);
   console.log("");
@@ -268,22 +270,17 @@ export async function runDedup(
       for (const a of assignments) {
         const entry = index.get(a.id);
         if (!entry) continue;
-        if (opts.deleteDuplicates) {
-          entry.record.findings = entry.record.findings.filter((f) => f.id !== a.id);
-        } else {
-          entry.finding.dedup = {
-            duplicateOf: a.duplicateOf,
-            reasoning: a.reasoning,
-            runId: runMeta.runId,
-          };
-        }
+        entry.finding.dedup = {
+          duplicateOf: a.duplicateOf,
+          reasoning: a.reasoning,
+          runId: runMeta.runId,
+        };
         dirtyRecords.add(entry.record);
         localDirtyRecords.add(entry.record);
         totalDuplicates++;
       }
       if (opts.verbose) {
-        const verb = opts.deleteDuplicates ? "deleted" : "marked";
-        console.log(`  ${filePath}: ${verb} ${assignments.length} duplicate(s)`);
+        console.log(`  ${filePath}: marked ${assignments.length} duplicate(s)`);
       }
 
       // Per-task persistence: write each dirtied record now so SIGTERM
@@ -309,6 +306,59 @@ export async function runDedup(
       handleDetectorError(opts, `dedup:${filePath}`, err, dedupAbortController);
     }
   });
+
+  // Findings here usually arrive with a verdict already (the platform
+  // validates before it calls this command), so a rejected finding can end
+  // up the primary of a group that contains a real one. Hand the group to
+  // the first duplicate a verdict kept. This command owns every shard in
+  // the directory, so nothing is off limits.
+  const promoted = promote(
+    records.flatMap((r) => r.findings),
+    () => true,
+  );
+  if (promoted.length > 0) {
+    const promotedRecords = new Set<FileRecord>();
+    for (const finding of promoted) {
+      const entry = index.get(finding.id);
+      if (entry) promotedRecords.add(entry.record);
+    }
+    for (const record of promotedRecords) {
+      record.analysisHistory.push({
+        runId: runMeta.runId,
+        phase: "dedup",
+        ranAt: new Date().toISOString(),
+        durationMs: 0,
+        provider: detector.name,
+        agentSlugs: [record.agentSlug],
+        findingCount: record.findings.length,
+      });
+      dirtyRecords.add(record);
+      try {
+        writeFileRecord(outputDir, record);
+      } catch (err) {
+        logError(`persist (promotion) failed for ${record.filePath}: ${(err as Error).message}`);
+      }
+    }
+    const heirs = promoted.filter((f) => !f.dedup).length;
+    console.log(`  Promoted ${heirs} finding(s) whose primary was rejected.`);
+  }
+
+  // `--delete-duplicates` strips this run's duplicates only now, after
+  // promotion: a duplicate may have just taken over from a rejected primary.
+  // Markers from earlier runs are left alone, as they were before.
+  if (opts.deleteDuplicates) {
+    for (const record of records) {
+      const kept = record.findings.filter((f) => f.dedup?.runId !== runMeta.runId);
+      if (kept.length === record.findings.length) continue;
+      record.findings = kept;
+      dirtyRecords.add(record);
+      try {
+        writeFileRecord(outputDir, record);
+      } catch (err) {
+        logError(`persist (delete) failed for ${record.filePath}: ${(err as Error).message}`);
+      }
+    }
+  }
 
   const completedAt = new Date();
   completeRun(outputDir, runMeta.runId, "done", {
@@ -386,7 +436,7 @@ export function registerDedupCommand(program: Command): void {
     )
     .option(
       "--delete-duplicates",
-      "Physically remove duplicate findings from their FileRecords (default: keep them and only add a `dedup` marker).",
+      "Physically remove this run's duplicate findings from their FileRecords (default: keep them and only add a `dedup` marker). Removal happens after promotion, so a duplicate that takes over from a rejected primary is kept.",
     )
     .option(
       "--exclude-false-positives",

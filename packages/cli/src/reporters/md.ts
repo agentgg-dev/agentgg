@@ -1,6 +1,7 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { Finding, Severity } from "@agentgg/core";
+import { effectiveVerdict, getEvidenceDir, groupPrimary } from "@agentgg/core";
 
 /**
  * Sort order for rendered findings: severity bucket descending, then
@@ -40,11 +41,10 @@ export interface ScanReportInput {
   byAgent: Record<string, number>;
   /**
    * When false (default), every finding gets a per-finding `.md`
-   * regardless of verdict — including those with `validation.verdict
-   * === "false-positive"`. When true, false-positive findings are
-   * skipped when writing per-finding `.md` files; the summary still
-   * reports the FP count so the user can see how many were filtered
-   * out.
+   * regardless of verdict. When true, findings whose combined verdict is
+   * `false-positive` are skipped when writing per-finding `.md` files;
+   * the summary still reports the FP count so the user can see how many
+   * were filtered out.
    */
   excludeFalsePositives?: boolean;
 }
@@ -90,6 +90,7 @@ export function writeMarkdownReport(input: ScanReportInput): ScanReportOutput {
     if (list) list.push(f);
     else duplicatesByPrimary.set(f.dedup.duplicateOf, [f]);
   }
+  const byId = new Map(input.findings.map((f) => [f.id, f] as const));
 
   // False-positives get their own `.md` by default (and always stay
   // in the FileRecord state as an audit trail). The caller can opt out
@@ -98,7 +99,7 @@ export function writeMarkdownReport(input: ScanReportInput): ScanReportOutput {
   // Duplicates are always collapsed out of the rendered set.
   const renderable = (
     input.excludeFalsePositives
-      ? input.findings.filter((f) => f.validation?.verdict !== "false-positive")
+      ? input.findings.filter((f) => effectiveVerdict(f) !== "false-positive")
       : [...input.findings]
   )
     .filter((f) => !f.dedup)
@@ -106,16 +107,37 @@ export function writeMarkdownReport(input: ScanReportInput): ScanReportOutput {
     .sort(compareForReport);
 
   const findingPaths: string[] = [];
+  // Findings whose evidence was actually copied to findings/, keyed by id.
+  // The summary table must use this same eligibility instead of
+  // re-deriving it, or it can link to a directory that was never written
+  // (metadata survives a rerun even after state/files/<agentSlug>/ is gone).
+  const evidenceDirs = new Map<string, string>();
   for (const f of renderable) {
     const fullPath = join(findingsDir, findingFilename(f));
-    writeFileSync(fullPath, renderFindingMd(f, duplicatesByPrimary.get(f.id)), "utf8");
+    // Evidence lives under state/ so a rerun cleans it up with the rest of the
+    // slice. Copy it beside the .md too: nobody browsing the report will find
+    // it otherwise. `findings/` was just cleared, so this cannot go stale.
+    let evidenceDir: string | undefined;
+    if (f.live?.evidence) {
+      const src = getEvidenceDir(outDir, f.agentSlug, f.id);
+      if (existsSync(src)) {
+        evidenceDir = evidenceDirName(f);
+        cpSync(src, join(findingsDir, evidenceDir), { recursive: true });
+        evidenceDirs.set(f.id, evidenceDir);
+      }
+    }
+    writeFileSync(
+      fullPath,
+      renderFindingMd(f, duplicatesByPrimary.get(f.id), evidenceDir, byId),
+      "utf8",
+    );
     findingPaths.push(fullPath);
   }
 
   const summaryPath = join(outDir, "summary.md");
   writeFileSync(
     summaryPath,
-    renderSummaryMd(input, findingPaths, renderable, duplicatesByPrimary),
+    renderSummaryMd(input, findingPaths, renderable, duplicatesByPrimary, evidenceDirs),
     "utf8",
   );
 
@@ -147,10 +169,32 @@ export function findingFilenameSlug(f: Finding): string {
   return `${f.agentSlug}-${titleSlug}-${f.id}.md`;
 }
 
-export function renderFindingMd(f: Finding, duplicates?: ReadonlyArray<Finding>): string {
+/**
+ * Directory carrying a finding's live-validation evidence inside `findings/`.
+ * Same basename as the finding's `.md`, so the two sort together and a link
+ * from the `.md` is a plain relative path.
+ */
+export function evidenceDirName(f: Finding): string {
+  return findingFilename(f).replace(/\.md$/, "");
+}
+
+export function renderFindingMd(
+  f: Finding,
+  duplicates?: ReadonlyArray<Finding>,
+  /** Relative directory holding the copied evidence. Absent when nothing was
+   *  copied, in which case the artifacts are named but not linked. */
+  evidenceDir?: string,
+  /** id -> finding, for resolving a duplicate's primary. Defaults to empty,
+   *  in which case a duplicate stands for itself (see `groupPrimary`). */
+  byId: Map<string, Finding> = new Map(),
+): string {
   const lines: string[] = [];
   lines.push(`# ${f.title}`);
   lines.push("");
+
+  // A duplicate carries no verdict or score of its own; it reads its
+  // group's primary when one was loaded into byId.
+  const holder = groupPrimary(f, byId);
 
   const meta: string[] = [];
   meta.push(`**Agent:** \`${f.agentSlug}\``);
@@ -158,16 +202,22 @@ export function renderFindingMd(f: Finding, duplicates?: ReadonlyArray<Finding>)
   meta.push(`**File:** \`${f.filePath}\``);
   if (f.lineRange) meta.push(`**Lines:** ${f.lineRange[0]}–${f.lineRange[1]}`);
   meta.push(`**Confidence:** ${(f.confidence * 100).toFixed(0)}%`);
-  if (f.severity) {
-    meta.push(`**Severity:** ${f.severity}`);
+  if (holder.severity) {
+    meta.push(`**Severity:** ${holder.severity}`);
   } else {
     meta.push("**Severity:** _pending (scoring phase not yet run)_");
   }
-  if (f.cvss) {
-    meta.push(`**CVSS:** ${f.cvss.baseScore.toFixed(1)} (\`${f.cvss.vector}\`)`);
+  if (holder.cvss) {
+    meta.push(`**CVSS:** ${holder.cvss.baseScore.toFixed(1)} (\`${holder.cvss.vector}\`)`);
   }
-  if (f.validation) {
-    meta.push(`**Validation:** \`${f.validation.verdict}\``);
+  if (holder !== f && (holder.validation || holder.live)) {
+    const v = effectiveVerdict(holder);
+    meta.push(`**Validation:** ${v ? `\`${v}\`` : "_not settled_"} (from \`${holder.id}\`)`);
+  } else if (f.validation || f.live) {
+    // Undefined here means no static verdict plus an inconclusive live
+    // result, which settles on no verdict at all.
+    const verdict = effectiveVerdict(f);
+    meta.push(verdict ? `**Validation:** \`${verdict}\`` : "**Validation:** _not settled_");
   } else {
     meta.push("**Validation:** _not run_");
   }
@@ -180,6 +230,73 @@ export function renderFindingMd(f: Finding, duplicates?: ReadonlyArray<Finding>)
     lines.push("");
     lines.push(f.validation.reasoning);
     lines.push("");
+    if (f.validation.confirmedImpact) {
+      lines.push(`**Confirmed impact:** ${f.validation.confirmedImpact}`);
+      lines.push("");
+    }
+    if (f.validation.unconfirmedImpact) {
+      lines.push(`**Claimed, not confirmed:** ${f.validation.unconfirmedImpact}`);
+      lines.push("");
+    }
+  }
+
+  const live = f.live;
+  if (live) {
+    lines.push("### Live validation");
+    lines.push(`**Result:** \`${live.result}\``);
+    lines.push("");
+    lines.push(live.reasoning);
+    lines.push("");
+    if (live.counterevidence.trim().length > 0) {
+      lines.push(`**Counterevidence:** ${live.counterevidence}`);
+      lines.push("");
+    }
+    // The control is what separates the effect from the agent's own setup, so
+    // it sits with the verdict rather than among the evidence files.
+    if ((live.negativeControl ?? "").trim().length > 0) {
+      lines.push(`**Negative control:** ${live.negativeControl}`);
+      lines.push("");
+    }
+    const ev = live.evidence;
+    if (ev) {
+      const link = (name: string) =>
+        evidenceDir ? `[${name}](${evidenceDir}/${name})` : `\`${name}\``;
+      if (ev.script) {
+        // A refuted finding's script is a negative control, never replayed:
+        // calling it a reproduction would read as a partial exploit.
+        if (live.result === "refuted") {
+          lines.push(`- Negative control script: ${link(ev.script.path)}`);
+        } else {
+          lines.push(
+            `- Reproduction script: ${link(ev.script.path)} (${ev.script.passed ? "replays" : "unverified"})`,
+          );
+        }
+      }
+      if (ev.trace) lines.push(`- Trace: ${link(ev.trace)}`);
+      if (ev.video) lines.push(`- Video: ${link(ev.video)}`);
+      if (ev.har) lines.push(`- HAR: ${link(ev.har)}`);
+      for (const s of ev.screenshots ?? []) lines.push(`- Screenshot: ${link(s)}`);
+      if (ev.requestsFile) lines.push(`- Requests: ${link(ev.requestsFile)}`);
+      lines.push("");
+
+      // The request table is the protocol-level proof: it shows what was sent
+      // and the status it got back, which the video and screenshots cannot.
+      if (ev.requests && ev.requests.length > 0) {
+        lines.push("### Requests");
+        lines.push("");
+        lines.push("| Method | URL | Status | Payload |");
+        lines.push("| --- | --- | --- | --- |");
+        for (const r of ev.requests) {
+          // The payload is what separates one attempt from the next: without
+          // it every login try reads as the same row.
+          const body = r.requestBody ? `\`${r.requestBody.replace(/\|/g, "\\|")}\`` : "";
+          lines.push(`| ${r.method} | \`${r.url}\` | ${r.status} | ${body} |`);
+        }
+        if (ev.requestsFile)
+          lines.push("", `Full request and response headers: ${link(ev.requestsFile)}.`);
+        lines.push("");
+      }
+    }
   }
 
   // De-duplication folded other findings into this one as the canonical
@@ -246,6 +363,10 @@ export function renderSummaryMd(
   rendered?: ReadonlyArray<Finding>,
   /** primary id → folded-in duplicates, for the collapsed-count line. */
   duplicatesByPrimary?: ReadonlyMap<string, ReadonlyArray<Finding>>,
+  /** finding id -> the relative directory its evidence was copied to. A
+   *  finding missing from the map had no evidence on disk, so its artifacts
+   *  are named but not linked. */
+  evidenceDirs?: ReadonlyMap<string, string>,
 ): string {
   const renderedList = rendered ?? input.findings;
   const durationMs = input.completedAt.getTime() - input.startedAt.getTime();
@@ -284,20 +405,22 @@ export function renderSummaryMd(
   }
   lines.push("");
 
+  // Primaries only, on the combined verdict: a duplicate is represented by
+  // its primary and never gets a verdict of its own, and a live result can
+  // move the one a primary carries.
+  const primaries = input.findings.filter((f) => !f.dedup);
   const byVerdict: Record<string, number> = {};
   let unvalidated = 0;
-  for (const f of input.findings) {
-    if (f.validation) {
-      byVerdict[f.validation.verdict] = (byVerdict[f.validation.verdict] ?? 0) + 1;
-    } else {
-      unvalidated++;
-    }
+  for (const f of primaries) {
+    const verdict = effectiveVerdict(f);
+    if (verdict) byVerdict[verdict] = (byVerdict[verdict] ?? 0) + 1;
+    else unvalidated++;
   }
-  if (input.findings.length > 0) {
+  if (primaries.length > 0) {
     lines.push("## Findings by validation verdict");
     lines.push("");
     const verdictKeys = Object.keys(byVerdict).sort();
-    if (verdictKeys.length === 0 && unvalidated === input.findings.length) {
+    if (verdictKeys.length === 0 && unvalidated === primaries.length) {
       lines.push("_Validation phase did not run (pass `--validate` to enable)._");
     } else {
       for (const v of verdictKeys) lines.push(`- \`${v}\`: ${byVerdict[v]}`);
@@ -330,6 +453,36 @@ export function renderSummaryMd(
       if (unscored > 0) lines.push(`- _unscored_: ${unscored}`);
       lines.push("");
     }
+  }
+
+  const liveValidated = renderedList.filter((f) => f.live);
+  if (liveValidated.length > 0) {
+    lines.push("## Live validation");
+    lines.push("");
+    lines.push("| Finding | Result | Evidence |");
+    lines.push("| --- | --- | --- |");
+    for (const f of liveValidated) {
+      const live = f.live;
+      // Only link when this finding's evidence was actually copied. A
+      // finding can carry evidence metadata with nothing on disk (e.g. a
+      // rerun cleaned up state/files/<agentSlug>/ after the fact), in which
+      // case linking would produce a dangling href.
+      const dir = evidenceDirs?.get(f.id);
+      const ev = live?.evidence;
+      const link = (label: string, name: string) =>
+        dir ? `[${label}](findings/${dir}/${name})` : `${label} \`${name}\``;
+      const parts: string[] = [];
+      if (ev?.video) parts.push(link("video", ev.video));
+      if (ev?.trace) parts.push(link("trace", ev.trace));
+      if (ev?.script) parts.push(link("script", ev.script.path));
+      if (ev?.screenshots?.length) parts.push(`${ev.screenshots.length} screenshot(s)`);
+      lines.push(
+        `| [${f.title}](findings/${findingFilename(f)}) | \`${live?.result}\` | ${
+          parts.length > 0 ? parts.join(", ") : "none"
+        } |`,
+      );
+    }
+    lines.push("");
   }
 
   if (renderedList.length > 0) {

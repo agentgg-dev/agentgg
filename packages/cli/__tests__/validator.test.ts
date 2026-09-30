@@ -6,6 +6,8 @@ import {
   asValidationField,
   buildScopeValidatePrompt,
   buildValidatePrompt,
+  fitMembers,
+  GROUP_MEMBER_CHAR_CAP,
   LlmValidation,
 } from "../src/validator.js";
 
@@ -344,6 +346,90 @@ describe("VercelAgentDetector.validateFinding (single-shot, no root)", () => {
         fileContent: "x",
       }),
     ).rejects.toThrow();
+  });
+});
+
+describe("group validation", () => {
+  const member = (id: string, impact: string) =>
+    makeFinding({ id, agentSlug: "missing-auth", impact, poc: `poc-${id}` });
+
+  it("lists every duplicate's id, agent, impact and PoC", () => {
+    const out = buildValidatePrompt({
+      finding: makeFinding(),
+      fileContent: "x",
+      members: [member("dup111", "Reads any user's notes.")],
+    });
+    expect(out).toContain("## Other reports of the same bug");
+    expect(out).toContain("dup111");
+    expect(out).toContain("missing-auth");
+    expect(out).toContain("Reads any user's notes.");
+    expect(out).toContain("poc-dup111");
+  });
+
+  it("tells the validator to judge the worst claim it can confirm", () => {
+    const out = buildValidatePrompt({
+      finding: makeFinding(),
+      fileContent: "x",
+      members: [member("dup111", "i")],
+    });
+    expect(out).toContain("worst claim in this group that you can confirm");
+    expect(out).toContain("leadId");
+    expect(out).toContain("primaryClaimHolds");
+  });
+
+  it("has no group section for a singleton but still asks for confirmedImpact", () => {
+    const out = buildValidatePrompt({ finding: makeFinding(), fileContent: "x" });
+    expect(out).not.toContain("## Other reports of the same bug");
+    expect(out).toContain("confirmedImpact");
+    expect(out).toMatch(/only\s+when the verdict is confirmed/);
+  });
+
+  // 5 members with only a long impact never exceed the 6000 cap after the
+  // 600-char impact clip. 10 members, each pushing summary/impact/poc to
+  // their own clip ceiling, do.
+  it("caps member text and says how many members it left out", () => {
+    const members = Array.from({ length: 10 }, (_, i) =>
+      makeFinding({
+        id: `dup${i}`,
+        agentSlug: "missing-auth",
+        summary: "s".repeat(400),
+        impact: "i".repeat(600),
+        poc: "p".repeat(800),
+      }),
+    );
+    const out = buildValidatePrompt({ finding: makeFinding(), fileContent: "x", members });
+    const section = out.slice(out.indexOf("## Other reports of the same bug"));
+    const body = section.slice(0, section.indexOf("\n## ", 5));
+    expect(body.length).toBeLessThan(GROUP_MEMBER_CHAR_CAP + 500);
+    const { shown, left } = fitMembers(members);
+    expect(shown.length + left.length).toBe(10);
+    expect(left.length).toBeGreaterThan(0);
+    expect(body).toContain(`${left.length} more report(s) left out`);
+    for (const m of left) expect(body).not.toContain(`### Report ${m.id}`);
+  });
+
+  it("keeps the impact fields, leadId and primaryClaimHolds from the model's answer", () => {
+    const v = LlmValidation.parse({
+      verdict: "confirmed",
+      reasoning: "r",
+      confirmedImpact: "Reads any user's notes.",
+      unconfirmedImpact: "Full database dump.",
+      leadId: "dup111",
+      primaryClaimHolds: false,
+    });
+    expect(asValidationField(v)).toEqual({
+      verdict: "confirmed",
+      reasoning: "r",
+      confirmedImpact: "Reads any user's notes.",
+      unconfirmedImpact: "Full database dump.",
+      leadId: "dup111",
+      primaryClaimHolds: false,
+    });
+  });
+
+  it("drops empty impact strings", () => {
+    const v = LlmValidation.parse({ verdict: "uncertain", reasoning: "r", confirmedImpact: "" });
+    expect(asValidationField(v)).toEqual({ verdict: "uncertain", reasoning: "r" });
   });
 });
 

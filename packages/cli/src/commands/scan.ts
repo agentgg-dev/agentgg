@@ -12,6 +12,7 @@ import type {
 import {
   completeRun,
   createRunMeta,
+  effectiveVerdict,
   fingerprint,
   getOfficialAgentsDir,
   hasFileScope,
@@ -21,6 +22,7 @@ import {
   readAgentRun,
   readFileRecord,
   readScanPlan,
+  updateRunStage,
   upsertScanMeta,
   writeAgentRun,
   writeFileRecord,
@@ -32,7 +34,7 @@ import { defaultAgentDirs, loadAllAgents } from "../agent-catalog.js";
 import { installOfficialAgents } from "../agents-install.js";
 import { anchorLoad, packBatches, shardCandidate, shardKeyOf } from "../anchors.js";
 import { runConcurrent } from "../concurrent.js";
-import { resolveDedup } from "../deduper.js";
+import { dedupeCandidates, resolveDedup } from "../deduper.js";
 import { loadDefaultScope } from "../default-scope.js";
 import type { AgentCandidate } from "../detect.js";
 import { FatalScanError, handleDetectorError } from "../diagnostics.js";
@@ -41,6 +43,7 @@ import { loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
 import { logError, logInfo, logWarn } from "../log.js";
 import { evaluatePreFilter } from "../pre-filter.js";
 import { selectAgents } from "../precondition.js";
+import { applyGroupVerdict, duplicatesOfRejected, membersOf, promote } from "../promote.js";
 import {
   buildCredentialsFromOpts,
   REGION_FLAG_HELP,
@@ -52,6 +55,11 @@ import { getSemgrepRulesDir, isSemgrepSuppressed, runSemgrepProject } from "../s
 import { runSmartExclude } from "../smart-exclude.js";
 import { resolveTemplates } from "../template.js";
 import { createUsageMeter, type UsageMeter } from "../usage-meter.js";
+import { notLiveReproducible, proofRuleMap } from "../validation/proof-rules.js";
+import { runReproducePhase } from "../validation/reproduce.js";
+import { attachFromOpts, DEFAULT_SANDBOX_IMAGE } from "../validation/sandbox.js";
+import { parseTargetAuth, readTargetContext } from "../validation/target-auth.js";
+import { fitMembers } from "../validator.js";
 import { DEFAULT_VIEWER_PORT, openBrowser, startViewer } from "../viewer-server.js";
 import { DEFAULT_EXCLUDES, pathMatches, type WalkConfig, walkForAgents } from "../walker.js";
 import { buildInvocation } from "./invocation.js";
@@ -203,24 +211,24 @@ interface ScanOpts {
    */
   summary?: boolean;
   /**
-   * Run the CVSS 3.1 scoring phase after detection (and after validation).
-   * On by default (Commander default `true`); pass `--no-score` to skip it.
-   * The scoring agent picks the 8 base metrics per finding; the score and
-   * severity bucket are computed deterministically in Node from those
-   * choices. Findings the validator marked false-positive or out-of-scope
-   * are skipped to avoid paying for findings that won't ship.
+   * Run the CVSS 3.1 scoring phase, last of the four. On by default
+   * (Commander default `true`); pass `--no-score` to skip it. The scoring
+   * agent picks the 8 base metrics per finding; the score and severity
+   * bucket are computed deterministically in Node from those choices.
+   * Duplicates, and findings the combined verdict rejects, are skipped to
+   * avoid paying for findings that won't ship.
    */
   score?: boolean;
   /** Re-score findings even when they already carry a `cvss` on disk. */
   rescore?: boolean;
   /**
-   * Run the de-duplication phase at the very end (after detect/validate/
-   * score). On by default (Commander default `true`); pass `--no-dedup` to
-   * skip it. Groups shippable findings by source file across agents, folds
-   * same-root-cause findings under one primary, and marks the rest with a
-   * `dedup` field so the report collapses them. The final gather step —
-   * it needs every finding for a file co-located, so it cannot be
-   * distributed like the earlier phases.
+   * Run the de-duplication phase right after detection. On by default
+   * (Commander default `true`); pass `--no-dedup` to skip it. Groups
+   * findings by source file across agents, folds same-root-cause findings
+   * under one primary, and marks the rest with a `dedup` field so the
+   * report collapses them. A gather step — it needs every finding for a
+   * file co-located, so it cannot be distributed like the per-finding
+   * phases, and running it first keeps those phases off duplicates.
    */
   dedup?: boolean;
   /**
@@ -239,6 +247,30 @@ interface ScanOpts {
    * `true` when the bare flag is passed.
    */
   serve?: boolean | string;
+  /**
+   * Opt-in live-validation sub-pass closing the validation phase:
+   * reproduce PRIMARY web-reachable findings against a running target
+   * inside a Docker sandbox. Requires `--target-url`. Off by default.
+   */
+  liveValidate?: boolean;
+  /** Root URL of the running application the sandbox reaches (external mode). */
+  targetUrl?: string;
+  /** `user:pass` or `@file.json` login credentials for the target. */
+  targetCredentials?: string;
+  /** Free-form scope/context notes folded into the reproduce prompt. */
+  targetContext?: string;
+  /** Sandbox image tag. Defaults to the pinned `DEFAULT_SANDBOX_IMAGE`. */
+  targetImage?: string;
+  /** Attach to an already-running sandbox instead of starting Docker. */
+  sandboxEndpoint?: string;
+  /** Control server of the attached sandbox (default: same host, port 8932). */
+  sandboxControl?: string;
+  /** Per-finding reproduction timeout in seconds (default 300). */
+  reproduceTimeout?: number;
+  /** Whole-phase reproduction budget in seconds (default 1800). */
+  /** Max findings to reproduce in one run (default 50). */
+  /** Per-finding browser turn cap (default 50). */
+  reproduceMaxTurns?: number;
 }
 
 /**
@@ -284,6 +316,15 @@ export async function runScan(
   opts: ScanOpts,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<void> {
+  // Fail fast on a flag typo before any scan work runs.
+  if (opts.liveValidate && !opts.targetUrl) {
+    throw new Error("--live-validate requires --target-url");
+  }
+  // Same reason: a missing $AGENTGG_SANDBOX_TOKEN or bad --sandbox-endpoint
+  // must fail before detect/validate/dedup spend anything, not only once the
+  // reproduce phase itself starts.
+  const attach = opts.liveValidate ? attachFromOpts(opts, env) : undefined;
+
   const root = resolve(rootArg);
   const outDir = resolve(opts.output ?? "./scan-results/");
   // Resume identity: compared by the sidecar scope, reconHash, and the plan's
@@ -738,6 +779,7 @@ export async function runScan(
     const skipRecon = opts.recon === false;
     let recon: ReconReport;
     let reconBlock: string;
+    updateRunStage(outDir, runMeta.runId, "recon");
     if (skipRecon) {
       console.log(
         "\n[1/3] Recon — skipped (--no-recon); every selected agent runs unconditionally.",
@@ -1383,11 +1425,13 @@ export async function runScan(
     // -------- Phase 2: drain the batch pool --------
     // One bounded worker pool over every enqueued (agent, batch) pair.
     // Batches from different agents run concurrently up to `concurrency`.
+    updateRunStage(outDir, runMeta.runId, "detect", { done: 0, total: batchQueue.length });
     if (batchQueue.length > 0) {
       console.log(
         `  Running ${batchQueue.length} batch(es) across ${runtimeBySlug.size} agent(s) at concurrency ${concurrency}…`,
       );
     }
+    let batchesDone = 0;
     await runConcurrent(batchQueue, concurrency, async ({ agent, batch }) => {
       const rt = runtimeBySlug.get(agent.slug);
       if (!rt) return;
@@ -1501,6 +1545,11 @@ export async function runScan(
         // shared pool an agent isn't a contiguous runtime unit (its batches
         // interleave with other agents'), so filesReviewed/hitCount are the
         // meaningful per-agent signals; whole-scan time lives in RunMeta.
+        batchesDone++;
+        updateRunStage(outDir, runMeta.runId, "detect", {
+          done: batchesDone,
+          total: batchQueue.length,
+        });
         rt.remaining--;
         if (rt.remaining === 0 && !rt.failed) {
           try {
@@ -1538,6 +1587,126 @@ export async function runScan(
       );
     }
 
+    // The agents this run queued. A finding lifted from a prior run belongs
+    // to a shard this run never opened, so no phase below may write to it.
+    const selectedSlugs = new Set(queuedAgents.map((a) => a.slug));
+
+    // -------- de-duplication phase (gather) --------
+    // Group findings by source filePath ACROSS agents and fold
+    // same-root-cause duplicates under one primary. Runs first among the
+    // post-detection phases: unlike those per-finding passes it needs every
+    // finding for a file co-located, and running it here keeps validation
+    // and scoring off findings that would be collapsed anyway. Marks the
+    // non-primary findings with a `dedup` field; the report render below
+    // then collapses them. `--delete-duplicates` strips them from disk, but
+    // only after validation, since until then a duplicate may still turn out
+    // to be the finding that ships.
+    if (opts.dedup && findings.length > 0) {
+      const comparable = dedupeCandidates(findings).filter(
+        (f) => f.filePath && f.filePath !== "(unknown)",
+      );
+      const byFile = new Map<string, Finding[]>();
+      for (const f of comparable) {
+        const bucket = byFile.get(f.filePath);
+        if (bucket) bucket.push(f);
+        else byFile.set(f.filePath, [f]);
+      }
+      const dedupeTasks = [...byFile.entries()]
+        .filter(([, fs]) => fs.length >= 2)
+        .map(([filePath, fs]) => ({ filePath, findings: fs }));
+      updateRunStage(outDir, runMeta.runId, "dedupe", { done: 0, total: dedupeTasks.length });
+
+      if (dedupeTasks.length > 0) {
+        console.log(`\nDe-duplicating across ${dedupeTasks.length} file(s)`);
+        let dedupeDone = 0;
+        const dedupeFileCache = new Map<string, string | null>();
+        const dupedByShard = new Map<
+          string,
+          { agentSlug: string; filePath: string; findings: Finding[] }
+        >();
+        let totalDuplicates = 0;
+        await runConcurrent(dedupeTasks, concurrency, async ({ filePath, findings: bucket }) => {
+          let content = dedupeFileCache.get(filePath);
+          if (content === undefined) {
+            try {
+              content = readFileSync(resolve(root, filePath), "utf8");
+            } catch {
+              content = null;
+            }
+            dedupeFileCache.set(filePath, content);
+          }
+          try {
+            const clusters = await detector.dedupeFindings({
+              filePath,
+              findings: bucket,
+              fileContent: content ?? undefined,
+              signal: scanAbortController.signal,
+            });
+            const byId = new Map(bucket.map((f) => [f.id, f]));
+            for (const a of resolveDedup(bucket, clusters, {
+              canMark: (f) => selectedSlugs.has(f.agentSlug),
+            })) {
+              const dupe = byId.get(a.id);
+              if (!dupe) continue;
+              dupe.dedup = {
+                duplicateOf: a.duplicateOf,
+                reasoning: a.reasoning,
+                runId: runMeta.runId,
+              };
+              const normalized = dupe.filePath.replace(/\\/g, "/");
+              const key = `${dupe.agentSlug} ${normalized}`;
+              const entry = dupedByShard.get(key) ?? {
+                agentSlug: dupe.agentSlug,
+                filePath: normalized,
+                findings: [],
+              };
+              entry.findings.push(dupe);
+              dupedByShard.set(key, entry);
+              totalDuplicates++;
+            }
+          } catch (err) {
+            handleDetectorError(opts, `dedup:${filePath}`, err, scanAbortController);
+          } finally {
+            dedupeDone++;
+            updateRunStage(outDir, runMeta.runId, "dedupe", {
+              done: dedupeDone,
+              total: dedupeTasks.length,
+            });
+          }
+        });
+        // Persist dedup markers back into the per-(agent, file) shards.
+        for (const { agentSlug, filePath, findings: group } of dupedByShard.values()) {
+          if (isAbsolute(filePath)) continue;
+          const record = readFileRecord(outDir, agentSlug, filePath);
+          if (!record) continue;
+          const inMemory = new Map(group.map((f) => [f.id, f]));
+          record.findings = record.findings.map((rec) => {
+            const live = inMemory.get(rec.id);
+            return live?.dedup ? { ...rec, dedup: live.dedup } : rec;
+          });
+          record.analysisHistory.push({
+            runId: runMeta.runId,
+            phase: "dedup",
+            ranAt: new Date().toISOString(),
+            durationMs: 0,
+            provider: detector.name,
+            agentSlugs: [agentSlug],
+            findingCount: record.findings.length,
+          });
+          try {
+            writeFileRecord(outDir, record);
+          } catch (err) {
+            if (opts.verbose) {
+              logError(`persist failed for ${agentSlug}/${filePath}: ${(err as Error).message}`);
+            }
+          }
+        }
+        console.log(`  marked ${totalDuplicates} duplicate(s)`);
+      } else {
+        console.log("\nDe-duplication: nothing to compare (no file has 2+ findings).");
+      }
+    }
+
     // -------- validation phase --------
     // Two opt-in modes:
     //   - `--validate`: full classifier — re-reads source, with --scope
@@ -1548,12 +1717,17 @@ export async function runScan(
     //     field untouched so a follow-up `revalidate` can do full
     //     classification.
     if ((opts.validate || scopeOnlyValidate) && findings.length > 0) {
-      const candidates = findings.filter((f) => f.filePath && f.filePath !== "(unknown)");
+      // Primaries only: a group is validated once, through its primary.
+      const candidates = findings.filter(
+        (f) => f.filePath && f.filePath !== "(unknown)" && !f.dedup,
+      );
       // Resume path: skip findings that already carry a verdict on disk.
       // `--revalidate-all` bypasses the skip and forces re-classification.
       const validatable = opts.revalidateAll ? candidates : candidates.filter((f) => !f.validation);
       const carriedOver = candidates.length - validatable.length;
+      updateRunStage(outDir, runMeta.runId, "validate", { done: 0, total: validatable.length });
       if (validatable.length > 0 || carriedOver > 0) {
+        let validateDone = 0;
         const scopeNote = scopeContent ? " with scope" : "";
         const carryNote = carriedOver > 0 ? ` (${carriedOver} cached)` : "";
         const modeNote = scopeOnlyValidate ? " — scope-only mode" : "";
@@ -1566,6 +1740,13 @@ export async function runScan(
         // whole catalog, not the selection: a finding restored from a prior
         // run can come from an agent this run's `-t` filter left out.
         const agentBySlug = new Map(catalog.agents.map((a) => [a.slug, a]));
+        // Built once, before any swap. Safe: a swapped group is confirmed and
+        // never enters the second wave below, which is the only later reader.
+        const groups = membersOf(findings);
+        const canMark = (f: Finding) => selectedSlugs.has(f.agentSlug);
+        // Findings whose marker or verdict moved in a swap, persisted with the wave.
+        const swapped = new Map<string, Finding>();
+        let swaps = 0;
         if (!scopeOnlyValidate) {
           const withCustomPrompt = validatable.filter(
             (f) => agentBySlug.get(f.agentSlug)?.validationPrompt,
@@ -1574,10 +1755,7 @@ export async function runScan(
             console.log(`  ${withCustomPrompt} use their agent's own validation prompt`);
           }
         }
-        // One bounded pool over findings. Each finding is a distinct object
-        // and fileCache is only touched in await-free regions, so workers
-        // don't race; verdicts are persisted below once the pool drains.
-        await runConcurrent(validatable, concurrency, async (finding) => {
+        const validateOne = async (finding: Finding): Promise<void> => {
           // Scope-only branch: never read the file, only ask the LLM to
           // classify against --scope, and only persist `out-of-scope`.
           // Findings the scope doesn't disqualify are left untouched so a
@@ -1634,13 +1812,14 @@ export async function runScan(
               // Undefined when the agent declares none, or when its slug is no
               // longer in the catalog: the validator falls back to its defaults.
               validationPrompt: agentBySlug.get(finding.agentSlug)?.validationPrompt,
+              members: groups.get(finding.id),
               signal: scanAbortController.signal,
             });
-            finding.validation = {
-              verdict: result.verdict,
-              reasoning: result.reasoning,
-              ...(result.refused ? { refused: true } : {}),
-            };
+            const changed = applyGroupVerdict(findings, finding, result, canMark);
+            if (changed.length > 1) {
+              swaps++;
+              for (const f of changed) swapped.set(f.id, f);
+            }
             if (result.refused) {
               console.log(`    ${finding.filePath}: validation refused, recorded as uncertain`);
             } else if (opts.verbose) {
@@ -1649,59 +1828,119 @@ export async function runScan(
           } catch (err) {
             handleDetectorError(opts, `validate:${finding.id}`, err, scanAbortController);
           }
-        });
-        // Persist validation verdicts back into the per-(agent, file)
-        // shards. Group by (agentSlug, filePath) so each shard is
-        // rewritten once.
-        const byShard = new Map<
-          string,
-          { agentSlug: string; filePath: string; findings: Finding[] }
-        >();
-        for (const f of validatable) {
-          if (!f.validation) continue;
-          const normalized = f.filePath.replace(/\\/g, "/");
-          if (isAbsolute(normalized)) continue;
-          const key = `${f.agentSlug} ${normalized}`;
-          const entry = byShard.get(key) ?? {
-            agentSlug: f.agentSlug,
-            filePath: normalized,
-            findings: [],
-          };
-          entry.findings.push(f);
-          byShard.set(key, entry);
-        }
-        for (const { agentSlug, filePath, findings: group } of byShard.values()) {
-          const record = readFileRecord(outDir, agentSlug, filePath);
-          if (!record) continue;
-          const inMemory = new Map(group.map((f) => [f.id, f]));
-          record.findings = record.findings.map((rec) => {
-            const live = inMemory.get(rec.id);
-            return live?.validation ? { ...rec, validation: live.validation } : rec;
-          });
-          record.analysisHistory.push({
-            runId: runMeta.runId,
-            phase: "validate",
-            ranAt: new Date().toISOString(),
-            durationMs: 0,
-            provider: detector.name,
-            agentSlugs: [agentSlug],
-            findingCount: group.length,
-          });
-          record.status = "validated";
-          try {
-            writeFileRecord(outDir, record);
-          } catch (err) {
-            if (opts.verbose) {
-              logError(`persist failed for ${agentSlug}/${filePath}: ${(err as Error).message}`);
+        };
+        // Write one wave's verdicts, and any dedup marker promotion moved,
+        // back into the per-(agent, file) shards. Grouped by (agentSlug,
+        // filePath) so each shard is rewritten once per wave.
+        const persistWave = (wave: Finding[]): void => {
+          const byShard = new Map<
+            string,
+            { agentSlug: string; filePath: string; findings: Finding[] }
+          >();
+          // Heirs first: a kill between shard writes then leaves two
+          // primaries, never two findings marked as each other's duplicate.
+          const heirsFirst = [...wave].sort((a, b) => Number(!!a.dedup) - Number(!!b.dedup));
+          for (const f of heirsFirst) {
+            const normalized = f.filePath.replace(/\\/g, "/");
+            if (isAbsolute(normalized)) continue;
+            const key = `${f.agentSlug} ${normalized}`;
+            const entry = byShard.get(key) ?? {
+              agentSlug: f.agentSlug,
+              filePath: normalized,
+              findings: [],
+            };
+            entry.findings.push(f);
+            byShard.set(key, entry);
+          }
+          for (const { agentSlug, filePath, findings: group } of byShard.values()) {
+            const record = readFileRecord(outDir, agentSlug, filePath);
+            if (!record) continue;
+            const inMemory = new Map(group.map((f) => [f.id, f]));
+            record.findings = record.findings.map((rec) => {
+              const live = inMemory.get(rec.id);
+              if (!live) return rec;
+              // Copied even when absent: that is how a swap clears the old
+              // primary's marker, verdict, score and live result on disk.
+              return {
+                ...rec,
+                validation: live.validation,
+                dedup: live.dedup,
+                cvss: live.cvss,
+                severity: live.severity,
+                live: live.live,
+              };
+            });
+            record.analysisHistory.push({
+              runId: runMeta.runId,
+              phase: "validate",
+              ranAt: new Date().toISOString(),
+              durationMs: 0,
+              provider: detector.name,
+              agentSlugs: [agentSlug],
+              findingCount: group.length,
+            });
+            record.status = "validated";
+            try {
+              writeFileRecord(outDir, record);
+            } catch (err) {
+              if (opts.verbose) {
+                logError(`persist failed for ${agentSlug}/${filePath}: ${(err as Error).message}`);
+              }
             }
           }
+        };
+        // One bounded pool over findings. Each finding is a distinct object
+        // and fileCache is only touched in await-free regions, so workers
+        // don't race; verdicts are persisted below once the pool drains.
+        await runConcurrent(validatable, concurrency, async (finding) => {
+          try {
+            await validateOne(finding);
+          } finally {
+            validateDone++;
+            updateRunStage(outDir, runMeta.runId, "validate", {
+              done: validateDone,
+              total: validatable.length,
+            });
+          }
+        });
+        const wave = new Map<string, Finding>();
+        for (const f of validatable) if (f.validation) wave.set(f.id, f);
+        for (const [id, f] of swapped) wave.set(id, f);
+        persistWave([...wave.values()]);
+        if (swaps > 0) console.log(`  Moved ${swaps} group(s) to a member whose claim held`);
+
+        // A rejected group covers only the members its prompt showed. Members
+        // the cap left out get their own verdict, and the first survivor
+        // takes over.
+        const unseen = new Set<string>();
+        for (const members of groups.values()) {
+          for (const m of fitMembers(members).left) unseen.add(m.id);
         }
+        const secondWave = duplicatesOfRejected(findings, unseen);
+        if (secondWave.length > 0) {
+          console.log(
+            `  Validating ${secondWave.length} duplicate(s) a rejected group did not show`,
+          );
+          await runConcurrent(secondWave, concurrency, validateOne);
+        }
+        // Outside that guard: a run interrupted after the wave's verdicts
+        // reached disk resumes with an empty wave but a group still to hand
+        // over. Promoting nothing costs one pass over `findings`.
+        const moved = promote(findings, canMark, unseen);
+        const promoted = moved.filter((f) => !f.dedup).length;
+        if (promoted > 0) console.log(`  Promoted ${promoted} finding(s)`);
+        const toPersist = new Map<string, Finding>();
+        for (const f of secondWave) if (f.validation) toPersist.set(f.id, f);
+        for (const f of moved) toPersist.set(f.id, f);
+        if (toPersist.size > 0) persistWave([...toPersist.values()]);
+
         // Final tally combines this-run verdicts and carried-over ones so
         // the summary reflects every classified finding, not just freshly
-        // validated ones.
+        // validated ones. Read after promotion, so it counts the primaries
+        // the phase ends with.
         const finalVerdicts: Record<string, number> = {};
-        for (const f of candidates) {
-          if (!f.validation) continue;
+        for (const f of findings) {
+          if (f.dedup || !f.validation) continue;
           finalVerdicts[f.validation.verdict] = (finalVerdicts[f.validation.verdict] ?? 0) + 1;
         }
         const summary = Object.entries(finalVerdicts)
@@ -1712,32 +1951,98 @@ export async function runScan(
       }
     }
 
+    // Opt-in live sub-pass, closing the validation phase: reproduce
+    // web-reachable primaries against a running target. Its result joins the
+    // static verdict into the one combined verdict scoring reads below.
+    if (opts.liveValidate) {
+      if (!opts.targetUrl) throw new Error("--live-validate requires --target-url");
+      console.log("\nLive validation");
+      await runReproducePhase({
+        findings,
+        detector,
+        outDir,
+        runId: runMeta.runId,
+        targetUrl: opts.targetUrl,
+        auth: parseTargetAuth(opts),
+        context: readTargetContext(opts.targetContext),
+        image: opts.targetImage ?? DEFAULT_SANDBOX_IMAGE,
+        timeoutMs: Number(opts.reproduceTimeout ?? 600) * 1000,
+        reproduceMaxTurns: Number(opts.reproduceMaxTurns ?? 50),
+        agentProofRules: proofRuleMap(catalog.agents),
+        notLiveReproducible: notLiveReproducible(catalog.agents),
+        attach,
+        signal: scanAbortController.signal,
+      });
+    }
+
+    // `--delete-duplicates` strips the duplicates only here: validation
+    // above may have made one of them the primary, so deleting any earlier
+    // can throw away the finding that ships.
+    if (opts.dedup && opts.deleteDuplicates) {
+      const doomed = findings.filter((f) => f.dedup);
+      if (doomed.length > 0) {
+        const byShard = new Map<
+          string,
+          { agentSlug: string; filePath: string; ids: Set<string> }
+        >();
+        for (const f of doomed) {
+          const normalized = f.filePath.replace(/\\/g, "/");
+          if (isAbsolute(normalized)) continue;
+          const key = `${f.agentSlug} ${normalized}`;
+          const entry = byShard.get(key) ?? {
+            agentSlug: f.agentSlug,
+            filePath: normalized,
+            ids: new Set<string>(),
+          };
+          entry.ids.add(f.id);
+          byShard.set(key, entry);
+        }
+        for (const { agentSlug, filePath, ids } of byShard.values()) {
+          const record = readFileRecord(outDir, agentSlug, filePath);
+          if (!record) continue;
+          record.findings = record.findings.filter((rec) => !ids.has(rec.id));
+          try {
+            writeFileRecord(outDir, record);
+          } catch (err) {
+            if (opts.verbose) {
+              logError(`persist failed for ${agentSlug}/${filePath}: ${(err as Error).message}`);
+            }
+          }
+        }
+        findings = findings.filter((f) => !f.dedup);
+        console.log(`\nDeleted ${doomed.length} duplicate(s) from their file records`);
+      }
+    }
+
     // -------- scoring phase --------
     // Pick CVSS 3.1 metrics per finding; assemble the full CvssScore in
-    // Node from those choices. Runs after validation so the scorer skips
-    // findings the validator already disqualified (false-positive /
-    // out-of-scope) — no point spending tokens on findings that won't
-    // ship. Without --validate, every detected finding is scored.
+    // Node from those choices. Runs last so it only pays for findings that
+    // can ship: duplicates are already folded under a primary, and the
+    // combined verdict (static plus live) has settled. Without --validate,
+    // every detected primary is scored.
     if (opts.score && findings.length > 0) {
       const isDisqualified = (f: Finding): boolean => {
-        const v = f.validation?.verdict;
+        const v = effectiveVerdict(f);
         return v === "false-positive" || v === "out-of-scope";
       };
       const scorable = findings.filter(
         (f) =>
           f.filePath &&
           f.filePath !== "(unknown)" &&
+          !f.dedup &&
           !isDisqualified(f) &&
           (opts.rescore || !f.cvss),
       );
       const skippedHasScore = findings.filter((f) => f.cvss).length;
       const skippedDisq = findings.filter(isDisqualified).length;
+      updateRunStage(outDir, runMeta.runId, "score", { done: 0, total: scorable.length });
       if (scorable.length > 0) {
         console.log(
           `\nScoring ${scorable.length} finding(s)` +
             (skippedHasScore > 0 ? ` (${skippedHasScore} already scored)` : "") +
             (skippedDisq > 0 ? ` (${skippedDisq} skipped: FP/out-of-scope)` : ""),
         );
+        let scoreDone = 0;
         const scoreFileCache = new Map<string, string | null>();
         const scoredByShard = new Map<
           string,
@@ -1747,47 +2052,55 @@ export async function runScan(
         // is mutated only after the await (a synchronous get/push/set with no
         // yield), so concurrent workers can't lose an entry.
         await runConcurrent(scorable, concurrency, async (finding) => {
-          let content = scoreFileCache.get(finding.filePath);
-          if (content === undefined) {
-            try {
-              content = readFileSync(resolve(root, finding.filePath), "utf8");
-            } catch {
-              content = null;
-            }
-            scoreFileCache.set(finding.filePath, content);
-          }
-          if (content === null) {
-            if (opts.verbose) {
-              console.log(`    skip score ${finding.id}: file not readable`);
-            }
-            return;
-          }
           try {
-            const cvss = await detector.scoreFinding({
-              finding,
-              fileContent: content,
-              recon,
-              signal: scanAbortController.signal,
-            });
-            finding.cvss = cvss;
-            finding.severity = cvss.severity;
-            const normalized = finding.filePath.replace(/\\/g, "/");
-            const key = `${finding.agentSlug} ${normalized}`;
-            const entry = scoredByShard.get(key) ?? {
-              agentSlug: finding.agentSlug,
-              filePath: normalized,
-              findings: [],
-            };
-            entry.findings.push(finding);
-            scoredByShard.set(key, entry);
-            if (opts.verbose) {
-              const loc = finding.lineRange ? `:${finding.lineRange[0]}` : "";
-              console.log(
-                `    ${cvss.severity.padEnd(8)} ${cvss.baseScore.toFixed(1).padStart(4)}  ${findingFilenameSlug(finding)}  ${finding.filePath}${loc}`,
-              );
+            let content = scoreFileCache.get(finding.filePath);
+            if (content === undefined) {
+              try {
+                content = readFileSync(resolve(root, finding.filePath), "utf8");
+              } catch {
+                content = null;
+              }
+              scoreFileCache.set(finding.filePath, content);
             }
-          } catch (err) {
-            handleDetectorError(opts, `score:${finding.id}`, err, scanAbortController);
+            if (content === null) {
+              if (opts.verbose) {
+                console.log(`    skip score ${finding.id}: file not readable`);
+              }
+              return;
+            }
+            try {
+              const cvss = await detector.scoreFinding({
+                finding,
+                fileContent: content,
+                recon,
+                signal: scanAbortController.signal,
+              });
+              finding.cvss = cvss;
+              finding.severity = cvss.severity;
+              const normalized = finding.filePath.replace(/\\/g, "/");
+              const key = `${finding.agentSlug} ${normalized}`;
+              const entry = scoredByShard.get(key) ?? {
+                agentSlug: finding.agentSlug,
+                filePath: normalized,
+                findings: [],
+              };
+              entry.findings.push(finding);
+              scoredByShard.set(key, entry);
+              if (opts.verbose) {
+                const loc = finding.lineRange ? `:${finding.lineRange[0]}` : "";
+                console.log(
+                  `    ${cvss.severity.padEnd(8)} ${cvss.baseScore.toFixed(1).padStart(4)}  ${findingFilenameSlug(finding)}  ${finding.filePath}${loc}`,
+                );
+              }
+            } catch (err) {
+              handleDetectorError(opts, `score:${finding.id}`, err, scanAbortController);
+            }
+          } finally {
+            scoreDone++;
+            updateRunStage(outDir, runMeta.runId, "score", {
+              done: scoreDone,
+              total: scorable.length,
+            });
           }
         });
         // Persist scored findings back into the per-(agent, file) shards.
@@ -1805,7 +2118,7 @@ export async function runScan(
           });
           record.analysisHistory.push({
             runId: runMeta.runId,
-            phase: "detect",
+            phase: "score",
             ranAt: new Date().toISOString(),
             durationMs: 0,
             provider: detector.name,
@@ -1837,126 +2150,9 @@ export async function runScan(
       }
     }
 
-    // -------- de-duplication phase (final gather) --------
-    // Group shippable findings by source filePath ACROSS agents and fold
-    // same-root-cause duplicates under one primary. Runs LAST — after
-    // detect/validate/score — because, unlike those per-finding phases, it
-    // needs every finding for a file co-located, so it cannot be
-    // distributed. Marks the non-primary findings with a `dedup` field
-    // (orthogonal to the validation verdict); `--delete-duplicates` strips
-    // them instead. The report render below then collapses them.
-    if (opts.dedup && findings.length > 0) {
-      const shippable = findings.filter(
-        (f) =>
-          f.filePath &&
-          f.filePath !== "(unknown)" &&
-          f.validation?.verdict !== "false-positive" &&
-          f.validation?.verdict !== "out-of-scope",
-      );
-      const byFile = new Map<string, Finding[]>();
-      for (const f of shippable) {
-        const bucket = byFile.get(f.filePath);
-        if (bucket) bucket.push(f);
-        else byFile.set(f.filePath, [f]);
-      }
-      const dedupeTasks = [...byFile.entries()]
-        .filter(([, fs]) => fs.length >= 2)
-        .map(([filePath, fs]) => ({ filePath, findings: fs }));
-
-      if (dedupeTasks.length > 0) {
-        console.log(`\nDe-duplicating across ${dedupeTasks.length} file(s)`);
-        const dedupeFileCache = new Map<string, string | null>();
-        const dupedByShard = new Map<
-          string,
-          { agentSlug: string; filePath: string; findings: Finding[] }
-        >();
-        let totalDuplicates = 0;
-        await runConcurrent(dedupeTasks, concurrency, async ({ filePath, findings: bucket }) => {
-          let content = dedupeFileCache.get(filePath);
-          if (content === undefined) {
-            try {
-              content = readFileSync(resolve(root, filePath), "utf8");
-            } catch {
-              content = null;
-            }
-            dedupeFileCache.set(filePath, content);
-          }
-          try {
-            const clusters = await detector.dedupeFindings({
-              filePath,
-              findings: bucket,
-              fileContent: content ?? undefined,
-              signal: scanAbortController.signal,
-            });
-            const byId = new Map(bucket.map((f) => [f.id, f]));
-            for (const a of resolveDedup(bucket, clusters)) {
-              const dupe = byId.get(a.id);
-              if (!dupe) continue;
-              dupe.dedup = {
-                duplicateOf: a.duplicateOf,
-                reasoning: a.reasoning,
-                runId: runMeta.runId,
-              };
-              const normalized = dupe.filePath.replace(/\\/g, "/");
-              const key = `${dupe.agentSlug} ${normalized}`;
-              const entry = dupedByShard.get(key) ?? {
-                agentSlug: dupe.agentSlug,
-                filePath: normalized,
-                findings: [],
-              };
-              entry.findings.push(dupe);
-              dupedByShard.set(key, entry);
-              totalDuplicates++;
-            }
-          } catch (err) {
-            handleDetectorError(opts, `dedup:${filePath}`, err, scanAbortController);
-          }
-        });
-        // Persist dedup markers back into the per-(agent, file) shards.
-        for (const { agentSlug, filePath, findings: group } of dupedByShard.values()) {
-          if (isAbsolute(filePath)) continue;
-          const record = readFileRecord(outDir, agentSlug, filePath);
-          if (!record) continue;
-          const inMemory = new Map(group.map((f) => [f.id, f]));
-          if (opts.deleteDuplicates) {
-            record.findings = record.findings.filter((rec) => !inMemory.has(rec.id));
-          } else {
-            record.findings = record.findings.map((rec) => {
-              const live = inMemory.get(rec.id);
-              return live?.dedup ? { ...rec, dedup: live.dedup } : rec;
-            });
-          }
-          record.analysisHistory.push({
-            runId: runMeta.runId,
-            phase: "dedup",
-            ranAt: new Date().toISOString(),
-            durationMs: 0,
-            provider: detector.name,
-            agentSlugs: [agentSlug],
-            findingCount: record.findings.length,
-          });
-          try {
-            writeFileRecord(outDir, record);
-          } catch (err) {
-            if (opts.verbose) {
-              logError(`persist failed for ${agentSlug}/${filePath}: ${(err as Error).message}`);
-            }
-          }
-        }
-        const verb = opts.deleteDuplicates ? "deleted" : "marked";
-        console.log(`  ${verb} ${totalDuplicates} duplicate(s)`);
-        // When deleting, drop them from the in-memory list too so the
-        // report render below doesn't re-include them.
-        if (opts.deleteDuplicates && totalDuplicates > 0) {
-          findings = findings.filter((f) => !f.dedup);
-        }
-      } else {
-        console.log("\nDe-duplication: nothing to compare (no file has 2+ shippable findings).");
-      }
-    }
-
     const completedAt = new Date();
 
+    updateRunStage(outDir, runMeta.runId, "report");
     // `--no-summary` skips the report render entirely. Findings are already
     // persisted to state/files/*, so `agentgg summary <outDir>` can produce
     // the markdown later without re-running detection.
@@ -2266,7 +2462,7 @@ export function registerScanCommand(program: Command): void {
     )
     .option(
       "--score",
-      "Run the CVSS 3.1 scoring phase after detection (and after validation). The agent picks the 8 base metrics; the score and severity bucket are computed deterministically. Findings the validator marked false-positive or out-of-scope are skipped. On by default; disable with --no-score.",
+      "Run the CVSS 3.1 scoring phase. The agent picks the 8 base metrics; the score and severity bucket are computed deterministically. Scoring runs after validation, including live validation, and skips findings the combined verdict rejects. Duplicates are skipped too. On by default; disable with --no-score.",
       true,
     )
     .option(
@@ -2279,7 +2475,7 @@ export function registerScanCommand(program: Command): void {
     )
     .option(
       "--dedup",
-      "Run the de-duplication phase at the very end (after detect/validate/score). Groups findings by source file across agents, folds same-root-cause findings under one primary, and marks the rest with a `dedup` field so the report collapses them. The final gather step — it sees all of a file's findings, so it can't be distributed like the earlier phases. On by default; disable with --no-dedup.",
+      "Group same-root-cause findings per file (across agents) right after detection, so validation and scoring only run on primaries. Non-primary findings are marked with a `dedup` field and the report collapses them. On by default; disable with --no-dedup.",
       true,
     )
     .option(
@@ -2288,7 +2484,7 @@ export function registerScanCommand(program: Command): void {
     )
     .option(
       "--delete-duplicates",
-      "With --dedup, physically remove duplicate findings from their FileRecords instead of just marking them (default: keep + mark).",
+      "With --dedup, physically remove duplicate findings from their FileRecords instead of just marking them (default: keep + mark). Removal happens after validation, so a duplicate that validation made the primary is kept.",
     )
     .option(
       "--serve [port]",
@@ -2325,6 +2521,46 @@ export function registerScanCommand(program: Command): void {
     .option(
       "--no-auto-exclude",
       "don't let the model pick folders to skip (auto-exclude runs by default). The whole tree is scanned except your explicit --exclude paths.",
+    )
+    .option(
+      "--live-validate",
+      "Reproduce web-reachable primary findings against a running target inside a Docker sandbox, at the end of the validation phase (external mode). Runs the reproduce agent per finding, executes its generated Playwright script once, and records a live result + evidence. A reproduced finding keeps a recording too; a refuted one keeps only the trace, screenshots and requests, roughly 3 MB, so its verdict can be checked. Off by default; requires --target-url and a reachable Docker daemon.",
+    )
+    .option(
+      "--target-url <url>",
+      "Root URL of the already-running application to validate against. Required with --live-validate.",
+    )
+    .option(
+      "--target-credentials <cred>",
+      "Login for the target: `user:pass`, or `@path/to/creds.json` ({ username, password }). Redacted from any stored reasoning.",
+    )
+    .option(
+      "--target-context <ctx>",
+      "Free-form scope/context notes for the reproduce prompt, or @path/to/file.",
+    )
+    .option(
+      "--target-image <ref>",
+      `Sandbox image tag hosting Playwright + the MCP server. Defaults to the pinned ${DEFAULT_SANDBOX_IMAGE}.`,
+    )
+    .option(
+      "--sandbox-endpoint <url>",
+      "Attach to an already-running sandbox's MCP server (e.g. http://127.0.0.1:8931) instead of starting Docker. Reads the control token from $AGENTGG_SANDBOX_TOKEN.",
+    )
+    .option(
+      "--sandbox-control <url>",
+      "Control server of the attached sandbox (default: same host, port 8932).",
+    )
+    .option(
+      "--reproduce-timeout <s>",
+      "Per-finding reproduction timeout in seconds (default 600). A backstop only: the turn cap (--reproduce-max-turns) is meant to end a run first, because it stops cleanly with a verdict, while a timeout aborts and keeps no evidence.",
+      (v) => parseInt(v, 10),
+      600,
+    )
+    .option(
+      "--reproduce-max-turns <n>",
+      "Max browser steps per finding (default 50). Raise it for a target with multi-step flows.",
+      (v) => parseInt(v, 10),
+      50,
     )
     .option("-v, --verbose", "verbose output")
     .action(async (path: string, opts: ScanOpts) => {

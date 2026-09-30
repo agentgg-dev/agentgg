@@ -107,6 +107,12 @@ export function buildScorePrompt(args: {
     : "unspecified lines";
   const reconBlock = recon ? `\n${renderReconForPrompt(recon)}\n` : "";
 
+  // Validation may have cut the claim down; score only what it confirmed.
+  const confirmed = finding.validation?.confirmedImpact;
+  const impactBlock = confirmed
+    ? `### Impact (confirmed by validation)\n${confirmed}\n\nScore this impact. Do not score a worse impact that the report claims but validation did not confirm.`
+    : `### Impact\n${finding.impact}`;
+
   return `You are scoring a confirmed security finding on the CVSS 3.1 base
 metrics. You will NOT pick the numeric score yourself — your job is to
 choose the 8 metric values and write a short justification. The score
@@ -136,8 +142,7 @@ ${finding.details}
 ### PoC
 ${finding.poc}
 
-### Impact
-${finding.impact}
+${impactBlock}
 
 ## The source code
 

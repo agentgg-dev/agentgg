@@ -274,6 +274,20 @@ export const Agent = z.object({
    * (`--scope-validate`) ignores it, because it never reads the code.
    */
   validationPrompt: z.string().optional(),
+  /**
+   * What a live browser run must show before a finding from this agent counts
+   * as reproduced. Unlike `validationPrompt`, this ADDS to the proof principle
+   * and can never replace it. Write one only when a real run showed the
+   * principle was not enough for this class, and say which run in a comment.
+   */
+  liveProofRule: z.string().optional(),
+  /**
+   * False when this agent's class asserts a missing control rather than an
+   * effect an attacker can cause, so a browser has nothing to reproduce. Such
+   * findings skip the live run and record `not-reproducible`. Absent means
+   * true: a new agent is always tested unless its author opts out.
+   */
+  liveReproducible: z.boolean().optional(),
   /** Where this agent came from. Set by the loader, not by the author. */
   source: z
     .object({
@@ -357,6 +371,59 @@ export const CvssScore = z.object({
 });
 export type CvssScore = z.infer<typeof CvssScore>;
 
+/** `error` is a run that broke (sandbox, MCP, provider) before the agent
+ *  could answer. `not-reproducible` is a class that asserts a missing control,
+ *  so no browser run was attempted. Neither says anything about the code. */
+export const LiveResult = z.enum([
+  "reproduced",
+  "refuted",
+  "inconclusive",
+  "error",
+  "not-reproducible",
+]);
+export type LiveResult = z.infer<typeof LiveResult>;
+
+export const LiveValidation = z.object({
+  result: LiveResult,
+  reasoning: z.string(),
+  /** The strongest case the live agent could make against its own result. */
+  counterevidence: z.string().default(""),
+  /** The control that separates the effect from the agent's own setup: the
+   *  same steps without the attacker's input, or without the session. */
+  negativeControl: z.string().optional(),
+  refused: z.boolean().optional(),
+  baseUrl: z.string().optional(),
+  evidence: z
+    .object({
+      trace: z.string().optional(),
+      video: z.string().optional(),
+      screenshots: z.array(z.string()).default([]),
+      har: z.string().optional(),
+      script: z.object({ path: z.string(), executed: z.boolean(), passed: z.boolean() }).optional(),
+      /**
+       * The captured exchanges. `requestBody` is the payload a reviewer needs
+       * to tell one attempt from the next; without it a login bypass looks
+       * like every other POST to the same path. Truncated, and REQUEST side
+       * only: this record is mirrored to a client-readable store, and a
+       * response body holds whatever the exploit reached.
+       */
+      requests: z
+        .array(
+          z.object({
+            method: z.string(),
+            url: z.string(),
+            status: z.number(),
+            requestBody: z.string().optional(),
+          }),
+        )
+        .optional(),
+      requestsFile: z.string().optional(),
+    })
+    .optional(),
+  runId: z.string().optional(),
+});
+export type LiveValidation = z.infer<typeof LiveValidation>;
+
 // ---------------------------------------------------------------------------
 // Finding (a single security issue surfaced by an agent)
 // ---------------------------------------------------------------------------
@@ -411,6 +478,10 @@ export const Finding = z.object({
       reasoning: z.string(),
       scopeRef: z.string().optional(),
       adjustedSeverity: Severity.optional(),
+      /** The impact validation could confirm, from any member of the group. */
+      confirmedImpact: z.string().optional(),
+      /** A worse impact a member claimed that validation could not confirm. */
+      unconfirmedImpact: z.string().optional(),
       /**
        * True when the model declined to validate (a content refusal) rather
        * than reaching a verdict. `verdict` is set to `uncertain` in this case:
@@ -420,6 +491,8 @@ export const Finding = z.object({
       refused: z.boolean().optional(),
     })
     .optional(),
+  /** Filled in after the live (browser) validation pass. */
+  live: LiveValidation.optional(),
   /**
    * Set by the de-duplication phase (`agentgg dedup`) when this finding
    * describes the same root cause as another finding in the SAME source
@@ -459,7 +532,7 @@ export type Finding = z.infer<typeof Finding>;
 
 export const AnalysisRun = z.object({
   runId: z.string(),
-  phase: z.enum(["detect", "validate", "dedup"]),
+  phase: z.enum(["detect", "validate", "dedup", "score", "reproduce"]),
   ranAt: z.string(),
   durationMs: z.number().int().nonnegative().default(0),
   provider: z.string(),
@@ -1034,6 +1107,12 @@ export const RunMeta = z.object({
   runId: z.string(),
   type: z.enum(["scan", "detect", "validate", "dedup"]),
   phase: z.enum(["running", "done", "error"]),
+  /** Pipeline stage this run is currently in. Absent before the first stage write. */
+  stage: z.enum(["recon", "detect", "dedupe", "validate", "live", "score", "report"]).optional(),
+  /** Units completed within the current stage, e.g. batches or findings. */
+  progress: z
+    .object({ done: z.number().int().nonnegative(), total: z.number().int().nonnegative() })
+    .optional(),
   startedAt: z.string(),
   completedAt: z.string().optional(),
   /**

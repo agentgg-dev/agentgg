@@ -1,4 +1,5 @@
-import type { Finding } from "@agentgg/core";
+import { effectiveVerdict, type Finding, groupPrimary } from "@agentgg/core";
+import { liveState } from "@agentgg/core/live";
 import { ArrowLeft, ExternalLink, Hash } from "lucide-react";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -9,8 +10,14 @@ import {
   VerdictBadge,
 } from "@/app/components/Badges";
 import CopyMarkdownButton from "@/app/components/CopyMarkdownButton";
+import EvidencePanel from "@/app/components/EvidencePanel";
+import FindingTabs from "@/app/components/FindingTabs";
+import { LiveResultBadge } from "@/app/components/LiveBadges";
 import Markdown from "@/app/components/Markdown";
 import Nav from "@/app/components/Nav";
+import Section from "@/app/components/Section";
+import ValidationPanel from "@/app/components/ValidationPanel";
+import { findingToGhsaMarkdown } from "@/app/lib/ghsa";
 import { findFindingById, loadViewerState } from "@/app/lib/state";
 
 export const dynamic = "force-dynamic";
@@ -22,6 +29,13 @@ export default async function FindingPage({ params }: { params: Promise<{ id: st
 
   const { finding, file } = hit;
   const state = loadViewerState();
+
+  // A duplicate carries no verdict, CVSS, or confirmed impact of its own;
+  // resolve them from its primary when it was loaded.
+  const primaryHit = finding.dedup ? findFindingById(finding.dedup.duplicateOf) : null;
+  const byId = new Map<string, Finding>([[finding.id, finding]]);
+  if (primaryHit) byId.set(primaryHit.finding.id, primaryHit.finding);
+  const holder = groupPrimary(finding, byId);
 
   return (
     <>
@@ -37,14 +51,15 @@ export default async function FindingPage({ params }: { params: Promise<{ id: st
         {/* header card */}
         <div className="rounded-xl border border-bg-border bg-bg-panel/40 p-6 md:p-8 mb-6">
           <div className="flex flex-wrap items-center gap-2 mb-4">
-            <SeverityBadge severity={finding.severity} />
-            <VerdictBadge verdict={finding.validation?.verdict} />
+            <SeverityBadge severity={holder.severity} />
+            <VerdictBadge verdict={effectiveVerdict(holder)} />
+            {finding.live && <LiveResultBadge state={liveState(finding)} />}
             <DuplicateBadge dedup={finding.dedup} />
             <span className="inline-flex items-center px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider border border-bg-border bg-bg/40 text-amber">
               {finding.agentSlug}
             </span>
             <CopyMarkdownButton
-              markdown={findingToGhsaMarkdown(finding)}
+              markdown={findingToGhsaMarkdown(finding, holder)}
               label="Copy GHSA"
               title="Copy this finding as a GHSA-style advisory (title, summary, details, PoC, CVSS score, references)"
               className="ml-auto"
@@ -56,6 +71,19 @@ export default async function FindingPage({ params }: { params: Promise<{ id: st
           </h1>
 
           <p className="mt-4 text-base text-ink-muted leading-relaxed">{finding.summary}</p>
+
+          {holder !== finding && (
+            <p className="mt-3 flex items-center gap-1.5 text-xs text-ink-dim">
+              Verdict and score come from finding{" "}
+              <Link
+                href={`/finding/${holder.id}`}
+                className="inline-flex items-center gap-1 font-mono text-cyan hover:text-cyan-glow transition-colors"
+              >
+                <Hash className="w-3 h-3" />
+                {holder.id}
+              </Link>
+            </p>
+          )}
 
           <div className="mt-6 flex flex-wrap items-center gap-5 text-xs">
             <MetaField label="File">
@@ -77,98 +105,90 @@ export default async function FindingPage({ params }: { params: Promise<{ id: st
           </div>
         </div>
 
-        {/* sections */}
-        <Section title="Details">
-          <Markdown source={finding.details} />
-        </Section>
-
-        <Section title="Proof of concept">
-          <Markdown source={finding.poc} />
-        </Section>
-
-        <Section title="Impact">
-          <Markdown source={finding.impact} />
-        </Section>
-
-        {finding.validation && (
-          <Section title="Validation">
-            <div className="mb-4 flex items-center gap-2">
-              <VerdictBadge verdict={finding.validation.verdict} />
-              {finding.validation.scopeRef && (
-                <span className="text-xs font-mono text-ink-dim">
-                  scope: {finding.validation.scopeRef}
-                </span>
-              )}
-            </div>
-            <Markdown source={finding.validation.reasoning} />
-          </Section>
-        )}
-
-        {finding.dedup && (
-          <Section title="Duplicate">
-            <div className="mb-4 flex flex-wrap items-center gap-2 text-xs">
-              <DuplicateBadge dedup={finding.dedup} />
-              <span className="text-ink-dim">folded into primary</span>
-              <Link
-                href={`/finding/${finding.dedup.duplicateOf}`}
-                className="inline-flex items-center gap-1 font-mono text-cyan hover:text-cyan-glow transition-colors"
-              >
-                <Hash className="w-3 h-3" />
-                {finding.dedup.duplicateOf}
-              </Link>
-            </div>
-            <Markdown source={finding.dedup.reasoning} />
-          </Section>
-        )}
-
-        {finding.cvss && (
-          <Section title="CVSS 3.1">
-            <div className="font-mono text-xs text-cyan break-all mb-3">{finding.cvss.vector}</div>
-            <div className="text-sm text-ink mb-3">
-              Base score:{" "}
-              <span className="text-amber font-semibold">{finding.cvss.baseScore.toFixed(1)}</span>{" "}
-              · <SeverityBadge severity={finding.cvss.severity} />
-            </div>
-            <Markdown source={finding.cvss.justification} />
-          </Section>
-        )}
-
-        {finding.references.length > 0 && (
-          <Section title="References">
-            <ul className="space-y-2">
-              {finding.references.map((ref) => (
-                <li key={ref} className="text-sm">
-                  {ref.startsWith("http") ? (
-                    <a
-                      href={ref}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1.5 text-cyan hover:text-cyan-glow transition-colors"
-                    >
-                      <ExternalLink className="w-3.5 h-3.5" />
-                      {ref}
-                    </a>
-                  ) : (
-                    <span className="font-mono text-ink-muted">{ref}</span>
-                  )}
-                </li>
-              ))}
-            </ul>
-          </Section>
-        )}
+        <FindingTabs
+          details={<DetailsPanel finding={finding} holder={holder} />}
+          validation={<ValidationPanel finding={holder} />}
+          evidence={<EvidencePanel finding={finding} />}
+        />
       </main>
     </>
   );
 }
 
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+function DetailsPanel({ finding, holder }: { finding: Finding; holder: Finding }) {
   return (
-    <section className="rounded-xl border border-bg-border bg-bg-panel/40 p-6 md:p-8 mb-5">
-      <div className="text-[10px] font-mono uppercase tracking-[0.18em] text-amber mb-3">
-        {title}
-      </div>
-      {children}
-    </section>
+    <>
+      <Section title="Details">
+        <Markdown source={finding.details} />
+      </Section>
+
+      <Section title="Proof of concept">
+        <Markdown source={finding.poc} />
+      </Section>
+
+      <Section title="Impact">
+        {holder.validation?.confirmedImpact && (
+          <p className="mb-3 text-sm text-ink">
+            <strong className="text-ink">Confirmed impact:</strong>{" "}
+            {holder.validation.confirmedImpact}
+          </p>
+        )}
+        <Markdown source={finding.impact} />
+      </Section>
+
+      {finding.dedup && (
+        <Section title="Duplicate">
+          <div className="mb-4 flex flex-wrap items-center gap-2 text-xs">
+            <DuplicateBadge dedup={finding.dedup} />
+            <span className="text-ink-dim">folded into primary</span>
+            <Link
+              href={`/finding/${finding.dedup.duplicateOf}`}
+              className="inline-flex items-center gap-1 font-mono text-cyan hover:text-cyan-glow transition-colors"
+            >
+              <Hash className="w-3 h-3" />
+              {finding.dedup.duplicateOf}
+            </Link>
+          </div>
+          <Markdown source={finding.dedup.reasoning} />
+        </Section>
+      )}
+
+      {holder.cvss && (
+        <Section title="CVSS 3.1">
+          <div className="font-mono text-xs text-cyan break-all mb-3">{holder.cvss.vector}</div>
+          <div className="text-sm text-ink mb-3">
+            Base score:{" "}
+            <span className="text-amber font-semibold">{holder.cvss.baseScore.toFixed(1)}</span> ·{" "}
+            <SeverityBadge severity={holder.cvss.severity} />
+          </div>
+          <Markdown source={holder.cvss.justification} />
+        </Section>
+      )}
+
+      {finding.references.length > 0 && (
+        <Section title="References">
+          <ul className="space-y-2">
+            {finding.references.map((ref) => (
+              <li key={ref} className="text-sm">
+                {ref.startsWith("http") ? (
+                  <a
+                    href={ref}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1.5 text-cyan hover:text-cyan-glow transition-colors"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    {ref}
+                  </a>
+                ) : (
+                  <span className="font-mono text-ink-muted">{ref}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </Section>
+      )}
+    </>
   );
 }
 
@@ -181,34 +201,4 @@ function MetaField({ label, children }: { label: string; children: React.ReactNo
       {children}
     </div>
   );
-}
-
-/**
- * Serialize a finding as a GHSA-style advisory: only the fields a GitHub
- * Security Advisory body carries — title, summary, details, PoC, the CVSS
- * score + vector selections (no justification prose), and references. The
- * internal triage metadata (agent, verdict, dedup, confidence, finding ID)
- * is intentionally omitted.
- */
-function findingToGhsaMarkdown(f: Finding): string {
-  const out: string[] = [];
-  out.push(`# ${f.title}`, "");
-  out.push("## Summary", "", f.summary, "");
-  out.push("## Details", "", f.details, "");
-  out.push("## Proof of concept", "", f.poc, "");
-  if (f.cvss) {
-    // Two-space line breaks keep score + vector as one paragraph.
-    out.push(
-      "## CVSS",
-      "",
-      `Base score: ${f.cvss.baseScore.toFixed(1)}  \nVector: \`${f.cvss.vector}\``,
-      "",
-    );
-  }
-  if (f.references.length > 0) {
-    out.push("## References", "");
-    for (const ref of f.references) out.push(`- ${ref}`);
-    out.push("");
-  }
-  return out.join("\n").trimEnd();
 }

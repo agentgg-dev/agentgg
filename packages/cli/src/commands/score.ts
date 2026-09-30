@@ -4,6 +4,7 @@ import type { FileRecord, Finding } from "@agentgg/core";
 import {
   completeRun,
   createRunMeta,
+  effectiveVerdict,
   loadAllFileRecords,
   readReconReport,
   readScanMeta,
@@ -28,9 +29,10 @@ interface ScoreOpts {
   /** Re-score findings that already carry a CVSS score on disk. */
   force?: boolean;
   /**
-   * Include findings the validator marked false-positive / out-of-scope.
-   * Off by default — same logic as the in-scan phase: don't pay tokens
-   * scoring findings that won't ship.
+   * Include findings the combined verdict rejects as false-positive /
+   * out-of-scope. Off by default — same logic as the in-scan phase: don't
+   * pay tokens scoring findings that won't ship. Duplicates are skipped
+   * regardless; their primary carries the score.
    */
   includeDisqualified?: boolean;
   /** Drop false-positive findings from the markdown report (kept by default). */
@@ -107,7 +109,7 @@ export async function runScore(
   }
 
   const isDisqualified = (f: Finding): boolean => {
-    const v = f.validation?.verdict;
+    const v = effectiveVerdict(f);
     return v === "false-positive" || v === "out-of-scope";
   };
 
@@ -115,10 +117,16 @@ export async function runScore(
   const tasks: Task[] = [];
   let skippedHasScore = 0;
   let skippedDisq = 0;
+  let skippedDupes = 0;
   for (const record of records) {
     for (const finding of record.findings) {
       if (!opts.force && finding.cvss) {
         skippedHasScore++;
+        continue;
+      }
+      // A duplicate never ships on its own; its primary carries the score.
+      if (finding.dedup) {
+        skippedDupes++;
         continue;
       }
       if (!opts.includeDisqualified && isDisqualified(finding)) {
@@ -131,7 +139,7 @@ export async function runScore(
 
   if (tasks.length === 0) {
     console.log(
-      `Nothing to score. ${records.length} file(s) on disk; ${skippedHasScore} already scored, ${skippedDisq} disqualified by validation.`,
+      `Nothing to score. ${records.length} file(s) on disk; ${skippedHasScore} already scored, ${skippedDisq} disqualified by validation, ${skippedDupes} duplicate(s).`,
     );
     console.log(
       "  Pass --force to rescore everything, --include-disqualified to include FP/out-of-scope findings.",
@@ -213,7 +221,7 @@ export async function runScore(
     const scoredHere = record.findings.filter((f) => f.cvss);
     record.analysisHistory.push({
       runId: runMeta.runId,
-      phase: "detect",
+      phase: "score",
       ranAt: new Date().toISOString(),
       durationMs: 0,
       provider: detector.name,
@@ -293,7 +301,7 @@ export function registerScoreCommand(program: Command): void {
     .option("--force", "re-score findings that already carry a CVSS score (default: skip them)")
     .option(
       "--include-disqualified",
-      "score findings the validator marked false-positive or out-of-scope (default: skip them)",
+      "score findings the combined verdict rejects as false-positive or out-of-scope (default: skip them). Duplicates stay skipped either way.",
     )
     .option(
       "--exclude-false-positives",

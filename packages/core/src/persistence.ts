@@ -210,6 +210,37 @@ export function completeRun(
   writeRunMeta(outputDir, updated);
 }
 
+/** Minimum time between progress writes within the same stage, in ms. */
+const STAGE_THROTTLE_MS = 2000;
+
+/** Last written stage + time per runId, so repeated same-stage calls throttle. */
+const lastStageWrite = new Map<string, { stage: string; at: number }>();
+
+/**
+ * Record the pipeline stage (and optional progress) a run is in. Writes on
+ * every stage change, and at most once every `STAGE_THROTTLE_MS` within one
+ * stage. Omitting `progress` clears the previous stage's counts. Never
+ * throws: progress reporting must not fail the scan it reports on.
+ */
+export function updateRunStage(
+  outputDir: string,
+  runId: string,
+  stage: NonNullable<RunMeta["stage"]>,
+  progress?: RunMeta["progress"],
+): void {
+  try {
+    const now = Date.now();
+    const last = lastStageWrite.get(runId);
+    if (last && last.stage === stage && now - last.at < STAGE_THROTTLE_MS) return;
+    const meta = readRunMeta(outputDir, runId);
+    if (!meta) return;
+    writeRunMeta(outputDir, { ...meta, stage, progress });
+    lastStageWrite.set(runId, { stage, at: now });
+  } catch {
+    // best-effort; progress reporting must never fail a scan
+  }
+}
+
 /**
  * All runs in an output dir, newest-first. Malformed JSON is skipped
  * so a single corrupt file doesn't break `status`.
@@ -355,3 +386,19 @@ export function stateDirHasFiles(outputDir: string): boolean {
     return false;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Evidence persistence and verdict logic
+// ---------------------------------------------------------------------------
+
+/**
+ * Derive the evidence directory for browser validation screenshots + artifacts.
+ * Lives inside the per-slug state slice so rerun cleanup removes it.
+ */
+export function getEvidenceDir(outputDir: string, agentSlug: string, findingId: string): string {
+  return join(outputDir, "state", "files", agentSlug, "live-validation", findingId);
+}
+
+// Re-exported here so every existing `@agentgg/core` import keeps working;
+// the function itself lives in `verdict.ts`, which imports no node builtins.
+export { effectiveVerdict, groupPrimary } from "./verdict.js";

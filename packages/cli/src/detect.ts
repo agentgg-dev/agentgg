@@ -1,11 +1,14 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { extname, resolve } from "node:path";
-import type { Agent, CvssScore, Finding, ReconReport } from "@agentgg/core";
+import type { Agent, CvssScore, Finding, LiveResult, ReconReport } from "@agentgg/core";
 import { z } from "zod";
 import type { AgentSpec } from "./agent-spec.js";
 import type { PreFilterHit, TaintStep } from "./pre-filter.js";
 import type { UsageMeter } from "./usage-meter.js";
+import { proofRules } from "./validation/proof-rules.js";
+import { CONTROL_TEST, EXPLOIT_TEST } from "./validation/proof-script.js";
+import type { TargetAuth } from "./validation/target-auth.js";
 
 /**
  * Subset of `Finding` the LLM is asked to produce. id/agentSlug/
@@ -146,6 +149,50 @@ export const SuggestExcludesResult = z.object({
 export type SuggestExcludesResult = z.infer<typeof SuggestExcludesResult>;
 
 /**
+ * What the reproduce pass returns — the LLM's result after driving a
+ * real browser (via Playwright MCP tools) against a live target to
+ * reproduce, refute, or fail to settle one finding. `script` is only
+ * meaningful when `result` is `reproduced`; the detector enforces that at
+ * the call site, not here, so a model that omits or over-populates the
+ * field still validates.
+ */
+/** The script-first path's only output. One field, so a model that wraps its
+ *  answer in prose or fences still yields a usable spec. */
+export const GeneratedProofScript = z.object({
+  script: z
+    .string()
+    .describe("Complete Playwright spec source carrying both required tests. No markdown fences."),
+});
+export type GeneratedProofScript = z.infer<typeof GeneratedProofScript>;
+
+export const ReproduceFindingResult = z.object({
+  result: z
+    .enum(["reproduced", "refuted", "inconclusive"])
+    .describe(
+      "'reproduced' = you drove the browser through the PoC, observed the vulnerable behavior, and it meets the class's proof rules. 'refuted' = the attack ran and a named control blocked it. 'inconclusive' = anything else, including a run you could not finish.",
+    ),
+  reasoning: z
+    .string()
+    .describe(
+      "Short prose explaining what you did in the browser and what you observed, and why that supports the result.",
+    ),
+  counterevidence: z.string().describe("The strongest case against your own result."),
+  negativeControl: z
+    .string()
+    .optional()
+    .describe(
+      "The control you ran and what happened: the same steps without your input, or without the session. Required when the result is 'reproduced'; a claim without one is downgraded to 'inconclusive'.",
+    ),
+  script: z
+    .string()
+    .optional()
+    .describe(
+      "Self-contained Playwright test source (a repro.spec.ts) that replays every step you performed, including login. Required when result is 'reproduced'; omit otherwise.",
+    ),
+});
+export type ReproduceFindingResult = z.infer<typeof ReproduceFindingResult>;
+
+/**
  * Backend-agnostic contract. Each backend (Vercel AI SDK, Claude Agent
  * SDK) implements this. The orchestrator (scan.ts) doesn't care which
  * one it got — just that the contract holds.
@@ -251,15 +298,94 @@ export interface Detector {
        * agent just means the default rules apply.
        */
       validationPrompt?: string;
+      /** The group's duplicates. The verdict then covers the whole group. */
+      members?: Finding[];
     } & AbortableArgs,
   ): Promise<{
     verdict: "confirmed" | "false-positive" | "out-of-scope" | "uncertain";
     reasoning: string;
+    /** The impact validation confirmed, from any member of the group. */
+    confirmedImpact?: string;
+    /** A worse claimed impact that validation could not confirm. */
+    unconfirmedImpact?: string;
+    /** The member whose claim gives `confirmedImpact`. */
+    leadId?: string;
+    /** Whether the primary's own claim was confirmed. The caller swaps only on
+     *  `confirmed` with this set to false. */
+    primaryClaimHolds?: boolean;
     /** True when the model declined to validate (refusal); `verdict` is
      *  `uncertain`. The finding stays unvalidated, but the caller records the
      *  refusal instead of treating it as a genuine uncertain verdict. */
     refused?: boolean;
   }>;
+
+  /**
+   * Live-validation reproduce pass — optional. Drives a real browser
+   * against `baseUrl` (via the Playwright MCP server the sandbox
+   * hosts at `browserEndpoint`, an SSE URL) to reproduce or refute one
+   * finding's `poc`, then returns a result and, when reproduced, a
+   * generated Playwright test that replays it. The session gets ONLY the
+   * Playwright MCP tools — no source-tree access — so it works entirely
+   * against the running application. `staticVerdict`/`staticReasoning`
+   * carry the static validator's own verdict, when one ran, so the live
+   * agent can check its evidence against that reasoning rather than
+   * re-deriving it blind. Optional on the interface so a backend without
+   * tool-driven browser support can skip live validation entirely;
+   * callers invoke it as `detector.reproduceFinding?.(args)`.
+   */
+  reproduceFinding?(args: {
+    finding: Finding;
+    /** Root URL of the running target the sandbox can reach. */
+    baseUrl: string;
+    /** Login credentials / headers for the target, when provided. */
+    auth?: TargetAuth;
+    /** SSE URL of the Playwright MCP server hosted by the sandbox. */
+    browserEndpoint: string;
+    /** Extra free-form context to fold into the prompt (e.g. scope notes). */
+    context?: string;
+    /** Per-call turn cap. Overrides the detector's default when set, so a
+     *  complex target can be given more browser steps than a demo needs. */
+    maxTurns?: number;
+    /** Static validator's verdict for this finding, when it ran. */
+    staticVerdict?: string;
+    /** Static validator's reasoning, quoted into the prompt verbatim. */
+    staticReasoning?: string;
+    /** The impact static validation confirmed; the agent tests this one. */
+    staticConfirmedImpact?: string;
+    /** The reporting agent's `liveProofRule`. Adds to the proof principle;
+     *  no agent can replace it. */
+    proofRule?: string;
+    signal?: AbortSignal;
+  }): Promise<{
+    result: LiveResult;
+    reasoning: string;
+    /** The strongest case the live agent could make against its own result. */
+    counterevidence: string;
+    /** The control the agent ran to separate the effect from its own setup.
+     *  A `reproduced` without one is downgraded. */
+    negativeControl?: string;
+    /** True when the model declined to reproduce (refusal); `result` is
+     *  `inconclusive`. Mirrors `validateFinding`'s refusal handling. */
+    refused?: boolean;
+    /** The generated `repro.spec.ts` source. Only present when reproduced. */
+    script?: string;
+  }>;
+
+  /**
+   * Script-first reproduction: one call, no browser tools, returns a Playwright
+   * spec that carries both halves of the proof. Optional, so a backend without
+   * it falls straight through to `reproduceFinding`.
+   */
+  generateReproScript?(args: {
+    finding: Finding;
+    baseUrl: string;
+    auth?: TargetAuth;
+    context?: string;
+    proofRule?: string;
+    staticVerdict?: string;
+    staticReasoning?: string;
+    signal?: AbortSignal;
+  }): Promise<string>;
 
   /**
    * Scope-only validation — cheaper alternative to `validateFinding`
@@ -293,14 +419,14 @@ export interface Detector {
   ): Promise<CvssScore>;
 
   /**
-   * De-duplication phase — the final gather pass. Given every finding for
-   * ONE source file (unioned across agent shards) and, when readable, the
+   * De-duplication phase — the gather pass. Given every finding for ONE
+   * source file (unioned across agent shards) and, when readable, the
    * file content, return the equivalence classes of findings that describe
    * the same root cause at the same location. The caller marks the
    * non-primary members with a `dedup` field. Single structured-output
    * call, no tools (the finding metadata + file are already in the prompt).
    * Cannot run distributed: it needs all of a file's findings co-located,
-   * so it runs only after scan/validate/score complete.
+   * so it runs only once detection for that file has finished.
    */
   dedupeFindings(
     args: { filePath: string; findings: Finding[]; fileContent?: string } & AbortableArgs,
@@ -610,6 +736,283 @@ Answer whether this agent should run. If the project clearly doesn't
 match the condition (e.g. the agent targets a framework or feature the
 project doesn't use), answer false. When genuinely unsure, answer true
 — skipping a relevant agent is worse than running an unnecessary one.`;
+}
+
+/** Recorded as the reasoning when the reproduce loop ends with no verdict.
+ *  Says the attempt was cut short rather than impersonating an analysis that
+ *  never ran. */
+export const REPRODUCE_CUT_SHORT =
+  "The live reproduction was cut short: the model stopped before it reported a verdict, so this finding was not tested against the running application.";
+
+/**
+ * Build the reproduce-finding prompt. The model drives a real browser
+ * (via the Playwright MCP tools attached to this session — no Read/Glob/
+ * Grep) against a live target, then reports `reproduced`, `refuted` or
+ * `inconclusive` with its counterevidence and, when reproduced, a
+ * Playwright test that replays it end to end.
+ */
+export function buildReproducePrompt(
+  finding: Finding,
+  baseUrl: string,
+  auth?: TargetAuth,
+  context?: string,
+  staticReview?: { verdict: string; reasoning: string; confirmedImpact?: string },
+  /** The reporting agent's `liveProofRule`, when its catalog entry declares
+   *  one. It adds to the principle and can never replace it. */
+  agentRule?: string,
+): string {
+  const lineHint = finding.lineRange
+    ? `lines ${finding.lineRange[0]}–${finding.lineRange[1]}`
+    : "unspecified lines";
+
+  const credBlock =
+    auth?.username != null || auth?.password != null
+      ? `
+## Credentials
+
+If the target requires login, sign in first with:
+- Username: ${auth?.username ?? "(none)"}
+- Password: ${auth?.password ?? "(none)"}
+`
+      : "";
+
+  const contextBlock = context ? `\n## Additional context\n\n${context}\n` : "";
+
+  const proofRulesBlock = `\n## What counts as proof\n\n${proofRules(agentRule)}\n`;
+
+  const staticReviewBlock = staticReview
+    ? `\n## Source review of this finding\n\nA reviewer with the source code reached the verdict \`${staticReview.verdict}\`:\n\n${staticReview.reasoning}\n\nYour result counts as 'reproduced' ONLY if what you observed answers this\nreview. Say in your reasoning how it does.\n${staticReview.confirmedImpact ? `\nThe impact to reproduce is the one the review confirmed:\n\n${staticReview.confirmedImpact}\n\nTest that impact. The finding text below may claim more.\n` : ""}`
+    : "";
+
+  // Only a run given a static review owes it an answer; the majority of
+  // reproduce calls have none, and the criterion must stay satisfiable there.
+  const reviewCriterion = staticReview ? ", and it answers the source review" : "";
+
+  return `You are live-testing a security finding against a running
+application, using only the browser tools attached to this session.
+You have no access to the source code — work entirely against the live
+application.
+
+## Target
+Base URL: ${baseUrl}
+${credBlock}${contextBlock}
+## The finding to reproduce
+
+**Title:** ${finding.title}
+**Vuln class:** ${finding.vulnSlug}
+**File:** ${finding.filePath} (${lineHint})
+
+### Summary
+${finding.summary}
+
+### PoC
+${finding.poc}
+
+### Impact
+${finding.impact}
+${proofRulesBlock}${staticReviewBlock}
+## Your task
+
+1. Navigate to ${baseUrl} and, if credentials were given above, log in.
+2. Reproduce the PoC above against the live application. If you cannot find
+   an HTTP way to reach it, say what you tried and return 'inconclusive'.
+3. At the point the vulnerable behavior would appear, take a screenshot
+   as proof, whether or not it reproduces. When the finding is cross-site
+   scripting, make the injected code prove itself in a way the recording can
+   show: call \`alert(document.domain)\`, or set
+   \`window.__agentggXss = document.domain\`. The sandbox captures either and
+   draws it on the recording. A payload that only changes the title leaves no
+   visible proof.
+4. Run the control the proof rules ask for: the same steps without your
+   input, or without the session. Report what happened in
+   \`negativeControl\`. A 'reproduced' result without it is downgraded.
+5. Decide a result:
+   - 'reproduced': you observed the vulnerable behavior, it meets the proof
+     rules above${reviewCriterion}.
+   - 'refuted': the attack ran and a named control blocked it. Name the
+     control.
+   - 'inconclusive': anything else, including a run you could not finish and
+     evidence that does not meet the proof rules.
+6. When 'reproduced', also write a self-contained Playwright test (the
+   source for a \`repro.spec.ts\` file) that replays every step you just
+   performed, including login, so someone else can re-run it and see the
+   same result. Omit \`script\` otherwise. The script runs unattended, so
+   write it for the test runner rather than for a person watching:
+   - Anything that blocks page load must be handled before the navigation
+     that triggers it, not awaited after it. A handler registered but never
+     answered leaves the navigation waiting until the test times out.
+   - Assert on what the browser ended up with, not on an intermediate state
+     the navigation already consumed on your behalf.
+   - Assert the vulnerable effect itself, not a side effect that a fixed
+     application would also produce.
+
+Be honest: a PoC that fails to reproduce is a valid, useful outcome. Do
+not report 'reproduced' on a guess; only report what you actually observed
+in the browser, and give the strongest case against your own result in
+\`counterevidence\`.`;
+}
+
+/**
+ * One-shot prompt for the script-first path: write the proof as a Playwright
+ * spec instead of driving the browser turn by turn. No browser tools are
+ * attached, so the model gets no feedback and must go straight at the endpoint
+ * the finding names. A spec that fails hands the finding to the agent path.
+ */
+export function buildProofScriptPrompt(
+  finding: Finding,
+  baseUrl: string,
+  auth?: TargetAuth,
+  context?: string,
+  agentRule?: string,
+  staticReview?: { verdict: string; reasoning: string },
+): string {
+  const credBlock =
+    auth?.username != null || auth?.password != null
+      ? `\n## Credentials\n\nLog in with username \`${auth?.username ?? ""}\` and password \`${auth?.password ?? ""}\` when the flow needs a session.\n`
+      : "";
+  const contextBlock = context ? `\n## Additional context\n\n${context}\n` : "";
+  const staticBlock = staticReview
+    ? `\n## Source review of this finding\n\nA reviewer with the source code reached the verdict \`${staticReview.verdict}\`:\n\n${staticReview.reasoning}\n\nWrite the assertions so that a pass answers this review.\n`
+    : "";
+
+  return `Write a Playwright test that proves one security finding against a
+running application. You have no browser and no source code: you get one
+attempt, and the test is run unattended.
+
+## Target
+Base URL: ${baseUrl}
+${credBlock}${contextBlock}
+## The finding
+
+**Title:** ${finding.title}
+**Vuln class:** ${finding.vulnSlug}
+**File:** ${finding.filePath}
+
+### Summary
+${finding.summary}
+
+### PoC
+${finding.poc}
+
+### Impact
+${finding.impact}
+
+## What counts as proof
+
+${proofRules(agentRule)}
+${staticBlock}
+## The two tests
+
+Output ONE spec file with exactly two tests, titled exactly as shown:
+
+- \`test("${EXPLOIT_TEST}", ...)\` drives the PoC and asserts the vulnerable
+  effect happened.
+- \`test("${CONTROL_TEST}", ...)\` repeats the same steps with the attacker's
+  input replaced by a benign value, or with no session, and asserts the effect
+  did NOT happen.
+
+Both tests must pass for the finding to count as proved. The control passing is
+what separates the effect from your own setup, so do not skip it and do not
+make it a copy of the exploit.
+
+## Match the payload to where the value lands
+
+The finding above says where the attacker input is reflected. The payload MUST
+suit that context, because a payload for the wrong context does not fire:
+
+- Reflected in the HTML body (between tags): inject an element with an event
+  handler, for example \`<img src=x onerror=...>\`. Prefer this over an injected
+  \`<script>\`, which a reflected value often will not run.
+- Reflected inside an existing \`<script>\` block: you must first break out with
+  \`</script>\`, then inject an element with an event handler.
+- Reflected inside an HTML attribute (for example \`href="..."\`): close the
+  attribute and the tag first, or add an event-handler attribute such as
+  \`" onmouseover=... x="\`.
+- Reflected inside a JavaScript string: close the quote and statement, for
+  example \`';<your code>;//\`.
+If the finding does not state the context, send the payload once and read the
+raw response (see below) to see how it lands, then choose the payload.
+
+## What to send it in
+
+The attacker input may not be a query value. Send it where the finding says:
+
+- Query or path: build the URL from the base URL above.
+- A request header (for example \`X-Forwarded-Host\`): a browser navigation
+  CANNOT set request headers. Use \`page.request.get(url, { headers: { ... } })\`,
+  or a request body, exactly as the PoC describes.
+
+## How to prove it
+
+Assert BOTH of these where you can; either one alone counts as the effect:
+
+1. Reflection in the raw response. Fetch the exact attack request with
+   \`page.request.get(...)\` (or \`.post\`), read \`await res.text()\`, and assert the
+   payload appears UNESCAPED in the executable position (its angle brackets,
+   quotes or script are intact, not turned into \`&lt;\` / \`&quot;\`). This is
+   deterministic and does not depend on the browser running anything.
+2. Execution in the browser. Put this at the very top of the test, BEFORE any
+   navigation, so an injected handler that calls it is captured:
+       await page.addInitScript(() => {
+         (window as any).__xssFired = false;
+         for (const fn of ["alert", "prompt", "confirm", "print"]) {
+           (window as any)[fn] = () => { (window as any).__xssFired = true; };
+         }
+       });
+   Make your payload call one of those functions (for example
+   \`onerror=alert(1)\`), navigate with \`page.goto(...)\`, then assert
+   \`await page.evaluate(() => (window as any).__xssFired) === true\`. This is more
+   reliable than \`page.waitForEvent("dialog")\` and also catches event handlers.
+
+The \`${CONTROL_TEST}\` test runs the same request with a benign value and asserts
+the OPPOSITE: the value is absent or HTML-encoded in the response, and
+\`__xssFired\` stayed false.
+
+## Record what happened, so the result has a video and a screenshot
+
+Put this once at the top of the file, so each test records a video and a
+screenshot at its end, and runs slowly enough to watch:
+
+    test.use({ video: "on", screenshot: "on", launchOptions: { slowMo: 400 } });
+
+At the start of every test, before any navigation, load the recording banner so
+the video and screenshot show the URL, the injected payload and, when the code
+runs, an "XSS fired" line:
+
+    await page.addInitScript({ path: "/srv/url-banner.js" });
+
+The banner also captures \`alert()\`; you can assert
+\`await page.evaluate(() => (window).__agentggXss?.length > 0)\` as the proof of
+execution, instead of the local override above.
+
+A generated test finishes in well under a second, so the video is unwatchable
+without pauses. After the vulnerable effect appears, hold on it before the test
+ends so the recording and the end-screenshot show the proof:
+
+    await page.waitForTimeout(2000);
+
+If the effect only becomes visible after a reload (for example a login bypass
+that sets a session cookie through \`fetch\`), navigate to the affected page again
+before that pause, so the screenshot and video show the result and not the
+pre-exploit page:
+
+    await page.goto(BASE_URL);   // now the page renders the signed-in state
+    await page.waitForTimeout(2000);
+
+## How to write it
+
+- Navigate straight to the endpoint the PoC names. Do not explore or crawl.
+- Use absolute URLs built from the base URL above. No config file is loaded.
+- Import from \`@playwright/test\`.
+- Assert the vulnerable effect itself, not a side effect a fixed application
+  would also produce.
+- Assert on what the browser ended up with, not on an intermediate state the
+  navigation already consumed.
+
+## Output
+
+Put the spec source in \`script\` and nothing else: no prose, no explanation, no
+markdown fences.`;
 }
 
 /**

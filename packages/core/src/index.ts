@@ -2,6 +2,7 @@
 
 export * from "./cvss.js";
 export * from "./fingerprint.js";
+export * from "./live.js";
 export * from "./load-agent.js";
 export * from "./paths.js";
 export * from "./persistence.js";

@@ -98,7 +98,7 @@ async function evaluateAgent(
   const hasPrompt = !!pre?.prompt && pre.prompt.trim().length > 0;
 
   if (!hasRegex && !hasPrompt) {
-    return { slug: agent.slug, queued: true, reason: "no precondition — always run" };
+    return { slug: agent.slug, queued: true, reason: "no precondition, always run" };
   }
 
   // Cheap regex pass first. A declared-but-failing regex short-circuits

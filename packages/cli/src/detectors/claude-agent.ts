@@ -1,4 +1,5 @@
-import type { CvssScore, Finding, ReconReport } from "@agentgg/core";
+import type { CvssScore, Finding, LiveResult, ReconReport } from "@agentgg/core";
+import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
@@ -9,15 +10,19 @@ import {
   buildCreateAgentPrompt,
   buildExcludePrompt,
   buildPreconditionPrompt,
+  buildProofScriptPrompt,
   buildReconPrompt,
+  buildReproducePrompt,
   type CreateAgentArgs,
   DetectionResult,
   type Detector,
+  GeneratedProofScript,
   hydrateFinding,
   PreconditionCheck,
   type PreconditionCheckArgs,
   type ReconArgs,
   ReconResult,
+  ReproduceFindingResult,
   type RunAgentArgs,
   repairFindingPath,
   type SuggestExcludesArgs,
@@ -26,6 +31,7 @@ import {
 import { logError, logWarn } from "../log.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import type { CallUsage, UsageMeter } from "../usage-meter.js";
+import type { TargetAuth } from "../validation/target-auth.js";
 import {
   asValidationField,
   buildScopeValidatePrompt,
@@ -84,6 +90,7 @@ export class ClaudeAgentDetector implements Detector {
   private readonly model: string;
   private readonly verbose: boolean;
   private readonly validateMaxTurns: number;
+  private readonly reproduceMaxTurns: number;
   private readonly effort?: "low" | "medium" | "high" | "max";
   private readonly thinking?: "off" | "adaptive" | "enabled";
   private meter?: UsageMeter;
@@ -96,6 +103,8 @@ export class ClaudeAgentDetector implements Detector {
     verbose?: boolean;
     /** Turn cap for the validator's single-finding call. Default 50. */
     validateMaxTurns?: number;
+    /** Turn cap for the reproduce-finding browser session. Default 30. */
+    reproduceMaxTurns?: number;
     /** SDK `effort` passed on every tool-using call. */
     effort?: "low" | "medium" | "high" | "max";
     /** SDK `thinking` mode. `adaptive` matches Claude Code interactive — the model decides per call. */
@@ -109,6 +118,7 @@ export class ClaudeAgentDetector implements Detector {
     this.model = opts.model;
     this.verbose = opts.verbose ?? false;
     this.validateMaxTurns = opts.validateMaxTurns ?? 50;
+    this.reproduceMaxTurns = opts.reproduceMaxTurns ?? 50;
     this.effort = opts.effort;
     this.thinking = opts.thinking;
     this.name = opts.oauthToken ? "anthropic-oauth" : "anthropic-api";
@@ -233,6 +243,8 @@ export class ClaudeAgentDetector implements Detector {
     maxFileSizeKb?: number;
     /** The reporting agent's own validation rules; replaces the defaults. */
     validationPrompt?: string;
+    /** The group's duplicates; the verdict then covers the whole group. */
+    members?: Finding[];
     signal?: AbortSignal;
   }) {
     const prompt = buildValidatePrompt(args);
@@ -263,6 +275,127 @@ export class ClaudeAgentDetector implements Detector {
         return {
           verdict: "uncertain" as const,
           reasoning: "Model declined to validate this finding (refusal).",
+          refused: true,
+        };
+      }
+      throw err;
+    }
+  }
+
+  async generateReproScript(args: {
+    finding: Finding;
+    baseUrl: string;
+    auth?: TargetAuth;
+    context?: string;
+    proofRule?: string;
+    staticVerdict?: string;
+    staticReasoning?: string;
+    signal?: AbortSignal;
+  }): Promise<string> {
+    const staticReview =
+      args.staticVerdict != null && args.staticReasoning != null
+        ? { verdict: args.staticVerdict, reasoning: args.staticReasoning }
+        : undefined;
+    // No tools and a single turn: this path exists to skip the browser loop, so
+    // giving it any tool would reintroduce the cost it is meant to avoid.
+    const result = await this.runStructured({
+      prompt: buildProofScriptPrompt(
+        args.finding,
+        args.baseUrl,
+        args.auth,
+        args.context,
+        args.proofRule,
+        staticReview,
+      ),
+      tools: [],
+      maxTurns: 1,
+      schema: GeneratedProofScript,
+      signal: args.signal,
+      settingSources: [],
+    });
+    return result.script;
+  }
+
+  async reproduceFinding(args: {
+    finding: Finding;
+    baseUrl: string;
+    auth?: TargetAuth;
+    browserEndpoint: string;
+    context?: string;
+    maxTurns?: number;
+    staticVerdict?: string;
+    staticReasoning?: string;
+    staticConfirmedImpact?: string;
+    proofRule?: string;
+    signal?: AbortSignal;
+  }): Promise<{
+    result: LiveResult;
+    reasoning: string;
+    counterevidence: string;
+    negativeControl?: string;
+    refused?: boolean;
+    script?: string;
+  }> {
+    const staticReview =
+      args.staticVerdict != null && args.staticReasoning != null
+        ? {
+            verdict: args.staticVerdict,
+            reasoning: args.staticReasoning,
+            ...(args.staticConfirmedImpact ? { confirmedImpact: args.staticConfirmedImpact } : {}),
+          }
+        : undefined;
+    const prompt = buildReproducePrompt(
+      args.finding,
+      args.baseUrl,
+      args.auth,
+      args.context,
+      staticReview,
+      args.proofRule,
+    );
+    // No built-in tools (no Read/Glob/Grep); this session works only against
+    // the live target through the Playwright MCP server the sandbox hosts.
+    // settingSources: [] isolates it from the user's ~/.claude settings and
+    // CLAUDE.md, so their rules cannot disable the MCP tools or forbid browsing.
+    try {
+      const result = await this.runStructured({
+        prompt,
+        tools: [],
+        maxTurns: args.maxTurns ?? this.reproduceMaxTurns,
+        schema: ReproduceFindingResult,
+        signal: args.signal,
+        // @playwright/mcp serves streamable HTTP at /mcp; the legacy /sse
+        // transport did not attach tools, so connect over /mcp instead.
+        mcpServers: {
+          playwright: { type: "http", url: args.browserEndpoint.replace(/\/sse$/, "/mcp") },
+        },
+        allowedTools: ["mcp__playwright__*"],
+        settingSources: [],
+      });
+      return result.result === "reproduced"
+        ? {
+            result: result.result,
+            reasoning: result.reasoning,
+            counterevidence: result.counterevidence,
+            negativeControl: result.negativeControl,
+            script: result.script,
+          }
+        : {
+            result: result.result,
+            reasoning: result.reasoning,
+            counterevidence: result.counterevidence,
+            negativeControl: result.negativeControl,
+          };
+    } catch (err) {
+      // Mirrors validateFinding: record the refusal instead of failing the
+      // reproduce pass outright.
+      if (err instanceof RefusalError) {
+        logWarn(
+          `[reproduce:${args.finding.id}] model refused to reproduce; recording inconclusive+refused`,
+        );
+        return {
+          result: "inconclusive",
+          reasoning: "Model declined to reproduce this finding (refusal).",
+          counterevidence: "",
           refused: true,
         };
       }
@@ -352,6 +485,28 @@ export class ClaudeAgentDetector implements Detector {
      * cancelled immediately rather than waiting for the next message.
      */
     signal?: AbortSignal;
+    /**
+     * MCP servers to attach for this call only (e.g. the Playwright MCP
+     * server the live-validation sandbox hosts). Independent of `tools`:
+     * that option only bounds the built-in tool set, so an MCP server's
+     * tools are additive even when `tools` is `[]`. Omitted by every pass
+     * except `reproduceFinding`.
+     */
+    mcpServers?: Record<string, McpServerConfig>;
+    /**
+     * Explicit allow-list for MCP tool names/namespaces (e.g.
+     * `mcp__playwright__*`). `permissionMode: "bypassPermissions"` already
+     * skips permission prompts, so this is belt-and-suspenders, kept so the
+     * model's exposed tool set is documented at the call site whenever
+     * `mcpServers` is set.
+     */
+    allowedTools?: string[];
+    /**
+     * Filesystem setting sources for the SDK to load. Pass `[]` for isolation:
+     * skip the user's ~/.claude settings and CLAUDE.md. Omitted by every pass
+     * except reproduceFinding, so the others keep the SDK's load-all default.
+     */
+    settingSources?: ("user" | "project" | "local")[];
   }): Promise<z.infer<T>> {
     const jsonSchema = zodToJsonSchema(opts.schema) as Record<string, unknown>;
     // Bridge: parent gives us a signal, SDK wants a controller. Make a
@@ -390,6 +545,9 @@ export class ClaudeAgentDetector implements Detector {
             ? { thinking: { type: this.thinking } }
             : {}),
           tools: opts.tools,
+          ...(opts.mcpServers ? { mcpServers: opts.mcpServers } : {}),
+          ...(opts.allowedTools ? { allowedTools: opts.allowedTools } : {}),
+          ...(opts.settingSources !== undefined ? { settingSources: opts.settingSources } : {}),
           permissionMode: "bypassPermissions",
           maxTurns: opts.maxTurns,
           model: this.model,
@@ -401,6 +559,12 @@ export class ClaudeAgentDetector implements Detector {
         const msg = message as Record<string, unknown>;
         if (this.verbose && msg.type === "assistant") {
           this.printToolUses(msg);
+        }
+        // Surface MCP server connection status so a live-validation run shows
+        // whether the browser tools actually attached (and why, if not).
+        if (opts.mcpServers && msg.type === "system" && msg.subtype === "init") {
+          const servers = (msg.mcp_servers as { name: string; status: string }[] | undefined) ?? [];
+          for (const s of servers) console.log(`  live validation: MCP ${s.name}: ${s.status}`);
         }
         // Capture the structured answer from any terminal `result` message,
         // not just `subtype: "success"`. When a session stops at its turn cap

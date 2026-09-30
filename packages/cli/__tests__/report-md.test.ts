@@ -261,3 +261,65 @@ describe("renderSummaryMd", () => {
     expect(md).toContain("Duration:** 42.5s");
   });
 });
+
+describe("report verdict surfaces read the combined verdict", () => {
+  it("keeps a finding the live pass reopened when --exclude-false-positives is set", () => {
+    const reopened = makeFinding({
+      id: "reopened",
+      title: "Static said no, the browser said yes",
+      validation: { verdict: "false-positive", reasoning: "the token is checked" },
+      live: {
+        result: "reproduced",
+        reasoning: "the forged POST went through",
+        counterevidence: "",
+      },
+    });
+    const settled = makeFinding({
+      id: "settled",
+      title: "Still a false positive",
+      validation: { verdict: "false-positive", reasoning: "the token is checked" },
+    });
+    const out = writeMarkdownReport({
+      outDir: tmp,
+      root: "/fake",
+      startedAt: new Date(),
+      completedAt: new Date(),
+      findings: [reopened, settled],
+      filesScanned: 1,
+      byAgent: { "sql-injection": 2 },
+      excludeFalsePositives: true,
+    });
+    const names = readdirSync(join(tmp, "findings"));
+    expect(names.some((n) => n.endsWith("-reopened.md"))).toBe(true);
+    expect(names.some((n) => n.endsWith("-settled.md"))).toBe(false);
+    expect(out.findingPaths).toHaveLength(1);
+  });
+
+  it("counts the verdict tally over primaries, on the combined verdict", () => {
+    const primary = makeFinding({
+      id: "primary",
+      validation: { verdict: "uncertain", reasoning: "r" },
+      live: { result: "reproduced", reasoning: "seen in the browser", counterevidence: "" },
+    });
+    const duplicate = makeFinding({
+      id: "duplicate",
+      dedup: { duplicateOf: "primary", reasoning: "same sink" },
+    });
+    const md = renderSummaryMd(
+      {
+        outDir: "/x",
+        root: "/r",
+        startedAt: new Date(),
+        completedAt: new Date(),
+        findings: [primary, duplicate],
+        filesScanned: 1,
+        byAgent: {},
+      },
+      [],
+      [primary],
+    );
+    expect(md).toContain("- `confirmed`: 1");
+    expect(md).not.toContain("uncertain");
+    expect(md).not.toContain("_unvalidated_");
+  });
+});

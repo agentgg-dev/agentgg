@@ -63,6 +63,33 @@ describe("buildScorePrompt", () => {
     expect(out).toContain("User Interaction");
     expect(out).toContain("Scope");
   });
+
+  describe("buildScorePrompt with a confirmed impact", () => {
+    it("scores the confirmed impact, not the agent's claim", () => {
+      const out = buildScorePrompt({
+        finding: makeFinding({
+          impact: "Full database dump.",
+          validation: {
+            verdict: "confirmed",
+            reasoning: "r",
+            confirmedImpact: "Reads any user's notes.",
+            unconfirmedImpact: "Full database dump.",
+          },
+        }),
+        fileContent: "x",
+      });
+      expect(out).toContain("### Impact (confirmed by validation)\nReads any user's notes.");
+      expect(out).not.toContain("Full database dump.");
+    });
+
+    it("falls back to the agent's impact when there is no confirmed impact", () => {
+      const out = buildScorePrompt({
+        finding: makeFinding({ impact: "Agent impact." }),
+        fileContent: "x",
+      });
+      expect(out).toContain("### Impact\nAgent impact.");
+    });
+  });
 });
 
 describe("asCvssScore", () => {
