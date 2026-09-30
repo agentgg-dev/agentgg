@@ -68,4 +68,10 @@ describe("buildProofScriptPrompt", () => {
       "page.request.get(url, { headers",
     );
   });
+
+  it("asks for pacing so the recording is watchable, not a sub-second blur", () => {
+    const out = buildProofScriptPrompt(finding, "http://t");
+    expect(out).toContain("slowMo");
+    expect(out).toContain("waitForTimeout");
+  });
 });

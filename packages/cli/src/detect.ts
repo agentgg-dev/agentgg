@@ -971,9 +971,9 @@ the OPPOSITE: the value is absent or HTML-encoded in the response, and
 ## Record what happened, so the result has a video and a screenshot
 
 Put this once at the top of the file, so each test records a video and a
-screenshot at its end:
+screenshot at its end, and runs slowly enough to watch:
 
-    test.use({ video: "on", screenshot: "on" });
+    test.use({ video: "on", screenshot: "on", launchOptions: { slowMo: 400 } });
 
 At the start of every test, before any navigation, load the recording banner so
 the video and screenshot show the URL, the injected payload and, when the code
@@ -984,6 +984,12 @@ runs, an "XSS fired" line:
 The banner also captures \`alert()\`; you can assert
 \`await page.evaluate(() => (window).__agentggXss?.length > 0)\` as the proof of
 execution, instead of the local override above.
+
+A generated test finishes in well under a second, so the video is unwatchable
+without pauses. After the vulnerable effect appears, hold on it before the test
+ends so the recording and the end-screenshot show the proof:
+
+    await page.waitForTimeout(2000);
 
 ## How to write it
 
