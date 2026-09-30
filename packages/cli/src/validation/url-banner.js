@@ -152,7 +152,8 @@
   // recording. The message is captured; the dialog itself never blocks the run.
   const markFired = (msg) => {
     firedMessage = String(msg);
-    (window.__agentggXss = window.__agentggXss || []).push(firedMessage);
+    window.__agentggXss = window.__agentggXss || [];
+    window.__agentggXss.push(firedMessage);
     render();
   };
   for (const name of ["alert", "confirm", "prompt", "print"]) {

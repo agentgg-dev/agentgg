@@ -286,7 +286,7 @@ describe("orderScreenshots", () => {
 });
 
 describe("orphan cleanup", () => {
-  let odir;
+  let odir: string;
   beforeEach(() => {
     odir = mkdtempSync(join(tmpdir(), "agentgg-orphan-"));
   });
