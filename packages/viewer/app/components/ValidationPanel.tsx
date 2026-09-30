@@ -13,7 +13,8 @@ import Section from "./Section";
 export default function ValidationPanel({ finding }: { finding: Finding }) {
   const state = liveState(finding);
   const live = finding.live;
-  const screenshot = proofScreenshot(live?.evidence?.screenshots);
+  // The evidence copy already orders these proof-first, control-last.
+  const screenshots = live?.evidence?.screenshots ?? [];
   const proof = proofLine(finding);
 
   return (
@@ -88,40 +89,32 @@ export default function ValidationPanel({ finding }: { finding: Finding }) {
           </div>
         )}
 
-        {screenshot && (
-          <a
-            href={`/api/evidence/${finding.id}/${encodeURIComponent(screenshot)}`}
-            target="_blank"
-            rel="noreferrer"
-            className="mt-4 block w-[320px] max-w-full group"
-          >
-            {/* biome-ignore lint/performance/noImgElement: a local evidence file, not a build-time asset */}
-            <img
-              src={`/api/evidence/${finding.id}/${encodeURIComponent(screenshot)}`}
-              alt={`Live test of ${finding.title}`}
-              className="w-full rounded border border-bg-border group-hover:border-amber transition-colors"
-            />
-            <span className="mt-1.5 inline-flex items-center gap-1.5 text-[11px] text-ink-dim group-hover:text-amber transition-colors">
-              <ImageIcon className="w-3 h-3" />
-              {screenshot}
-            </span>
-          </a>
+        {screenshots.length > 0 && (
+          <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {screenshots.map((name) => (
+              <a
+                key={name}
+                href={`/api/evidence/${finding.id}/${encodeURIComponent(name)}`}
+                target="_blank"
+                rel="noreferrer"
+                className="block group"
+              >
+                {/* biome-ignore lint/performance/noImgElement: a local evidence file, not a build-time asset */}
+                <img
+                  src={`/api/evidence/${finding.id}/${encodeURIComponent(name)}`}
+                  alt={`Live test of ${finding.title}`}
+                  className="w-full rounded border border-bg-border group-hover:border-amber transition-colors"
+                />
+                <span className="mt-1.5 inline-flex items-center gap-1.5 text-[11px] text-ink-dim group-hover:text-amber transition-colors">
+                  <ImageIcon className="w-3 h-3" />
+                  {name}
+                </span>
+              </a>
+            ))}
+          </div>
         )}
       </Section>
     </>
-  );
-}
-
-/**
- * The one shot to put beside the result. `screenshots` is newest first, and
- * the newest is not always the proof: a run that ends on a negative control
- * records that last. The agent names its proof shot, so prefer that name and
- * fall back to the newest.
- */
-function proofScreenshot(screenshots?: string[]): string | undefined {
-  if (!screenshots || screenshots.length === 0) return undefined;
-  return (
-    screenshots.find((n) => /proof/i.test(n) && !/negative|control/i.test(n)) ?? screenshots[0]
   );
 }
 

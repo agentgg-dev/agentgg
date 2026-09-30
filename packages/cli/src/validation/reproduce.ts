@@ -579,6 +579,10 @@ export async function copyEvidence(
 ): Promise<Evidence> {
   const keepVideo = opts.keepVideo ?? true;
   const evidence: Evidence = { screenshots: [] };
+  // Start from an empty directory so a re-run (for example --force) cannot leave
+  // a previous attempt's screenshots, video or trace behind as orphans that the
+  // record never references.
+  rmSync(evidenceDir, { recursive: true, force: true });
   mkdirSync(evidenceDir, { recursive: true });
 
   const names = await listOut(

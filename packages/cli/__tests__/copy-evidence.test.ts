@@ -1,7 +1,14 @@
 // Fake-sandbox tests for the evidence copy. The real thing needs Docker, so
 // these model /out as a path -> bytes map and assert the copy's decisions.
 
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync as writeFileSyncNode,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import AdmZip from "adm-zip";
@@ -275,5 +282,22 @@ describe("orderScreenshots", () => {
   it("treats benign and baseline names as controls too", () => {
     const out = orderScreenshots(["baseline.png", "attack.png", "benign-input.png"]);
     expect(out[0]).toBe("attack.png");
+  });
+});
+
+describe("orphan cleanup", () => {
+  let odir;
+  beforeEach(() => {
+    odir = mkdtempSync(join(tmpdir(), "agentgg-orphan-"));
+  });
+  afterEach(() => rmSync(odir, { recursive: true, force: true }));
+
+  it("removes a prior run's files before copying the new ones", async () => {
+    // A leftover from an earlier --force run.
+    writeFileSyncNode(join(odir, "stale-proof.png"), Buffer.from("old"));
+    const sb = fakeSandbox(new Map([["/out/fresh.png", Buffer.from("new")]]));
+    const ev = await copyEvidence(sb, odir, FAST);
+    expect(ev.screenshots).toEqual(["fresh.png"]);
+    expect(existsSync(join(odir, "stale-proof.png"))).toBe(false);
   });
 });
