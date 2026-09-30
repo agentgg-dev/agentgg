@@ -311,7 +311,7 @@ describe("orphan cleanup", () => {
 });
 
 describe("nested playwright-test artifacts", () => {
-  let ndir;
+  let ndir: string;
   beforeEach(() => {
     ndir = mkdtempSync(join(tmpdir(), "agentgg-nested-"));
   });
