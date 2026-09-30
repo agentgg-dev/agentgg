@@ -134,9 +134,6 @@ export function parseRoutingOverride(json: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-/** The quantization values OpenRouter accepts in a routing block. */
-export const QUANTIZATIONS = ["int4", "int8", "fp4", "fp6", "fp8", "fp16", "bf16", "fp32"] as const;
-
 /**
  * Parse a value for the saved routing (`agentgg config --openrouter-routing`,
  * `agentgg init --openrouter-routing`): inline JSON, a JSON file path, or
@@ -145,16 +142,6 @@ export const QUANTIZATIONS = ["int4", "int8", "fp4", "fp6", "fp8", "fp16", "bf16
 export function parseSavedRouting(value: string): Record<string, unknown> | null {
   if (value.trim().toLowerCase() === "none") return null;
   return parseRoutingOverride(readRoutingOverrideText(value));
-}
-
-/** Parses a comma-separated quantization answer. Throws on an unknown value. */
-export function parseQuantizations(raw: string): string[] {
-  const values = csv(raw.toLowerCase());
-  const bad = values.find((v) => !(QUANTIZATIONS as readonly string[]).includes(v));
-  if (bad) {
-    throw new Error(`"${bad}" is not a quantization. Use one of: ${QUANTIZATIONS.join(", ")}.`);
-  }
-  return values;
 }
 
 /**
@@ -355,24 +342,29 @@ async function collectCredentials(args: CollectCredentialsArgs): Promise<UserCon
     throw new Error("No OpenRouter API key supplied (--api-key or $OPENROUTER_API_KEY required).");
   }
   const model = inputs.model ?? DEFAULT_MODEL;
-  let routing = inputs.openrouterRouting
-    ? (parseSavedRouting(inputs.openrouterRouting) ?? undefined)
-    : undefined;
-  if (!inputs.openrouterRouting && interactive) {
-    const answer = await input({
-      message: "Quantization to require (for example fp8). Leave empty to skip:",
-      validate: (v) => {
-        try {
-          parseQuantizations(v);
-          return true;
-        } catch (err) {
-          return (err as Error).message;
-        }
-      },
-    });
-    const quantizations = parseQuantizations(answer);
-    if (quantizations.length > 0) routing = { quantizations };
+  // Same values as `agentgg config --openrouter-routing`. Nothing entered
+  // keeps the saved routing; `none` clears it.
+  const saved = args.existing?.openrouter?.routing;
+  let raw = inputs.openrouterRouting?.trim();
+  if (raw === undefined && interactive) {
+    raw = (
+      await input({
+        message: saved
+          ? `OpenRouter routing as JSON or a file path, or none to clear. Current: ${JSON.stringify(saved)}. Leave empty to keep it:`
+          : 'OpenRouter routing as JSON or a file path, for example {"quantizations":["fp8"]}. Leave empty for the default:',
+        validate: (v) => {
+          if (!v.trim()) return true;
+          try {
+            parseSavedRouting(v);
+            return true;
+          } catch (err) {
+            return (err as Error).message;
+          }
+        },
+      })
+    ).trim();
   }
+  const routing = raw ? parseSavedRouting(raw) : (saved ?? null);
   return {
     provider: "openrouter",
     openrouter: { apiKey, model, ...(routing ? { routing } : {}) },

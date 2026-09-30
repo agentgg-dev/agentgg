@@ -8,7 +8,6 @@ import {
   createCostMeter,
   createRoutingFetch,
   openrouterModule,
-  parseQuantizations,
   parseSavedRouting,
 } from "../src/providers/openrouter.js";
 import { UsageMeter } from "../src/usage-meter.js";
@@ -386,17 +385,6 @@ describe("parseSavedRouting", () => {
   });
 });
 
-describe("parseQuantizations", () => {
-  it("accepts a comma-separated list and an empty answer", () => {
-    expect(parseQuantizations("FP8, bf16")).toEqual(["fp8", "bf16"]);
-    expect(parseQuantizations("  ")).toEqual([]);
-  });
-
-  it("rejects an unknown value", () => {
-    expect(() => parseQuantizations("fp7")).toThrow(/not a quantization/);
-  });
-});
-
 describe("openrouterModule.formatForList", () => {
   it("shows the saved routing", () => {
     const line = openrouterModule.formatForList({
@@ -405,5 +393,35 @@ describe("openrouterModule.formatForList", () => {
       schemaVersion: 1,
     });
     expect(line).toContain('routing={"quantizations":["fp8"]}');
+  });
+});
+
+describe("openrouterModule.collectCredentials routing", () => {
+  const existing = {
+    provider: "openrouter" as const,
+    openrouter: { apiKey: "sk-or-old", routing: { quantizations: ["fp8"] } },
+    schemaVersion: 1 as const,
+  };
+  const collect = (openrouterRouting?: string) =>
+    openrouterModule.collectCredentials({
+      inputs: { apiKey: "sk-or-new", openrouterRouting },
+      env: {},
+      interactive: false,
+      existing,
+    });
+
+  it("keeps the saved routing when no routing is given", async () => {
+    expect((await collect()).openrouter?.routing).toEqual({ quantizations: ["fp8"] });
+  });
+
+  it("replaces it with a new value", async () => {
+    expect((await collect('{"sort":"latency"}')).openrouter?.routing).toEqual({ sort: "latency" });
+  });
+
+  it("clears it with none", async () => {
+    expect((await collect("none")).openrouter).toEqual({
+      apiKey: "sk-or-new",
+      model: "z-ai/glm-5.2",
+    });
   });
 });

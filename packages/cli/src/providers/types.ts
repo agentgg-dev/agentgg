@@ -83,6 +83,9 @@ export interface CollectCredentialsArgs {
   env: NodeJS.ProcessEnv;
   /** True when the wizard is running interactively (allowed to prompt). */
   interactive: boolean;
+  /** The config saved before this run, so a provider can keep a setting the
+   *  user leaves unchanged. */
+  existing?: UserConfig | null;
 }
 
 /**

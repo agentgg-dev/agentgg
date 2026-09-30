@@ -248,10 +248,6 @@ export function mergeUserConfig(fresh: UserConfig, existing: UserConfig | null):
     (merged as Record<string, unknown>)[key] =
       (fresh as Record<string, unknown>)[key] ?? (existing as Record<string, unknown>)[key];
   }
-  // A re-init that saved no routing keeps the routing saved before.
-  if (merged.openrouter && !merged.openrouter.routing && existing.openrouter?.routing) {
-    merged.openrouter = { ...merged.openrouter, routing: existing.openrouter.routing };
-  }
   return merged;
 }
 
@@ -315,7 +311,7 @@ export async function runInit(
     // before we can query their /models endpoint — collect first, then
     // pick from the live list. listModels falls back to curatedModels
     // when the query fails or returns nothing.
-    fresh = await mod.collectCredentials({ inputs, env, interactive: true });
+    fresh = await mod.collectCredentials({ inputs, env, interactive: true, existing });
     setModelOnConfig(fresh, provider, await pickModel(provider, fresh, env));
   } else {
     // Default order: pick the model first so providers that derive other
@@ -324,7 +320,7 @@ export async function runInit(
     if (willPick) {
       inputs.model = await pickModel(provider, {}, env);
     }
-    fresh = await mod.collectCredentials({ inputs, env, interactive: !nonInteractive });
+    fresh = await mod.collectCredentials({ inputs, env, interactive: !nonInteractive, existing });
   }
   const merged = mergeUserConfig(fresh, existing);
   const path = saveUserConfig(merged, env);
@@ -424,7 +420,7 @@ export function registerInitCommand(program: Command): void {
     .option("--model <name>", "Default model for the chosen provider")
     .option(
       "--openrouter-routing <json|file>",
-      '(OpenRouter) routing to save as the default, as inline JSON or a JSON file path, for example {"quantizations":["fp8"]}. Change it later with `agentgg config --openrouter-routing`.',
+      '(OpenRouter) routing to save as the default, as inline JSON or a JSON file path, for example {"quantizations":["fp8"]}. `none` clears it. Same values as `agentgg config --openrouter-routing`.',
     )
     .action(async (opts: InitOpts) => {
       try {
