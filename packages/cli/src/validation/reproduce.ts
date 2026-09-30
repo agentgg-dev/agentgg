@@ -595,21 +595,23 @@ export async function copyEvidence(
   for (const name of names) {
     const lower = name.toLowerCase();
     const isVideo = lower.endsWith(".webm") || lower.endsWith(".mp4");
+    const isImage = lower.endsWith(".png") || lower.endsWith(".jpg") || lower.endsWith(".jpeg");
+    if (!isVideo && !isImage) continue; // trace.zip and the like are copied elsewhere
     if (isVideo && !keepVideo) continue;
     let buf: Buffer;
     try {
       buf = await sandbox.readFile(`/out/${name}`);
     } catch {
-      // A subdirectory (traces/) or an unreadable entry; skip it.
       continue;
     }
-    writeFileSync(join(evidenceDir, name), buf);
+    const flat = evidenceName(name);
+    writeFileSync(join(evidenceDir, flat), buf);
     if (isVideo) {
-      // `ls -1t` is newest first, so this keeps THIS finding's recording even
-      // if an earlier one's file is still in /out.
-      evidence.video ??= name;
-    } else if (lower.endsWith(".png") || lower.endsWith(".jpg") || lower.endsWith(".jpeg")) {
-      evidence.screenshots.push(name);
+      // Newest first, so this keeps THIS finding's recording. Prefer the exploit
+      // video over a control one when both were recorded.
+      if (!evidence.video || /exploit/i.test(flat)) evidence.video = flat;
+    } else {
+      evidence.screenshots.push(flat);
     }
   }
   // Lead with the proof, not the negative control the agent shot last.
@@ -645,22 +647,38 @@ export async function clearSandboxOut(sandbox: Sandbox): Promise<void> {
   await sandbox.exec(["sh", "-c", "rm -rf /out/* /out/.[!.]* 2>/dev/null || true"]);
 }
 
-/** List /out newest-first, waiting for a video to appear. */
+/** Files under /out, newest first, as paths relative to /out. Recursive so it
+ *  finds `playwright test` output nested in per-test folders as well as the MCP
+ *  server's top-level files. The `traces/` dir is excluded: its `resources/`
+ *  images are trace internals, not screenshots. Waits for a video to appear. */
 async function listOut(sandbox: Sandbox, waitMs: number, pollMs: number): Promise<string[]> {
   const deadline = Date.now() + waitMs;
+  const cmd =
+    "find /out -type f -not -path '*/traces/*' -printf '%T@ %p\\n' 2>/dev/null | sort -rn";
   for (;;) {
-    const { code, stdout } = await sandbox.exec(["ls", "-1t", "/out"]);
+    const { code, stdout } = await sandbox.exec(["sh", "-c", cmd]);
     const names =
       code === 0
         ? stdout
             .split(/\r?\n/)
-            .map((s) => s.trim())
+            .map((s) => s.replace(/^\S+\s+\/out\//, "").trim())
             .filter(Boolean)
         : [];
     const hasVideo = names.some((n) => /\.(webm|mp4)$/i.test(n));
     if (hasVideo || Date.now() >= deadline) return names;
     await delay(pollMs);
   }
+}
+
+/** Flatten a path relative to /out into a single evidence filename. Top-level
+ *  files (the MCP path) keep their name. A nested `playwright test` artifact is
+ *  named by its test when the folder says `exploit`/`control`, else flattened,
+ *  so the two tests' `video.webm` and screenshot do not collide. */
+export function evidenceName(rel: string): string {
+  if (!rel.includes("/")) return rel;
+  const ext = rel.slice(rel.lastIndexOf("."));
+  const m = rel.match(/\b(exploit|control)\b/i);
+  return m ? `${m[1].toLowerCase()}${ext}` : rel.replace(/\//g, "-");
 }
 
 /**

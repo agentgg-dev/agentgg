@@ -18,9 +18,10 @@ const sandbox: Sandbox = {
   browserEndpoint: () => "http://localhost:8931/sse",
   async exec(cmd) {
     const line = cmd.join(" ");
-    if (line.startsWith("ls -1t /out")) {
-      const names = [...out.keys()].map((p) => p.slice("/out/".length));
-      return { code: 0, stdout: `${names.reverse().join("\n")}\n`, stderr: "" };
+    if (line.includes("find /out -type f") && line.includes("-printf")) {
+      const paths = [...out.keys()].filter((p) => !p.includes("/traces/"));
+      const rows = paths.reverse().map((p, i) => `${1000 - i} ${p}`);
+      return { code: 0, stdout: `${rows.join("\n")}\n`, stderr: "" };
     }
     if (line.includes("find /out/traces")) return { code: 1, stdout: "", stderr: "" };
     if (line.includes("rm -rf")) {

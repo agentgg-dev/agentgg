@@ -968,6 +968,23 @@ The \`${CONTROL_TEST}\` test runs the same request with a benign value and asser
 the OPPOSITE: the value is absent or HTML-encoded in the response, and
 \`__xssFired\` stayed false.
 
+## Record what happened, so the result has a video and a screenshot
+
+Put this once at the top of the file, so each test records a video and a
+screenshot at its end:
+
+    test.use({ video: "on", screenshot: "on" });
+
+At the start of every test, before any navigation, load the recording banner so
+the video and screenshot show the URL, the injected payload and, when the code
+runs, an "XSS fired" line:
+
+    await page.addInitScript({ path: "/srv/url-banner.js" });
+
+The banner also captures \`alert()\`; you can assert
+\`await page.evaluate(() => (window).__agentggXss?.length > 0)\` as the proof of
+execution, instead of the local override above.
+
 ## How to write it
 
 - Navigate straight to the endpoint the PoC names. Do not explore or crawl.

@@ -13,7 +13,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import AdmZip from "adm-zip";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { clearSandboxOut, copyEvidence, orderScreenshots } from "../src/validation/reproduce.js";
+import {
+  clearSandboxOut,
+  copyEvidence,
+  evidenceName,
+  orderScreenshots,
+} from "../src/validation/reproduce.js";
 import type { Sandbox } from "../src/validation/sandbox.js";
 
 /**
@@ -21,19 +26,22 @@ import type { Sandbox } from "../src/validation/sandbox.js";
  * oldest-first insertion order, which is what `ls -1t` reverses.
  */
 function fakeSandbox(files: Map<string, Buffer>): Sandbox & { files: Map<string, Buffer> } {
-  const under = (dir: string) =>
-    [...files.keys()].filter(
-      (p) => p.startsWith(`${dir}/`) && !p.slice(dir.length + 1).includes("/"),
-    );
   return {
     files,
     browserEndpoint: () => "http://localhost:8931/sse",
     async exec(cmd) {
       const line = cmd.join(" ");
-      if (line.startsWith("ls -1t /out")) {
-        // Newest first: reverse insertion order.
-        const names = under("/out").map((p) => p.slice("/out/".length));
-        return { code: 0, stdout: `${names.reverse().join("\n")}\n`, stderr: "" };
+      if (line.includes("find /out -type f") && line.includes("-printf")) {
+        // Recursive, newest first, excluding the trace dir — the real command's
+        // shape. Newest first is reverse insertion order; timestamps descend.
+        const paths = [...files.keys()].filter(
+          (p) => p.startsWith("/out/") && !p.includes("/traces/"),
+        );
+        const out = paths
+          .reverse()
+          .map((p, i) => `${1000 - i} ${p}`)
+          .join("\n");
+        return { code: 0, stdout: `${out}\n`, stderr: "" };
       }
       if (line.includes("-name trace.zip")) {
         const hits = [...files.keys()].filter((p) => p.endsWith("/trace.zip"));
@@ -299,5 +307,41 @@ describe("orphan cleanup", () => {
     const ev = await copyEvidence(sb, odir, FAST);
     expect(ev.screenshots).toEqual(["fresh.png"]);
     expect(existsSync(join(odir, "stale-proof.png"))).toBe(false);
+  });
+});
+
+describe("nested playwright-test artifacts", () => {
+  let ndir;
+  beforeEach(() => {
+    ndir = mkdtempSync(join(tmpdir(), "agentgg-nested-"));
+  });
+  afterEach(() => rmSync(ndir, { recursive: true, force: true }));
+
+  it("collects the video and screenshot from per-test folders with clean names", async () => {
+    const sb = fakeSandbox(
+      new Map([
+        ["/out/proof-exploit-chromium/video.webm", Buffer.from("v1")],
+        ["/out/proof-exploit-chromium/test-finished-1.png", Buffer.from("s1")],
+        ["/out/proof-control-chromium/video.webm", Buffer.from("v2")],
+        ["/out/proof-control-chromium/test-finished-1.png", Buffer.from("s2")],
+      ]),
+    );
+    const ev = await copyEvidence(sb, ndir, FAST);
+    expect(ev.video).toBe("exploit.webm");
+    expect(ev.screenshots).toEqual(["exploit.png", "control.png"]);
+    expect(existsSync(join(ndir, "exploit.png"))).toBe(true);
+    expect(existsSync(join(ndir, "control.webm"))).toBe(true);
+  });
+});
+
+describe("evidenceName", () => {
+  it("keeps a top-level MCP filename unchanged", () => {
+    expect(evidenceName("xss-proof.png")).toBe("xss-proof.png");
+  });
+  it("names a nested exploit artifact by its test", () => {
+    expect(evidenceName("proof-exploit-chromium/video.webm")).toBe("exploit.webm");
+  });
+  it("flattens a nested artifact that names no test", () => {
+    expect(evidenceName("run-1/foo/shot.png")).toBe("run-1-foo-shot.png");
   });
 });
