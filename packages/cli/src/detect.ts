@@ -991,6 +991,14 @@ ends so the recording and the end-screenshot show the proof:
 
     await page.waitForTimeout(2000);
 
+If the effect only becomes visible after a reload (for example a login bypass
+that sets a session cookie through \`fetch\`), navigate to the affected page again
+before that pause, so the screenshot and video show the result and not the
+pre-exploit page:
+
+    await page.goto(BASE_URL);   // now the page renders the signed-in state
+    await page.waitForTimeout(2000);
+
 ## How to write it
 
 - Navigate straight to the endpoint the PoC names. Do not explore or crawl.
