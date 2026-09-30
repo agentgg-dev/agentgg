@@ -16,10 +16,13 @@ const DEFAULT_MODEL = "gpt-5";
 const DEFAULT_TPM = 30_000;
 
 function buildDetector(config: UserConfig, options: ResolveOptions): Detector {
-  const apiKey = options.credentials?.openaiApiKey ?? config.openai?.apiKey;
+  const apiKey =
+    options.credentials?.openaiApiKey ??
+    config.openai?.apiKey ??
+    (process.env.OPENAI_API_KEY?.trim() || undefined);
   if (!apiKey) {
     throw new Error(
-      "OpenAI provider requested but no API key available. Pass --api-key or run `agentgg init --provider openai`.",
+      "OpenAI provider requested but no API key available. Pass --api-key, set $OPENAI_API_KEY, or run `agentgg init --provider openai`.",
     );
   }
   const modelName = options.model ?? config.openai?.model ?? DEFAULT_MODEL;
