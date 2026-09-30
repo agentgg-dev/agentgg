@@ -1,7 +1,15 @@
 import type { UserConfig } from "@agentgg/core";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolveDetector } from "../src/llm.js";
 import { getProviderModule } from "../src/providers/index.js";
+
+// The key env vars are a credential source, so every test starts without them.
+beforeEach(() => {
+  for (const name of ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY"]) {
+    vi.stubEnv(name, "");
+  }
+});
+afterEach(() => vi.unstubAllEnvs());
 
 /**
  * These tests verify the routing logic in `resolveDetector` — which
@@ -113,6 +121,32 @@ describe("resolveDetector (one-shot credential overrides)", () => {
       credentials: { ollamaBaseUrl: "http://10.0.0.5:11434" },
     });
     expect(detector.name).toBe("ollama");
+  });
+
+  it("falls back to $ANTHROPIC_API_KEY when neither flags nor config supply one", () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-api03-from-env");
+    const config: UserConfig = { provider: "openai", openai: { apiKey: "sk-x" }, schemaVersion: 1 };
+    expect(resolveDetector(config, { provider: "anthropic" }).name).toBe("anthropic-api");
+  });
+
+  it("a saved anthropic block wins over the env, without mixing the two", () => {
+    vi.stubEnv("ANTHROPIC_API_KEY", "sk-ant-api03-from-env");
+    const config: UserConfig = {
+      provider: "anthropic",
+      anthropic: { oauthToken: "sk-ant-oat01-saved" },
+      schemaVersion: 1,
+    };
+    expect(resolveDetector(config, { provider: "anthropic" }).name).toBe("anthropic-oauth");
+  });
+
+  it("falls back to $OPENAI_API_KEY when neither flags nor config supply one", () => {
+    vi.stubEnv("OPENAI_API_KEY", "sk-from-env");
+    const config: UserConfig = {
+      provider: "anthropic",
+      anthropic: { apiKey: "sk-ant-api03-x" },
+      schemaVersion: 1,
+    };
+    expect(resolveDetector(config, { provider: "openai" }).name).toBe("openai");
   });
 
   it("rejects when neither CLI nor config supply credentials", () => {

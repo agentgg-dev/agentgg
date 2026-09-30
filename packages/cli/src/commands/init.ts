@@ -226,6 +226,7 @@ export interface InitOpts {
   awsSessionToken?: string;
   project?: string;
   model?: string;
+  openrouterRouting?: string;
 }
 
 /**
@@ -298,6 +299,7 @@ export async function runInit(
     awsSessionToken: opts.awsSessionToken,
     project: opts.project,
     model: opts.model,
+    openrouterRouting: opts.openrouterRouting,
   };
 
   const mod = getProviderModule(provider);
@@ -309,7 +311,7 @@ export async function runInit(
     // before we can query their /models endpoint — collect first, then
     // pick from the live list. listModels falls back to curatedModels
     // when the query fails or returns nothing.
-    fresh = await mod.collectCredentials({ inputs, env, interactive: true });
+    fresh = await mod.collectCredentials({ inputs, env, interactive: true, existing });
     setModelOnConfig(fresh, provider, await pickModel(provider, fresh, env));
   } else {
     // Default order: pick the model first so providers that derive other
@@ -318,7 +320,7 @@ export async function runInit(
     if (willPick) {
       inputs.model = await pickModel(provider, {}, env);
     }
-    fresh = await mod.collectCredentials({ inputs, env, interactive: !nonInteractive });
+    fresh = await mod.collectCredentials({ inputs, env, interactive: !nonInteractive, existing });
   }
   const merged = mergeUserConfig(fresh, existing);
   const path = saveUserConfig(merged, env);
@@ -416,6 +418,10 @@ export function registerInitCommand(program: Command): void {
       "(Vertex) GCP project ID hosting the Vertex AI Model Garden endpoint. Falls back to $GOOGLE_CLOUD_PROJECT / $GCLOUD_PROJECT at scan time if unset.",
     )
     .option("--model <name>", "Default model for the chosen provider")
+    .option(
+      "--openrouter-routing <json|file>",
+      '(OpenRouter) routing to save as the default, as inline JSON or a JSON file path, for example {"quantizations":["fp8"]}. `none` clears it. Same values as `agentgg config --openrouter-routing`.',
+    )
     .action(async (opts: InitOpts) => {
       try {
         await runInit(opts);

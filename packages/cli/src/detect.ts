@@ -53,7 +53,7 @@ export const LlmFinding = z.object({
   poc: z
     .string()
     .describe(
-      "Concrete reproduction steps. An HTTP request with a payload, a sequence of CLI commands, or a code snippet that triggers the issue.",
+      "Concrete reproduction steps in Markdown. When the issue is reached over HTTP, write each request the attacker sends as a fenced ```http block in raw HTTP form: the request line, the headers that matter (Host, Cookie or Authorization, Content-Type), a blank line, then the exact body. Use placeholders such as <attacker-token> for values the attacker must obtain. Put one short sentence before each block saying what it does, and after the last block say what the response shows. For a non-HTTP issue, give the CLI commands or code snippet in a fenced block instead.",
     ),
   impact: z
     .string()

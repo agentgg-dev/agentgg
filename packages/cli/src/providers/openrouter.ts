@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import type { UserConfig } from "@agentgg/core";
 import { createOpenAI } from "@ai-sdk/openai";
-import { password } from "@inquirer/prompts";
+import { input, password } from "@inquirer/prompts";
 import type { Detector } from "../detect.js";
 import { VercelAgentDetector } from "../detectors/index.js";
 import { createDeadlineFetch } from "../request-deadline.js";
@@ -24,11 +24,15 @@ function csv(raw: string | undefined): string[] {
 }
 
 /**
- * OpenRouter `provider` routing block, env-driven so ops can retune
- * without a CLI rebuild. Defaults are tuned for a code-analysis agent:
- * fp8 only (quality on coding/tool-use), require the params we send
- * (drops providers that would silently ignore tool-calls), and route by
- * price (a throughput sort walks up the price curve). An explicit
+ * OpenRouter `provider` routing block. Three layers, later ones winning per
+ * key: the routing saved in the user config (`agentgg config
+ * --openrouter-routing`), the OPENROUTER_* env vars, then the scan-time
+ * `--openrouter-routing` flag. Defaults are tuned for a code-analysis agent:
+ * require the params we send (drops providers that would silently ignore
+ * tool-calls) and route by price (a throughput sort walks up the price
+ * curve). No quantization filter by default: which quantizations exist
+ * depends on the model, and a filter no endpoint matches fails every call.
+ * Save one with `agentgg config --openrouter-routing`. An explicit
  * OPENROUTER_PROVIDER_ORDER pins an allow-list and switches off open
  * fallback.
  *
@@ -45,21 +49,21 @@ function csv(raw: string | undefined): string[] {
  * call. Nothing on our side repairs that, so a host has to be excludable by
  * config.
  */
-export function buildProviderRouting(overrideJson?: string): Record<string, unknown> {
+export function buildProviderRouting(
+  overrideJson?: string,
+  saved?: Record<string, unknown>,
+): Record<string, unknown> {
   const quant = csv(process.env.OPENROUTER_QUANTIZATIONS);
-  const routing: Record<string, unknown> = {
-    quantizations: quant.length > 0 ? quant : ["fp8"],
-    require_parameters: true,
-  };
+  const routing: Record<string, unknown> = { require_parameters: true, ...saved };
+  if (quant.length > 0) routing.quantizations = quant;
   const ignore = csv(process.env.OPENROUTER_IGNORE);
   if (ignore.length > 0) routing.ignore = ignore;
   const order = csv(process.env.OPENROUTER_PROVIDER_ORDER);
   if (order.length > 0) {
     routing.order = order;
     routing.allow_fallbacks = process.env.OPENROUTER_ALLOW_FALLBACKS !== "0";
-  } else {
-    routing.sort = process.env.OPENROUTER_SORT ?? "price";
   }
+  if (process.env.OPENROUTER_SORT) routing.sort = process.env.OPENROUTER_SORT;
   const prompt = process.env.OPENROUTER_MAX_PRICE_PROMPT;
   const completion = process.env.OPENROUTER_MAX_PRICE_COMPLETION;
   if (prompt || completion) {
@@ -71,15 +75,17 @@ export function buildProviderRouting(overrideJson?: string): Record<string, unkn
   if (process.env.OPENROUTER_ZDR === "1") routing.zdr = true;
 
   // --openrouter-routing JSON is authoritative: its keys override the
-  // env-derived defaults (fp8 + require_parameters survive unless the JSON
-  // sets them). A parse failure throws here, before any LLM call or spend.
+  // env-derived defaults (require_parameters survives unless the JSON sets
+  // it). A parse failure throws here, before any LLM call or spend.
   if (overrideJson != null && overrideJson.trim() !== "") {
     const override = parseRoutingOverride(readRoutingOverrideText(overrideJson));
     Object.assign(routing, override);
-    // `order`/`only` (pin providers) and `sort` are opposing intents; when
-    // the JSON pins providers, drop the env-default sort so they don't fight.
-    if (routing.order != null || routing.only != null) delete routing.sort;
   }
+  // `order`/`only` (pin providers) and `sort` are opposing intents: a pin
+  // from any layer drops the sort, and only an unpinned block gets the
+  // price default.
+  if (routing.order != null || routing.only != null) delete routing.sort;
+  else routing.sort ??= "price";
   return routing;
 }
 
@@ -126,6 +132,16 @@ export function parseRoutingOverride(json: string): Record<string, unknown> {
     );
   }
   return parsed as Record<string, unknown>;
+}
+
+/**
+ * Parse a value for the saved routing (`agentgg config --openrouter-routing`,
+ * `agentgg init --openrouter-routing`): inline JSON, a JSON file path, or
+ * `none` to clear it. Returns null for `none`.
+ */
+export function parseSavedRouting(value: string): Record<string, unknown> | null {
+  if (value.trim().toLowerCase() === "none") return null;
+  return parseRoutingOverride(readRoutingOverrideText(value));
 }
 
 /**
@@ -298,7 +314,10 @@ function buildDetector(config: UserConfig, options: ResolveOptions): Detector {
   // One counter per detector: the fetch wrapper folds each response's charge
   // in, and the usage meter reads the running total at every checkpoint.
   const cost = createCostMeter();
-  const routingFetch = buildOpenRouterFetch(buildProviderRouting(options.openrouterRouting), cost);
+  const routingFetch = buildOpenRouterFetch(
+    buildProviderRouting(options.openrouterRouting, config.openrouter?.routing),
+    cost,
+  );
 
   const openrouter = createOpenAI({ apiKey, baseURL, fetch: routingFetch });
 
@@ -323,7 +342,34 @@ async function collectCredentials(args: CollectCredentialsArgs): Promise<UserCon
     throw new Error("No OpenRouter API key supplied (--api-key or $OPENROUTER_API_KEY required).");
   }
   const model = inputs.model ?? DEFAULT_MODEL;
-  return { provider: "openrouter", openrouter: { apiKey, model }, schemaVersion: 1 };
+  // Same values as `agentgg config --openrouter-routing`. Nothing entered
+  // keeps the saved routing; `none` clears it.
+  const saved = args.existing?.openrouter?.routing;
+  let raw = inputs.openrouterRouting?.trim();
+  if (raw === undefined && interactive) {
+    raw = (
+      await input({
+        message: saved
+          ? `OpenRouter routing as JSON or a file path, or none to clear. Current: ${JSON.stringify(saved)}. Leave empty to keep it:`
+          : 'OpenRouter routing as JSON or a file path, for example {"quantizations":["fp8"]}. Leave empty for the default:',
+        validate: (v) => {
+          if (!v.trim()) return true;
+          try {
+            parseSavedRouting(v);
+            return true;
+          } catch (err) {
+            return (err as Error).message;
+          }
+        },
+      })
+    ).trim();
+  }
+  const routing = raw ? parseSavedRouting(raw) : (saved ?? null);
+  return {
+    provider: "openrouter",
+    openrouter: { apiKey, model, ...(routing ? { routing } : {}) },
+    schemaVersion: 1,
+  };
 }
 
 function maskValue(s: string): string {
@@ -334,7 +380,7 @@ function maskValue(s: string): string {
 export const openrouterModule: ProviderModule = {
   name: "openrouter",
   label: "OpenRouter",
-  description: "OpenRouter-routed open models (default: GLM-5.2, fp8)",
+  description: "OpenRouter-routed models (default: GLM-5.2)",
   defaultModel: DEFAULT_MODEL,
   acceptedFlags: ["api-key"],
   curatedModels: ["z-ai/glm-5.2", "z-ai/glm-5.2:nitro", "z-ai/glm-5"],
@@ -343,7 +389,10 @@ export const openrouterModule: ProviderModule = {
   formatForList(cfg: UserConfig): string | null {
     if (!cfg.openrouter) return null;
     const model = cfg.openrouter.model ?? "(default)";
-    return `openrouter  auth=API key  model=${model}`;
+    const routing = cfg.openrouter.routing
+      ? `  routing=${JSON.stringify(cfg.openrouter.routing)}`
+      : "";
+    return `openrouter  auth=API key  model=${model}${routing}`;
   },
   redact(cfg: UserConfig): UserConfig {
     if (!cfg.openrouter) return cfg;

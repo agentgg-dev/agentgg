@@ -1,6 +1,6 @@
 import type { UserConfig } from "@agentgg/core";
 import { describe, expect, it } from "vitest";
-import { formatConfig } from "../src/commands/config.js";
+import { applyRoutingUpdate, formatConfig } from "../src/commands/config.js";
 import { buildCredentialsFromOpts } from "../src/providers/cli-flags.js";
 
 describe("formatConfig", () => {
@@ -62,4 +62,31 @@ describe("formatConfig", () => {
 it("maps --api-key onto the openrouter credential slot", () => {
   const creds = buildCredentialsFromOpts({ apiKey: "sk-or-v1-x" });
   expect(creds.openrouterApiKey).toBe("sk-or-v1-x");
+});
+
+describe("applyRoutingUpdate", () => {
+  const cfg: UserConfig = {
+    provider: "openrouter",
+    openrouter: { apiKey: "sk-or-v1-x", model: "z-ai/glm-5.2" },
+    schemaVersion: 1,
+  };
+
+  it("saves and then clears the routing, keeping the rest of the block", () => {
+    const saved = applyRoutingUpdate(cfg, { quantizations: ["fp8"] });
+    expect(saved.openrouter).toEqual({
+      apiKey: "sk-or-v1-x",
+      model: "z-ai/glm-5.2",
+      routing: { quantizations: ["fp8"] },
+    });
+    expect(applyRoutingUpdate(saved, null).openrouter).toEqual(cfg.openrouter);
+  });
+
+  it("refuses when OpenRouter is not configured", () => {
+    const other: UserConfig = {
+      provider: "ollama",
+      ollama: { baseUrl: "http://localhost:11434" },
+      schemaVersion: 1,
+    };
+    expect(() => applyRoutingUpdate(other, { sort: "price" })).toThrow(/not configured/);
+  });
 });

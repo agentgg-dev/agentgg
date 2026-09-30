@@ -8,6 +8,7 @@ import {
   createCostMeter,
   createRoutingFetch,
   openrouterModule,
+  parseSavedRouting,
 } from "../src/providers/openrouter.js";
 import { UsageMeter } from "../src/usage-meter.js";
 
@@ -28,12 +29,17 @@ afterEach(() => {
 });
 
 describe("buildProviderRouting", () => {
-  it("defaults to fp8 + require_parameters + price sort", () => {
+  it("defaults to require_parameters + price sort, with no quantization filter", () => {
     const r = buildProviderRouting();
-    expect(r.quantizations).toEqual(["fp8"]);
+    expect(r.quantizations).toBeUndefined();
     expect(r.require_parameters).toBe(true);
     expect(r.sort).toBe("price");
     expect(r.order).toBeUndefined();
+  });
+
+  it("pins quantizations only when OPENROUTER_QUANTIZATIONS is set", () => {
+    process.env.OPENROUTER_QUANTIZATIONS = "fp8, bf16";
+    expect(buildProviderRouting().quantizations).toEqual(["fp8", "bf16"]);
   });
 
   it("uses an explicit provider order when set, dropping sort", () => {
@@ -79,11 +85,10 @@ describe("buildProviderRouting", () => {
 });
 
 describe("buildProviderRouting with --openrouter-routing override", () => {
-  it("merges the JSON override over env defaults, keeping fp8 + require_parameters", () => {
+  it("merges the JSON override over env defaults, keeping require_parameters", () => {
     const r = buildProviderRouting('{"order":["baseten"],"allow_fallbacks":false}');
     expect(r.order).toEqual(["baseten"]);
     expect(r.allow_fallbacks).toBe(false);
-    expect(r.quantizations).toEqual(["fp8"]); // default preserved
     expect(r.require_parameters).toBe(true); // default preserved
     expect(r.sort).toBeUndefined(); // pinned providers -> env-default sort dropped
   });
@@ -337,5 +342,86 @@ describe("createRoutingFetch output caps", () => {
   it("ignores a cap that is not a positive number", async () => {
     process.env.OPENROUTER_MAX_TOKENS = "nope";
     expect((await send({})).max_tokens).toBe(64_000);
+  });
+});
+
+describe("buildProviderRouting with saved routing", () => {
+  it("applies the saved routing over the built-in defaults", () => {
+    const r = buildProviderRouting(undefined, { quantizations: ["fp8"], sort: "latency" });
+    expect(r.quantizations).toEqual(["fp8"]);
+    expect(r.sort).toBe("latency");
+    expect(r.require_parameters).toBe(true);
+  });
+
+  it("env vars override the saved routing, key by key", () => {
+    process.env.OPENROUTER_QUANTIZATIONS = "bf16";
+    const r = buildProviderRouting(undefined, { quantizations: ["fp8"], zdr: true });
+    expect(r.quantizations).toEqual(["bf16"]);
+    expect(r.zdr).toBe(true);
+  });
+
+  it("the scan flag overrides both", () => {
+    process.env.OPENROUTER_QUANTIZATIONS = "bf16";
+    const r = buildProviderRouting('{"quantizations":["fp16"]}', { quantizations: ["fp8"] });
+    expect(r.quantizations).toEqual(["fp16"]);
+  });
+
+  it("a saved provider pin drops the default sort", () => {
+    const r = buildProviderRouting(undefined, { only: ["deepinfra"] });
+    expect(r.only).toEqual(["deepinfra"]);
+    expect(r.sort).toBeUndefined();
+  });
+});
+
+describe("parseSavedRouting", () => {
+  it("parses inline JSON and treats none as clear", () => {
+    expect(parseSavedRouting('{"quantizations":["fp8"]}')).toEqual({ quantizations: ["fp8"] });
+    expect(parseSavedRouting("none")).toBeNull();
+    expect(parseSavedRouting(" NONE ")).toBeNull();
+  });
+
+  it("rejects a value that is neither JSON nor a file", () => {
+    expect(() => parseSavedRouting("fp8")).toThrow(/neither inline JSON/);
+  });
+});
+
+describe("openrouterModule.formatForList", () => {
+  it("shows the saved routing", () => {
+    const line = openrouterModule.formatForList({
+      provider: "openrouter",
+      openrouter: { apiKey: "sk-or-v1-x", routing: { quantizations: ["fp8"] } },
+      schemaVersion: 1,
+    });
+    expect(line).toContain('routing={"quantizations":["fp8"]}');
+  });
+});
+
+describe("openrouterModule.collectCredentials routing", () => {
+  const existing = {
+    provider: "openrouter" as const,
+    openrouter: { apiKey: "sk-or-old", routing: { quantizations: ["fp8"] } },
+    schemaVersion: 1 as const,
+  };
+  const collect = (openrouterRouting?: string) =>
+    openrouterModule.collectCredentials({
+      inputs: { apiKey: "sk-or-new", openrouterRouting },
+      env: {},
+      interactive: false,
+      existing,
+    });
+
+  it("keeps the saved routing when no routing is given", async () => {
+    expect((await collect()).openrouter?.routing).toEqual({ quantizations: ["fp8"] });
+  });
+
+  it("replaces it with a new value", async () => {
+    expect((await collect('{"sort":"latency"}')).openrouter?.routing).toEqual({ sort: "latency" });
+  });
+
+  it("clears it with none", async () => {
+    expect((await collect("none")).openrouter).toEqual({
+      apiKey: "sk-or-new",
+      model: "z-ai/glm-5.2",
+    });
   });
 });

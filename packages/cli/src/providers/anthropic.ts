@@ -12,12 +12,25 @@ export function isAnthropicOauthToken(s: string): boolean {
 }
 
 function buildDetector(config: UserConfig, options: ResolveOptions): Detector {
-  const apiKey = options.credentials?.anthropicApiKey ?? config.anthropic?.apiKey;
-  const oauthToken = options.credentials?.anthropicOauthToken ?? config.anthropic?.oauthToken;
+  // Sources in order: flags, the saved config, then the env. The first
+  // source with either field supplies both, so the API key and the OAuth
+  // token never come from different places.
+  const sources = [
+    {
+      apiKey: options.credentials?.anthropicApiKey,
+      oauthToken: options.credentials?.anthropicOauthToken,
+    },
+    { apiKey: config.anthropic?.apiKey, oauthToken: config.anthropic?.oauthToken },
+    {
+      apiKey: process.env.ANTHROPIC_API_KEY?.trim() || undefined,
+      oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN?.trim() || undefined,
+    },
+  ];
+  const { apiKey, oauthToken } = sources.find((s) => s.apiKey || s.oauthToken) ?? {};
 
   if (!apiKey && !oauthToken) {
     throw new Error(
-      "Anthropic provider requested but no credentials available. Pass --api-key / --oauth-token or run `agentgg init --provider anthropic`.",
+      "Anthropic provider requested but no credentials available. Pass --api-key / --oauth-token, set $ANTHROPIC_API_KEY or $CLAUDE_CODE_OAUTH_TOKEN, or run `agentgg init --provider anthropic`.",
     );
   }
   if (apiKey && oauthToken) {
