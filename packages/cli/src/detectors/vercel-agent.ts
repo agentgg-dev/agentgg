@@ -24,6 +24,7 @@ import {
   buildCreateAgentPrompt,
   buildExcludePrompt,
   buildPreconditionPrompt,
+  buildProofScriptPrompt,
   buildReconPrompt,
   buildReproducePrompt,
   type CreateAgentArgs,
@@ -31,6 +32,7 @@ import {
   type DetectionResult as DetectionResultType,
   type Detector,
   findUnverifiedExcerpts,
+  GeneratedProofScript,
   hydrateFinding,
   languageFromPath,
   normalizeCode,
@@ -1320,6 +1322,42 @@ export class VercelAgentDetector implements Detector {
       debugLog("VercelAgentDetector.validateFindingByScope", err);
       throw err;
     }
+  }
+
+  async generateReproScript(args: {
+    finding: Finding;
+    baseUrl: string;
+    auth?: TargetAuth;
+    context?: string;
+    proofRule?: string;
+    staticVerdict?: string;
+    staticReasoning?: string;
+    signal?: AbortSignal;
+  }): Promise<string> {
+    const staticReview =
+      args.staticVerdict != null && args.staticReasoning != null
+        ? { verdict: args.staticVerdict, reasoning: args.staticReasoning }
+        : undefined;
+    const { object } = await this.metered(
+      () =>
+        generateObject({
+          model: this.model,
+          schema: GeneratedProofScript,
+          mode: this.objectMode,
+          prompt: buildProofScriptPrompt(
+            args.finding,
+            args.baseUrl,
+            args.auth,
+            args.context,
+            args.proofRule,
+            staticReview,
+          ),
+          providerOptions: this.providerOptionsArg(),
+          abortSignal: args.signal,
+        }),
+      { label: `proof-script:${args.finding.id}`, signal: args.signal },
+    );
+    return object.script;
   }
 
   async reproduceFinding(args: {

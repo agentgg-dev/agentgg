@@ -10,11 +10,13 @@ import {
   buildCreateAgentPrompt,
   buildExcludePrompt,
   buildPreconditionPrompt,
+  buildProofScriptPrompt,
   buildReconPrompt,
   buildReproducePrompt,
   type CreateAgentArgs,
   DetectionResult,
   type Detector,
+  GeneratedProofScript,
   hydrateFinding,
   PreconditionCheck,
   type PreconditionCheckArgs,
@@ -278,6 +280,40 @@ export class ClaudeAgentDetector implements Detector {
       }
       throw err;
     }
+  }
+
+  async generateReproScript(args: {
+    finding: Finding;
+    baseUrl: string;
+    auth?: TargetAuth;
+    context?: string;
+    proofRule?: string;
+    staticVerdict?: string;
+    staticReasoning?: string;
+    signal?: AbortSignal;
+  }): Promise<string> {
+    const staticReview =
+      args.staticVerdict != null && args.staticReasoning != null
+        ? { verdict: args.staticVerdict, reasoning: args.staticReasoning }
+        : undefined;
+    // No tools and a single turn: this path exists to skip the browser loop, so
+    // giving it any tool would reintroduce the cost it is meant to avoid.
+    const result = await this.runStructured({
+      prompt: buildProofScriptPrompt(
+        args.finding,
+        args.baseUrl,
+        args.auth,
+        args.context,
+        args.proofRule,
+        staticReview,
+      ),
+      tools: [],
+      maxTurns: 1,
+      schema: GeneratedProofScript,
+      signal: args.signal,
+      settingSources: [],
+    });
+    return result.script;
   }
 
   async reproduceFinding(args: {

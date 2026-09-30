@@ -28,6 +28,11 @@ function fakeSandbox(files: Map<string, Buffer>): Sandbox & { files: Map<string,
         const names = under("/out").map((p) => p.slice("/out/".length));
         return { code: 0, stdout: `${names.reverse().join("\n")}\n`, stderr: "" };
       }
+      if (line.includes("-name trace.zip")) {
+        const hits = [...files.keys()].filter((p) => p.endsWith("/trace.zip"));
+        if (hits.length === 0) return { code: 1, stdout: "", stderr: "" };
+        return { code: 0, stdout: `${hits.join("\n")}\n`, stderr: "" };
+      }
       if (line.includes("find /out/traces")) {
         const hits = [...files.keys()].filter((p) => p.startsWith("/out/traces/"));
         if (hits.length === 0) return { code: 1, stdout: "", stderr: "no such dir" };
@@ -222,5 +227,36 @@ describe("clearSandboxOut", () => {
     );
     await clearSandboxOut(sb);
     expect([...sb.files.keys()]).toEqual([]);
+  });
+});
+
+describe("a trace.zip written by the test runner", () => {
+  let dir2: string;
+  beforeEach(() => {
+    dir2 = mkdtempSync(join(tmpdir(), "agentgg-zip-"));
+  });
+  afterEach(() => rmSync(dir2, { recursive: true, force: true }));
+
+  const snap = JSON.stringify({
+    type: "resource-snapshot",
+    snapshot: {
+      request: { method: "GET", url: "http://app/search?q=x", headers: [] },
+      response: { status: 200, headers: [] },
+    },
+  });
+
+  const zipped = () => {
+    const z = new AdmZip();
+    z.addFile("trace.trace", Buffer.from("t"));
+    z.addFile("trace.network", Buffer.from(snap));
+    return z.toBuffer();
+  };
+
+  it("copies it out and reads its requests, like a loose trace directory", async () => {
+    const sb = fakeSandbox(new Map([["/out/exploit-chromium/trace.zip", zipped()]]));
+    const ev = await copyEvidence(sb, dir2, FAST);
+    expect(ev.trace).toBe("trace.zip");
+    expect(existsSync(join(dir2, "trace.zip"))).toBe(true);
+    expect(ev.requests).toEqual([{ method: "GET", url: "http://app/search?q=x", status: 200 }]);
   });
 });

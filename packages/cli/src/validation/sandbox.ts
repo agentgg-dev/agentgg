@@ -9,7 +9,7 @@ const pexec = promisify(execFile);
 
 // Pinned image tag; the scan command's default sandbox image for --target-image.
 // Keep in sync with the tag in sandbox.Dockerfile's build comment.
-export const DEFAULT_SANDBOX_IMAGE = "agentgg/live-sandbox:pw1.56.0-mcp0.0.41-5";
+export const DEFAULT_SANDBOX_IMAGE = "agentgg/live-sandbox:pw1.56.0-mcp0.0.41-7";
 
 // Container port the Playwright MCP server binds; published 1:1 on the host so
 // the Host header the MCP client sends matches what the server allows.

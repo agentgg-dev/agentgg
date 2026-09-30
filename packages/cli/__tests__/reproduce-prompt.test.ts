@@ -62,4 +62,13 @@ describe("buildReproducePrompt", () => {
     expect(out).toContain("The impact to reproduce is the one the review confirmed");
     expect(out).toContain("Reads any user's notes.");
   });
+
+  it("tells the reproduce agent to prove XSS with an alert the recording can show", () => {
+    const out = buildReproducePrompt(finding, "http://t");
+    expect(out).toContain("alert(document.domain)");
+  });
+
+  it("offers the sentinel as a dialog-free alternative the banner also captures", () => {
+    expect(buildReproducePrompt(finding, "http://t")).toContain("window.__agentggXss");
+  });
 });

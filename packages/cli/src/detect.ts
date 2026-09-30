@@ -7,6 +7,7 @@ import type { AgentSpec } from "./agent-spec.js";
 import type { PreFilterHit, TaintStep } from "./pre-filter.js";
 import type { UsageMeter } from "./usage-meter.js";
 import { proofRules } from "./validation/proof-rules.js";
+import { CONTROL_TEST, EXPLOIT_TEST } from "./validation/proof-script.js";
 import type { TargetAuth } from "./validation/target-auth.js";
 
 /**
@@ -155,6 +156,15 @@ export type SuggestExcludesResult = z.infer<typeof SuggestExcludesResult>;
  * the call site, not here, so a model that omits or over-populates the
  * field still validates.
  */
+/** The script-first path's only output. One field, so a model that wraps its
+ *  answer in prose or fences still yields a usable spec. */
+export const GeneratedProofScript = z.object({
+  script: z
+    .string()
+    .describe("Complete Playwright spec source carrying both required tests. No markdown fences."),
+});
+export type GeneratedProofScript = z.infer<typeof GeneratedProofScript>;
+
 export const ReproduceFindingResult = z.object({
   result: z
     .enum(["reproduced", "refuted", "inconclusive"])
@@ -360,6 +370,22 @@ export interface Detector {
     /** The generated `repro.spec.ts` source. Only present when reproduced. */
     script?: string;
   }>;
+
+  /**
+   * Script-first reproduction: one call, no browser tools, returns a Playwright
+   * spec that carries both halves of the proof. Optional, so a backend without
+   * it falls straight through to `reproduceFinding`.
+   */
+  generateReproScript?(args: {
+    finding: Finding;
+    baseUrl: string;
+    auth?: TargetAuth;
+    context?: string;
+    proofRule?: string;
+    staticVerdict?: string;
+    staticReasoning?: string;
+    signal?: AbortSignal;
+  }): Promise<string>;
 
   /**
    * Scope-only validation — cheaper alternative to `validateFinding`
@@ -791,7 +817,12 @@ ${proofRulesBlock}${staticReviewBlock}
 2. Reproduce the PoC above against the live application. If you cannot find
    an HTTP way to reach it, say what you tried and return 'inconclusive'.
 3. At the point the vulnerable behavior would appear, take a screenshot
-   as proof, whether or not it reproduces.
+   as proof, whether or not it reproduces. When the finding is cross-site
+   scripting, make the injected code prove itself in a way the recording can
+   show: call \`alert(document.domain)\`, or set
+   \`window.__agentggXss = document.domain\`. The sandbox captures either and
+   draws it on the recording. A payload that only changes the title leaves no
+   visible proof.
 4. Run the control the proof rules ask for: the same steps without your
    input, or without the session. Report what happened in
    \`negativeControl\`. A 'reproduced' result without it is downgraded.
@@ -819,6 +850,138 @@ Be honest: a PoC that fails to reproduce is a valid, useful outcome. Do
 not report 'reproduced' on a guess; only report what you actually observed
 in the browser, and give the strongest case against your own result in
 \`counterevidence\`.`;
+}
+
+/**
+ * One-shot prompt for the script-first path: write the proof as a Playwright
+ * spec instead of driving the browser turn by turn. No browser tools are
+ * attached, so the model gets no feedback and must go straight at the endpoint
+ * the finding names. A spec that fails hands the finding to the agent path.
+ */
+export function buildProofScriptPrompt(
+  finding: Finding,
+  baseUrl: string,
+  auth?: TargetAuth,
+  context?: string,
+  agentRule?: string,
+  staticReview?: { verdict: string; reasoning: string },
+): string {
+  const credBlock =
+    auth?.username != null || auth?.password != null
+      ? `\n## Credentials\n\nLog in with username \`${auth?.username ?? ""}\` and password \`${auth?.password ?? ""}\` when the flow needs a session.\n`
+      : "";
+  const contextBlock = context ? `\n## Additional context\n\n${context}\n` : "";
+  const staticBlock = staticReview
+    ? `\n## Source review of this finding\n\nA reviewer with the source code reached the verdict \`${staticReview.verdict}\`:\n\n${staticReview.reasoning}\n\nWrite the assertions so that a pass answers this review.\n`
+    : "";
+
+  return `Write a Playwright test that proves one security finding against a
+running application. You have no browser and no source code: you get one
+attempt, and the test is run unattended.
+
+## Target
+Base URL: ${baseUrl}
+${credBlock}${contextBlock}
+## The finding
+
+**Title:** ${finding.title}
+**Vuln class:** ${finding.vulnSlug}
+**File:** ${finding.filePath}
+
+### Summary
+${finding.summary}
+
+### PoC
+${finding.poc}
+
+### Impact
+${finding.impact}
+
+## What counts as proof
+
+${proofRules(agentRule)}
+${staticBlock}
+## The two tests
+
+Output ONE spec file with exactly two tests, titled exactly as shown:
+
+- \`test("${EXPLOIT_TEST}", ...)\` drives the PoC and asserts the vulnerable
+  effect happened.
+- \`test("${CONTROL_TEST}", ...)\` repeats the same steps with the attacker's
+  input replaced by a benign value, or with no session, and asserts the effect
+  did NOT happen.
+
+Both tests must pass for the finding to count as proved. The control passing is
+what separates the effect from your own setup, so do not skip it and do not
+make it a copy of the exploit.
+
+## Match the payload to where the value lands
+
+The finding above says where the attacker input is reflected. The payload MUST
+suit that context, because a payload for the wrong context does not fire:
+
+- Reflected in the HTML body (between tags): inject an element with an event
+  handler, for example \`<img src=x onerror=...>\`. Prefer this over an injected
+  \`<script>\`, which a reflected value often will not run.
+- Reflected inside an existing \`<script>\` block: you must first break out with
+  \`</script>\`, then inject an element with an event handler.
+- Reflected inside an HTML attribute (for example \`href="..."\`): close the
+  attribute and the tag first, or add an event-handler attribute such as
+  \`" onmouseover=... x="\`.
+- Reflected inside a JavaScript string: close the quote and statement, for
+  example \`';<your code>;//\`.
+If the finding does not state the context, send the payload once and read the
+raw response (see below) to see how it lands, then choose the payload.
+
+## What to send it in
+
+The attacker input may not be a query value. Send it where the finding says:
+
+- Query or path: build the URL from the base URL above.
+- A request header (for example \`X-Forwarded-Host\`): a browser navigation
+  CANNOT set request headers. Use \`page.request.get(url, { headers: { ... } })\`,
+  or a request body, exactly as the PoC describes.
+
+## How to prove it
+
+Assert BOTH of these where you can; either one alone counts as the effect:
+
+1. Reflection in the raw response. Fetch the exact attack request with
+   \`page.request.get(...)\` (or \`.post\`), read \`await res.text()\`, and assert the
+   payload appears UNESCAPED in the executable position (its angle brackets,
+   quotes or script are intact, not turned into \`&lt;\` / \`&quot;\`). This is
+   deterministic and does not depend on the browser running anything.
+2. Execution in the browser. Put this at the very top of the test, BEFORE any
+   navigation, so an injected handler that calls it is captured:
+       await page.addInitScript(() => {
+         (window as any).__xssFired = false;
+         for (const fn of ["alert", "prompt", "confirm", "print"]) {
+           (window as any)[fn] = () => { (window as any).__xssFired = true; };
+         }
+       });
+   Make your payload call one of those functions (for example
+   \`onerror=alert(1)\`), navigate with \`page.goto(...)\`, then assert
+   \`await page.evaluate(() => (window as any).__xssFired) === true\`. This is more
+   reliable than \`page.waitForEvent("dialog")\` and also catches event handlers.
+
+The \`${CONTROL_TEST}\` test runs the same request with a benign value and asserts
+the OPPOSITE: the value is absent or HTML-encoded in the response, and
+\`__xssFired\` stayed false.
+
+## How to write it
+
+- Navigate straight to the endpoint the PoC names. Do not explore or crawl.
+- Use absolute URLs built from the base URL above. No config file is loaded.
+- Import from \`@playwright/test\`.
+- Assert the vulnerable effect itself, not a side effect a fixed application
+  would also produce.
+- Assert on what the browser ended up with, not on an intermediate state the
+  navigation already consumed.
+
+## Output
+
+Put the spec source in \`script\` and nothing else: no prose, no explanation, no
+markdown fences.`;
 }
 
 /**

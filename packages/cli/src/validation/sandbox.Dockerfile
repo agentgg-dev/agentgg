@@ -1,6 +1,6 @@
 # Live-validation sandbox: Playwright + Chromium + @playwright/mcp SSE server.
 # Build with this file's own directory as the context (it COPYs url-banner.js):
-#   docker build -f packages/cli/src/validation/sandbox.Dockerfile -t agentgg/live-sandbox:pw1.56.0-mcp0.0.41-5 packages/cli/src/validation
+#   docker build -f packages/cli/src/validation/sandbox.Dockerfile -t agentgg/live-sandbox:pw1.56.0-mcp0.0.41-7 packages/cli/src/validation
 #
 # @playwright/mcp 0.0.41 pinned: it depends on playwright 1.56.0-alpha, so the
 # image installs that exact playwright and its matching chromium on top of the

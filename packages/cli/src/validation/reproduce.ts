@@ -16,6 +16,7 @@ import AdmZip from "adm-zip";
 import type { Detector } from "../detect.js";
 import { logWarn } from "../log.js";
 import { ensureSandboxImage } from "./image.js";
+import { runProofScript, scriptProved } from "./proof-script.js";
 import { runReproScript } from "./repro-script.js";
 import { type Sandbox, startAttachedSandbox, startLocalDockerSandbox } from "./sandbox.js";
 import { redact, redactBytes, type TargetAuth } from "./target-auth.js";
@@ -61,6 +62,108 @@ export function selectForReproduce(findings: Finding[], force = false): Finding[
       (ORDER[a.validation?.verdict ?? ""] ?? 3) - (ORDER[b.validation?.verdict ?? ""] ?? 3);
     return byVerdict !== 0 ? byVerdict : Number(namesHttpEntry(b)) - Number(namesHttpEntry(a));
   });
+}
+
+/** What the script-first path produces when it proves a finding outright. */
+interface ScriptFirstProof {
+  res: {
+    result: LiveResult;
+    reasoning: string;
+    counterevidence: string;
+    negativeControl?: string;
+    /** Never set here. Declared so this shares one type with the agent path. */
+    refused?: boolean;
+    script?: string;
+  };
+  evidence: Evidence;
+}
+
+/**
+ * Generate one proof spec and run it. Returns a proof only when BOTH tests
+ * passed: the effect happened, and it did not happen without the attacker's
+ * input. On anything else it clears /out and returns undefined, so the agent
+ * path starts clean instead of inheriting this attempt's artifacts.
+ */
+async function tryScriptFirst(a: {
+  finding: Finding;
+  detector: Detector;
+  sandbox: Sandbox;
+  outDir: string;
+  baseUrl: string;
+  auth: TargetAuth;
+  context?: string;
+  proofRule?: string;
+  timeoutMs: number;
+  signal: AbortSignal;
+}): Promise<ScriptFirstProof | undefined> {
+  if (!a.detector.generateReproScript) return undefined;
+  let script: string;
+  let run: Awaited<ReturnType<typeof runProofScript>>;
+  try {
+    script = await a.detector.generateReproScript({
+      finding: a.finding,
+      baseUrl: a.baseUrl,
+      auth: a.auth,
+      context: a.context,
+      proofRule: a.proofRule,
+      staticVerdict: a.finding.validation?.verdict,
+      staticReasoning: a.finding.validation?.reasoning,
+      signal: a.signal,
+    });
+    run = await runProofScript(a.sandbox, script, a.timeoutMs);
+  } catch (err) {
+    // A failed generation is not a verdict. Say so and let the agent try.
+    logWarn(
+      `[script-first:${a.finding.id}] ${redact(err instanceof Error ? err.message : String(err), a.auth)}`,
+    );
+    return undefined;
+  }
+
+  if (!scriptProved(run)) {
+    console.log(
+      `      script-first: exploit ${run.exploit}, control ${run.control}; handing to the browser agent`,
+    );
+    await clearSandboxOut(a.sandbox).catch(() => {});
+    return undefined;
+  }
+
+  const evidenceDir = getEvidenceDir(a.outDir, a.finding.agentSlug, a.finding.id);
+  const evidence = await copyEvidence(a.sandbox, evidenceDir, { auth: a.auth });
+  mkdirSync(evidenceDir, { recursive: true });
+  writeFileSync(join(evidenceDir, run.path), redact(script, a.auth));
+  writeFileSync(join(evidenceDir, "proof-run.log"), redact(run.output, a.auth));
+  evidence.script = { path: run.path, executed: true, passed: true };
+  console.log("      script-first: exploit and control both passed");
+
+  return {
+    res: {
+      result: "reproduced",
+      reasoning:
+        "A generated Playwright spec drove the PoC against the running target and asserted the vulnerable effect. Both of its tests passed.",
+      counterevidence:
+        "The spec was written without sight of the application, so it asserts what the finding claims rather than what a reviewer might check independently.",
+      negativeControl: `The 'control' test in ${run.path} repeated the steps with the attacker's input removed and asserted the effect did not happen. It passed.`,
+    },
+    evidence,
+  };
+}
+
+/**
+ * Whether a rejection is the expected debris of an aborted request, not a real
+ * fault. When a per-finding timeout fires, the in-flight provider or MCP fetch
+ * rejects asynchronously (undici surfaces `terminated` / `UND_ERR_BODY_TIMEOUT`).
+ * That rejection has no owner to catch it, so without this it reaches
+ * `unhandledRejection` and Node ends the whole scan.
+ */
+export function isAbortNoise(reason: unknown): boolean {
+  if (!(reason instanceof Error)) return false;
+  if (reason.name === "AbortError") return true;
+  const cause = (reason as { cause?: { code?: unknown } }).cause;
+  if (cause && typeof cause === "object" && "code" in cause) {
+    const code = String((cause as { code?: unknown }).code ?? "");
+    if (code === "UND_ERR_BODY_TIMEOUT" || code === "UND_ERR_ABORTED") return true;
+  }
+  return /\b(terminated|aborted|body timeout error)\b/i.test(reason.message);
 }
 
 /** Split the queue on whether a browser can prove the class at all. The fact
@@ -232,6 +335,17 @@ export async function runReproducePhase(args: {
     // Answered before the loop, so the run's own tally never increments it.
     "not-reproducible": 0,
   };
+  // Aborting a per-finding timeout leaves the provider/MCP fetch to reject on a
+  // later tick with no owner. During this phase those are expected, so swallow
+  // them; a rejection that is NOT abort debris is re-thrown to keep crashing.
+  const onUnhandled = (reason: unknown) => {
+    if (isAbortNoise(reason)) {
+      logWarn(`live validation: ignored a late abort rejection: ${(reason as Error).message}`);
+      return;
+    }
+    throw reason;
+  };
+  process.on("unhandledRejection", onUnhandled);
   try {
     for (const finding of work) {
       if (signal.aborted) break;
@@ -254,22 +368,42 @@ export async function runReproducePhase(args: {
       }, args.timeoutMs);
       signal.addEventListener("abort", onAbort);
       try {
-        const res = await detector.reproduceFinding({
+        // Script-first: one call, no browser loop. A spec whose exploit AND
+        // control both pass settles the finding in seconds. Anything else hands
+        // it to the agent, which can look around.
+        const fromScript = await tryScriptFirst({
           finding,
+          detector,
+          sandbox,
+          outDir,
           baseUrl: agentBaseUrl,
           auth,
-          browserEndpoint: sandbox.browserEndpoint(),
           context,
-          maxTurns: args.reproduceMaxTurns,
-          staticVerdict: finding.validation?.verdict,
-          staticReasoning: finding.validation?.reasoning,
-          staticConfirmedImpact: finding.validation?.confirmedImpact,
           proofRule: args.agentProofRules?.get(finding.agentSlug),
+          timeoutMs: args.timeoutMs,
           signal: ac.signal,
         });
 
-        let evidence: Evidence | undefined;
-        if (res.result === "reproduced" && res.script) {
+        const res =
+          fromScript?.res ??
+          (await detector.reproduceFinding({
+            finding,
+            baseUrl: agentBaseUrl,
+            auth,
+            browserEndpoint: sandbox.browserEndpoint(),
+            context,
+            maxTurns: args.reproduceMaxTurns,
+            staticVerdict: finding.validation?.verdict,
+            staticReasoning: finding.validation?.reasoning,
+            staticConfirmedImpact: finding.validation?.confirmedImpact,
+            proofRule: args.agentProofRules?.get(finding.agentSlug),
+            signal: ac.signal,
+          }));
+
+        let evidence: Evidence | undefined = fromScript?.evidence;
+        if (fromScript) {
+          // Already proved and collected; skip the agent path's replay.
+        } else if (res.result === "reproduced" && res.script) {
           const script = await runReproScript(sandbox, res.script);
           const evidenceDir = getEvidenceDir(outDir, finding.agentSlug, finding.id);
           evidence = await copyEvidence(sandbox, evidenceDir, { auth });
@@ -380,6 +514,10 @@ export async function runReproducePhase(args: {
       logWarn(`live validation: could not clear /out: ${(clearErr as Error).message}`);
     }
     await sandbox.dispose();
+    // Give any in-flight aborted fetch a tick to reject while our guard is still
+    // installed, then remove it so it never masks a later, real rejection.
+    await new Promise((r) => setTimeout(r, 0));
+    process.off("unhandledRejection", onUnhandled);
   }
 }
 
@@ -515,18 +653,64 @@ async function listOut(sandbox: Sandbox, waitMs: number, pollMs: number): Promis
  * (`*.trace`, `*.network`, `resources/`), not a zip, and the trace viewer
  * takes a zip, so build one on the host.
  */
+/** Take a trace.zip the test runner already assembled, wherever under /out it
+ *  landed, and read its network log without unpacking it to disk. */
+async function copyTraceZip(
+  sandbox: Sandbox,
+  evidenceDir: string,
+  _auth?: TargetAuth,
+): Promise<{ trace?: string; networkText?: string; resources?: TraceResources } | undefined> {
+  const { code, stdout } = await sandbox.exec([
+    "sh",
+    "-c",
+    "find /out -name trace.zip -type f 2>/dev/null",
+  ]);
+  if (code !== 0) return undefined;
+  const found = stdout
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter(Boolean)[0];
+  if (!found) return undefined;
+
+  let buf: Buffer;
+  try {
+    buf = await sandbox.readFile(found);
+  } catch {
+    return undefined;
+  }
+  writeFileSync(join(evidenceDir, "trace.zip"), buf);
+
+  let networkText: string | undefined;
+  const resources: TraceResources = new Map();
+  try {
+    for (const entry of new AdmZip(buf).getEntries()) {
+      if (entry.entryName.endsWith(".network")) networkText = entry.getData().toString("utf8");
+      else if (entry.entryName.startsWith("resources/"))
+        resources.set(entry.entryName.slice("resources/".length), entry.getData());
+    }
+  } catch {
+    // A truncated zip still travels with the evidence; it just carries no
+    // parsed requests.
+  }
+  return { trace: "trace.zip", networkText, resources };
+}
+
 async function copyTrace(
   sandbox: Sandbox,
   evidenceDir: string,
   auth?: TargetAuth,
 ): Promise<{ trace?: string; networkText?: string; resources?: TraceResources } | undefined> {
   const { code, stdout } = await sandbox.exec(["sh", "-c", "find /out/traces -type f 2>/dev/null"]);
-  if (code !== 0) return undefined;
-  const paths = stdout
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (paths.length === 0) return undefined;
+  const paths =
+    code === 0
+      ? stdout
+          .split(/\r?\n/)
+          .map((s) => s.trim())
+          .filter(Boolean)
+      : [];
+  // The MCP server writes a traces/ DIRECTORY; `playwright test` writes a
+  // finished trace.zip instead. Both have to reach the same evidence record.
+  if (paths.length === 0) return await copyTraceZip(sandbox, evidenceDir, auth);
 
   const prefix = "/out/traces/";
   const zip = new AdmZip();
