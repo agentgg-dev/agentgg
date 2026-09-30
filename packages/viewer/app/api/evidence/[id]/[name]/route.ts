@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { getEvidenceDir } from "@agentgg/core";
 import { NextResponse } from "next/server";
+import { parseRange } from "@/app/lib/range";
 import { findFindingById, getResultsDir } from "@/app/lib/state";
 
 export const dynamic = "force-dynamic";
@@ -37,7 +38,7 @@ function allowedNames(evidence: NonNullable<NonNullable<ReturnType<typeof findFi
 }
 
 export async function GET(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string; name: string }> },
 ) {
   const { id, name: rawName } = await params;
@@ -59,13 +60,36 @@ export async function GET(
   }
 
   const ext = name.split(".").pop()?.toLowerCase() ?? "";
+  const headers: Record<string, string> = {
+    "Content-Type": CONTENT_TYPES[ext] ?? "application/octet-stream",
+    "Accept-Ranges": "bytes",
+    // The evidence holds live session cookies. Keep it out of shared caches.
+    "Cache-Control": "private, no-store",
+  };
+
+  // A <video> can only seek when the server answers byte-range requests.
+  const range = parseRange(req.headers.get("range"), size);
+  if (range === "unsatisfiable") {
+    return new NextResponse(null, {
+      status: 416,
+      headers: { ...headers, "Content-Range": `bytes */${size}` },
+    });
+  }
+  if (range) {
+    const { start, end } = range;
+    const stream = Readable.toWeb(createReadStream(path, { start, end })) as ReadableStream;
+    return new NextResponse(stream, {
+      status: 206,
+      headers: {
+        ...headers,
+        "Content-Range": `bytes ${start}-${end}/${size}`,
+        "Content-Length": String(end - start + 1),
+      },
+    });
+  }
+
   const stream = Readable.toWeb(createReadStream(path)) as ReadableStream;
   return new NextResponse(stream, {
-    headers: {
-      "Content-Type": CONTENT_TYPES[ext] ?? "application/octet-stream",
-      "Content-Length": String(size),
-      // The evidence holds live session cookies. Keep it out of shared caches.
-      "Cache-Control": "private, no-store",
-    },
+    headers: { ...headers, "Content-Length": String(size) },
   });
 }
