@@ -111,18 +111,13 @@ async function tryScriptFirst(a: {
       signal: a.signal,
     });
     run = await runProofScript(a.sandbox, script, a.timeoutMs);
-  } catch (err) {
-    // A failed generation is not a verdict. Say so and let the agent try.
-    logWarn(
-      `[script-first:${a.finding.id}] ${redact(err instanceof Error ? err.message : String(err), a.auth)}`,
-    );
+  } catch {
+    // This is one internal stage of reproducing a finding, not a verdict, so a
+    // failure is silent and the agent stage takes over.
     return undefined;
   }
 
   if (!scriptProved(run)) {
-    console.log(
-      `      script-first: exploit ${run.exploit}, control ${run.control}; handing to the browser agent`,
-    );
     await clearSandboxOut(a.sandbox).catch(() => {});
     return undefined;
   }
@@ -133,16 +128,16 @@ async function tryScriptFirst(a: {
   writeFileSync(join(evidenceDir, run.path), redact(script, a.auth));
   writeFileSync(join(evidenceDir, "proof-run.log"), redact(run.output, a.auth));
   evidence.script = { path: run.path, executed: true, passed: true };
-  console.log("      script-first: exploit and control both passed");
 
   return {
     res: {
       result: "reproduced",
       reasoning:
-        "A generated Playwright spec drove the PoC against the running target and asserted the vulnerable effect. Both of its tests passed.",
+        "Drove the PoC against the running target and observed the vulnerable effect. The same request with the attacker's input removed did not produce it.",
       counterevidence:
-        "The spec was written without sight of the application, so it asserts what the finding claims rather than what a reviewer might check independently.",
-      negativeControl: `The 'control' test in ${run.path} repeated the steps with the attacker's input removed and asserted the effect did not happen. It passed.`,
+        "The exploit was built from the finding's own description, so it demonstrates what the finding claims rather than an effect a reviewer verified independently.",
+      negativeControl:
+        "Repeated the request with the attacker's input removed; the vulnerable effect did not occur.",
     },
     evidence,
   };
@@ -177,6 +172,20 @@ export function splitLiveReproducible(
   const skipped: Finding[] = [];
   for (const f of findings) (notLiveReproducible.has(f.agentSlug) ? skipped : testable).push(f);
   return { testable, skipped };
+}
+
+/** A screenshot the reproduce agent named as its negative control, so it should
+ *  not be the lead image: it shows the safe case, which reads as "no bug." */
+const CONTROL_SHOT = /\b(control|benign|baseline|negative|clean|safe)\b/i;
+
+/** Order screenshots so the proof leads and any negative-control shot sinks to
+ *  the bottom. Agents shoot the control last, so mtime order would otherwise
+ *  feature the safe case. Stable: within a group the original order is kept. */
+export function orderScreenshots(names: string[]): string[] {
+  return names
+    .map((name, i) => ({ name, i, control: CONTROL_SHOT.test(name) }))
+    .sort((a, b) => Number(a.control) - Number(b.control) || a.i - b.i)
+    .map((e) => e.name);
 }
 
 /** Whether the copy produced anything worth linking. An evidence block with
@@ -599,6 +608,8 @@ export async function copyEvidence(
       evidence.screenshots.push(name);
     }
   }
+  // Lead with the proof, not the negative control the agent shot last.
+  evidence.screenshots = orderScreenshots(evidence.screenshots);
 
   const traced = await copyTrace(sandbox, evidenceDir, opts.auth);
   if (traced?.trace) evidence.trace = traced.trace;

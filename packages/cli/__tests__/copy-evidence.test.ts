@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import AdmZip from "adm-zip";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { clearSandboxOut, copyEvidence } from "../src/validation/reproduce.js";
+import { clearSandboxOut, copyEvidence, orderScreenshots } from "../src/validation/reproduce.js";
 import type { Sandbox } from "../src/validation/sandbox.js";
 
 /**
@@ -258,5 +258,22 @@ describe("a trace.zip written by the test runner", () => {
     expect(ev.trace).toBe("trace.zip");
     expect(existsSync(join(dir2, "trace.zip"))).toBe(true);
     expect(ev.requests).toEqual([{ method: "GET", url: "http://app/search?q=x", status: 200 }]);
+  });
+});
+
+describe("orderScreenshots", () => {
+  it("puts the proof first and the negative control last", () => {
+    const out = orderScreenshots(["control-offset-0.png", "xss-offset-bbox.png"]);
+    expect(out).toEqual(["xss-offset-bbox.png", "control-offset-0.png"]);
+  });
+
+  it("keeps the original order when nothing looks like a control", () => {
+    const out = orderScreenshots(["step-1.png", "step-2.png"]);
+    expect(out).toEqual(["step-1.png", "step-2.png"]);
+  });
+
+  it("treats benign and baseline names as controls too", () => {
+    const out = orderScreenshots(["baseline.png", "attack.png", "benign-input.png"]);
+    expect(out[0]).toBe("attack.png");
   });
 });
