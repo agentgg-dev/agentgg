@@ -58,7 +58,7 @@ import { createUsageMeter, type UsageMeter } from "../usage-meter.js";
 import { notLiveReproducible, proofRuleMap } from "../validation/proof-rules.js";
 import { runReproducePhase } from "../validation/reproduce.js";
 import { attachFromOpts, DEFAULT_SANDBOX_IMAGE } from "../validation/sandbox.js";
-import { parseTargetAuth, readTargetContext } from "../validation/target-auth.js";
+import { readTargetContext } from "../validation/target-context.js";
 import { fitMembers } from "../validator.js";
 import { DEFAULT_VIEWER_PORT, openBrowser, startViewer } from "../viewer-server.js";
 import { DEFAULT_EXCLUDES, pathMatches, type WalkConfig, walkForAgents } from "../walker.js";
@@ -255,8 +255,6 @@ interface ScanOpts {
   liveValidate?: boolean;
   /** Root URL of the running application the sandbox reaches (external mode). */
   targetUrl?: string;
-  /** `user:pass` or `@file.json` login credentials for the target. */
-  targetCredentials?: string;
   /** Free-form scope/context notes folded into the reproduce prompt. */
   targetContext?: string;
   /** Sandbox image tag. Defaults to the pinned `DEFAULT_SANDBOX_IMAGE`. */
@@ -1963,7 +1961,6 @@ export async function runScan(
         outDir,
         runId: runMeta.runId,
         targetUrl: opts.targetUrl,
-        auth: parseTargetAuth(opts),
         context: readTargetContext(opts.targetContext),
         image: opts.targetImage ?? DEFAULT_SANDBOX_IMAGE,
         timeoutMs: Number(opts.reproduceTimeout ?? 600) * 1000,
@@ -2531,12 +2528,8 @@ export function registerScanCommand(program: Command): void {
       "Root URL of the already-running application to validate against. Required with --live-validate.",
     )
     .option(
-      "--target-credentials <cred>",
-      "Login for the target: `user:pass`, or `@path/to/creds.json` ({ username, password }). Redacted from any stored reasoning.",
-    )
-    .option(
       "--target-context <ctx>",
-      "Free-form scope/context notes for the reproduce prompt, or @path/to/file.",
+      "Free-form notes for the reproduce prompt, or @path/to/file. Put the target login here, for example the account to sign in with.",
     )
     .option(
       "--target-image <ref>",

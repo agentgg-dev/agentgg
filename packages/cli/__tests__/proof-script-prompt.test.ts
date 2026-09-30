@@ -29,7 +29,7 @@ describe("buildProofScriptPrompt", () => {
 
   it("carries the reporting agent's own rule when the catalog declares one", () => {
     const rule = "The request MUST come from a different origin than the target.";
-    expect(buildProofScriptPrompt(finding, "http://t", undefined, undefined, rule)).toContain(rule);
+    expect(buildProofScriptPrompt(finding, "http://t", undefined, rule)).toContain(rule);
   });
 
   it("tells the model to go straight to the endpoint rather than explore", () => {

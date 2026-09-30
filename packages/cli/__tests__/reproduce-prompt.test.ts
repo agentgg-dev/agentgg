@@ -17,7 +17,7 @@ const finding = {
 
 describe("buildReproducePrompt", () => {
   it("carries the static review and demands an answer to it", () => {
-    const prompt = buildReproducePrompt(finding, "http://t", undefined, undefined, {
+    const prompt = buildReproducePrompt(finding, "http://t", undefined, {
       verdict: "uncertain",
       reasoning: "POST /notes never checks the cookie and hardcodes owner=alice.",
     });
@@ -44,7 +44,7 @@ describe("buildReproducePrompt", () => {
 
   it("carries the reporting agent own proof rule when the catalog declares one", () => {
     const rule = "The request MUST come from a different origin than the target.";
-    const prompt = buildReproducePrompt(finding, "http://t", undefined, undefined, undefined, rule);
+    const prompt = buildReproducePrompt(finding, "http://t", undefined, undefined, rule);
     expect(prompt).toContain(rule);
     expect(prompt).toContain(PROOF_PRINCIPLE);
   });
@@ -54,7 +54,7 @@ describe("buildReproducePrompt", () => {
   });
 
   it("asks the agent to reproduce the confirmed impact", () => {
-    const out = buildReproducePrompt(finding, "http://localhost:3000", undefined, undefined, {
+    const out = buildReproducePrompt(finding, "http://localhost:3000", undefined, {
       verdict: "confirmed",
       reasoning: "r",
       confirmedImpact: "Reads any user's notes.",

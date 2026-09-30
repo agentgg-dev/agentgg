@@ -123,7 +123,6 @@ describe("evidence isolation between findings", () => {
       outDir,
       runId: "test-run",
       targetUrl: "http://localhost:3000",
-      auth: {},
       image: "img",
       timeoutMs: 30_000,
       signal: new AbortController().signal,
@@ -174,7 +173,6 @@ describe("evidence isolation between findings", () => {
       outDir,
       runId: "test-run",
       targetUrl: "http://localhost:3000",
-      auth: {},
       image: "img",
       timeoutMs: 30_000,
       signal: new AbortController().signal,
@@ -216,7 +214,6 @@ describe("evidence isolation between findings", () => {
       outDir,
       runId: "test-run",
       targetUrl: "http://localhost:3000",
-      auth: {},
       image: "img",
       timeoutMs: 30_000,
       reproduceMaxTurns: 75,
@@ -224,55 +221,5 @@ describe("evidence isolation between findings", () => {
     });
 
     expect(seen).toBe(75);
-  });
-
-  it("redacts the target password from the failed-replay warning", async () => {
-    const pw = "hunter2secret";
-    playwrightResult = { code: 1, stdout: `password leaked: ${pw}\n1 failed`, stderr: "" };
-    const a = finding("aaa", "agent-a");
-    writeFileRecord(outDir, {
-      agentSlug: a.agentSlug,
-      filePath: a.filePath,
-      contentHash: "h",
-      findings: [a],
-      analysisHistory: [],
-      candidates: [],
-      status: "analyzed",
-    } as never);
-
-    const detector = {
-      name: "fake",
-      async reproduceFinding() {
-        // A video in /out lets the copy skip its wait for one to appear.
-        out.set("/out/page-1.webm", Buffer.from("video"));
-        return {
-          result: "reproduced" as const,
-          reasoning: "r",
-          counterevidence: "",
-          script: "// s",
-        };
-      },
-    };
-
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      await runReproducePhase({
-        findings: [a],
-        // biome-ignore lint/suspicious/noExplicitAny: only reproduceFinding is exercised
-        detector: detector as any,
-        outDir,
-        runId: "test-run",
-        targetUrl: "http://localhost:3000",
-        auth: { username: "alice", password: pw },
-        image: "img",
-        timeoutMs: 30_000,
-        signal: new AbortController().signal,
-      });
-      const warned = warnSpy.mock.calls.map((c) => c.join(" ")).join("\n");
-      expect(warned).toContain("***");
-      expect(warned).not.toContain(pw);
-    } finally {
-      warnSpy.mockRestore();
-    }
   });
 });

@@ -8,7 +8,6 @@ import type { PreFilterHit, TaintStep } from "./pre-filter.js";
 import type { UsageMeter } from "./usage-meter.js";
 import { proofRules } from "./validation/proof-rules.js";
 import { CONTROL_TEST, EXPLOIT_TEST } from "./validation/proof-script.js";
-import type { TargetAuth } from "./validation/target-auth.js";
 
 /**
  * Subset of `Finding` the LLM is asked to produce. id/agentSlug/
@@ -337,11 +336,9 @@ export interface Detector {
     finding: Finding;
     /** Root URL of the running target the sandbox can reach. */
     baseUrl: string;
-    /** Login credentials / headers for the target, when provided. */
-    auth?: TargetAuth;
     /** SSE URL of the Playwright MCP server hosted by the sandbox. */
     browserEndpoint: string;
-    /** Extra free-form context to fold into the prompt (e.g. scope notes). */
+    /** Free-form notes folded into the prompt: scope, and the login to use. */
     context?: string;
     /** Per-call turn cap. Overrides the detector's default when set, so a
      *  complex target can be given more browser steps than a demo needs. */
@@ -379,7 +376,6 @@ export interface Detector {
   generateReproScript?(args: {
     finding: Finding;
     baseUrl: string;
-    auth?: TargetAuth;
     context?: string;
     proofRule?: string;
     staticVerdict?: string;
@@ -754,7 +750,6 @@ export const REPRODUCE_CUT_SHORT =
 export function buildReproducePrompt(
   finding: Finding,
   baseUrl: string,
-  auth?: TargetAuth,
   context?: string,
   staticReview?: { verdict: string; reasoning: string; confirmedImpact?: string },
   /** The reporting agent's `liveProofRule`, when its catalog entry declares
@@ -764,17 +759,6 @@ export function buildReproducePrompt(
   const lineHint = finding.lineRange
     ? `lines ${finding.lineRange[0]}–${finding.lineRange[1]}`
     : "unspecified lines";
-
-  const credBlock =
-    auth?.username != null || auth?.password != null
-      ? `
-## Credentials
-
-If the target requires login, sign in first with:
-- Username: ${auth?.username ?? "(none)"}
-- Password: ${auth?.password ?? "(none)"}
-`
-      : "";
 
   const contextBlock = context ? `\n## Additional context\n\n${context}\n` : "";
 
@@ -795,7 +779,7 @@ application.
 
 ## Target
 Base URL: ${baseUrl}
-${credBlock}${contextBlock}
+${contextBlock}
 ## The finding to reproduce
 
 **Title:** ${finding.title}
@@ -861,15 +845,10 @@ in the browser, and give the strongest case against your own result in
 export function buildProofScriptPrompt(
   finding: Finding,
   baseUrl: string,
-  auth?: TargetAuth,
   context?: string,
   agentRule?: string,
   staticReview?: { verdict: string; reasoning: string },
 ): string {
-  const credBlock =
-    auth?.username != null || auth?.password != null
-      ? `\n## Credentials\n\nLog in with username \`${auth?.username ?? ""}\` and password \`${auth?.password ?? ""}\` when the flow needs a session.\n`
-      : "";
   const contextBlock = context ? `\n## Additional context\n\n${context}\n` : "";
   const staticBlock = staticReview
     ? `\n## Source review of this finding\n\nA reviewer with the source code reached the verdict \`${staticReview.verdict}\`:\n\n${staticReview.reasoning}\n\nWrite the assertions so that a pass answers this review.\n`
@@ -881,7 +860,7 @@ attempt, and the test is run unattended.
 
 ## Target
 Base URL: ${baseUrl}
-${credBlock}${contextBlock}
+${contextBlock}
 ## The finding
 
 **Title:** ${finding.title}

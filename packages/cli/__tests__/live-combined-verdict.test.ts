@@ -123,7 +123,6 @@ describe("combined verdict when live evidence has no captured request", () => {
       outDir,
       runId: "test-run",
       targetUrl: "http://localhost:3000",
-      auth: {},
       image: "img",
       timeoutMs: 30_000,
       signal: new AbortController().signal,

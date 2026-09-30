@@ -31,7 +31,6 @@ import {
 import { logError, logWarn } from "../log.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import type { CallUsage, UsageMeter } from "../usage-meter.js";
-import type { TargetAuth } from "../validation/target-auth.js";
 import {
   asValidationField,
   buildScopeValidatePrompt,
@@ -285,7 +284,6 @@ export class ClaudeAgentDetector implements Detector {
   async generateReproScript(args: {
     finding: Finding;
     baseUrl: string;
-    auth?: TargetAuth;
     context?: string;
     proofRule?: string;
     staticVerdict?: string;
@@ -302,7 +300,6 @@ export class ClaudeAgentDetector implements Detector {
       prompt: buildProofScriptPrompt(
         args.finding,
         args.baseUrl,
-        args.auth,
         args.context,
         args.proofRule,
         staticReview,
@@ -319,7 +316,6 @@ export class ClaudeAgentDetector implements Detector {
   async reproduceFinding(args: {
     finding: Finding;
     baseUrl: string;
-    auth?: TargetAuth;
     browserEndpoint: string;
     context?: string;
     maxTurns?: number;
@@ -347,7 +343,6 @@ export class ClaudeAgentDetector implements Detector {
     const prompt = buildReproducePrompt(
       args.finding,
       args.baseUrl,
-      args.auth,
       args.context,
       staticReview,
       args.proofRule,

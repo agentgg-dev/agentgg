@@ -201,34 +201,6 @@ describe("copyEvidence", () => {
     expect(ev.requests).toBeUndefined();
     expect(ev.requestsFile).toBeUndefined();
   });
-
-  it("redacts the target password from requests.http and trace.zip", async () => {
-    const pw = "hunter2secret";
-    const network = JSON.stringify({
-      type: "resource-snapshot",
-      snapshot: {
-        request: {
-          method: "POST",
-          url: "http://t/login",
-          headers: [],
-          postData: { text: `u=alice&p=${pw}` },
-        },
-        response: { status: 302, headers: [] },
-      },
-    });
-    const files = new Map<string, Buffer>([
-      ["/out/traces/trace.network", Buffer.from(`${network}\n`)],
-      ["/out/traces/trace.trace", Buffer.from(`{"type":"action","params":{"value":"${pw}"}}\n`)],
-    ]);
-    const dir = mkdtempSync(join(tmpdir(), "ev-"));
-    await copyEvidence(fakeSandbox(files), dir, {
-      ...FAST,
-      auth: { username: "alice", password: pw },
-    });
-    expect(readFileSync(join(dir, "requests.http"), "utf8")).not.toContain(pw);
-    const zip = new AdmZip(join(dir, "trace.zip"));
-    for (const e of zip.getEntries()) expect(e.getData().toString("utf8")).not.toContain(pw);
-  });
 });
 
 describe("clearSandboxOut", () => {

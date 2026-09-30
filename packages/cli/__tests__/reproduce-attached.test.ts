@@ -67,7 +67,6 @@ describe("runReproducePhase with an attached sandbox", () => {
     detector: any;
     outDir: string;
     runId: string;
-    auth: Record<string, never>;
     image: string;
     timeoutMs: number;
     signal: AbortSignal;
@@ -104,7 +103,6 @@ describe("runReproducePhase with an attached sandbox", () => {
       detector,
       outDir,
       runId: "test-run",
-      auth: {},
       image: "img",
       timeoutMs: 30_000,
       signal: new AbortController().signal,

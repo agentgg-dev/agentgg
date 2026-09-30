@@ -82,7 +82,6 @@ describe("live pass without a result", () => {
       outDir,
       runId: "test-run",
       targetUrl: "http://localhost:3000",
-      auth: {},
       image: "img",
       timeoutMs: 50,
       signal: new AbortController().signal,

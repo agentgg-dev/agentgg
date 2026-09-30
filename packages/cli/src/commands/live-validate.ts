@@ -20,12 +20,11 @@ import { writeMarkdownReport } from "../reporters/md.js";
 import { notLiveReproducible, proofRuleMap } from "../validation/proof-rules.js";
 import { runReproducePhase } from "../validation/reproduce.js";
 import { attachFromOpts, DEFAULT_SANDBOX_IMAGE } from "../validation/sandbox.js";
-import { parseTargetAuth, readTargetContext } from "../validation/target-auth.js";
+import { readTargetContext } from "../validation/target-context.js";
 import { buildInvocation } from "./invocation.js";
 
 interface LiveValidateOpts {
   targetUrl: string;
-  targetCredentials?: string;
   targetContext?: string;
   targetImage?: string;
   sandboxEndpoint?: string;
@@ -117,7 +116,6 @@ export async function runLiveValidate(
     outDir: outputDir,
     runId: runMeta.runId,
     targetUrl: opts.targetUrl,
-    auth: parseTargetAuth(opts),
     context: readTargetContext(opts.targetContext),
     image: opts.targetImage ?? DEFAULT_SANDBOX_IMAGE,
     timeoutMs: Number(opts.reproduceTimeout ?? 600) * 1000,
@@ -169,12 +167,8 @@ export function registerLiveValidateCommand(program: Command): void {
       "Root URL of the already-running application to validate against.",
     )
     .option(
-      "--target-credentials <cred>",
-      "Login for the target: `user:pass`, or `@path/to/creds.json` ({ username, password }). Redacted from any stored reasoning.",
-    )
-    .option(
       "--target-context <ctx>",
-      "Free-form scope/context notes for the reproduce prompt, or @path/to/file.",
+      "Free-form notes for the reproduce prompt, or @path/to/file. Put the target login here, for example the account to sign in with.",
     )
     .option(
       "--target-image <ref>",
