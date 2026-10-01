@@ -12,7 +12,7 @@ One-page reference for what's wired and how. User-facing docs are in [README.md]
 4. **Dedup**, then **Validate** (`--scope` for rules; `--live-validate` adds a live sub-pass at its end), then **Score**, then **Fix** — second-pass passes over the findings. Dedup leads so validation, scoring and fixing only run on primaries; scoring and fixing read the combined static + live verdict. Fix writes a `suggestedFix` only for a primary that verdict confirmed ([`fix-phase.ts`](packages/cli/src/fix-phase.ts)). All four run by default; disable individually with `--no-validate` / `--no-score` / `--no-fix` / `--no-dedup`.
 5. **Report** — per-finding `findings/*.md` + `summary.md`. Skippable with `--no-summary` (state still persists); regenerate later with `agentgg summary`. `--serve` (opt-in) boots the viewer once the report is written.
 
-Each phase is also a standalone command over the same `--output` dir, sharing the artifacts above: **`agentgg recon`** (phases 1–2 only, no detection), **`agentgg revalidate`** (phase 4 validate), **`agentgg score`** (phase 4 score), **`agentgg summary`** (phase 5). `recon` writes `recon.json` + `plan.json` that a later `scan` reuses — the durable plan→run hand-off.
+Each phase is also a standalone command over the same `--output` dir, sharing the artifacts above: **`agentgg recon`** (phases 1–2 only, no detection), **`agentgg revalidate`** (phase 4 validate), **`agentgg score`** (phase 4 score), **`agentgg fix`** (phase 4 fix), **`agentgg summary`** (phase 5). `recon` writes `recon.json` + `plan.json` that a later `scan` reuses — the durable plan→run hand-off.
 
 ## Create pipeline
 
@@ -103,7 +103,7 @@ Four Detector methods, so any provider participates without bespoke wiring:
 - **`validateFinding`** — full classifier; re-reads source → `confirmed` / `false-positive` / `out-of-scope` / `uncertain` + reasoning. Used by `--validate` and `agentgg revalidate`.
 - **`validateFindingByScope`** — cheap variant, no source read; only `out-of-scope` / `uncertain`. Triggered by an explicit `--scope <path>` combined with `--no-validate` (a pre-filter that stands in for the full validator when it's turned off).
 - **`scoreFinding`** — picks the 8 CVSS 3.1 base metrics; vector string, base score, and severity bucket are computed deterministically in [`scoring.asCvssScore`](packages/cli/src/scoring.ts). Triggered by `--score` or `agentgg score`.
-- **`suggestFix`** — one tool-less call per confirmed primary; returns the remediation as plain Markdown (a fix is mostly code, which is what breaks structured output). Every reader goes through `suggestedFixOf` in [`verdict.ts`](packages/core/src/verdict.ts), which hides the fix unless the combined verdict is `confirmed`, so a verdict that changes later hides a fix still on disk. Triggered by `--fix`.
+- **`suggestFix`** — one tool-less call per confirmed primary; returns the remediation as plain Markdown (a fix is mostly code, which is what breaks structured output). Every reader goes through `suggestedFixOf` in [`verdict.ts`](packages/core/src/verdict.ts), which hides the fix unless the combined verdict is `confirmed`, so a verdict that changes later hides a fix still on disk. Triggered by `--fix` or `agentgg fix`; the command is how a finding that `revalidate` or `live-validate` confirmed afterwards gets its fix, and `--force` rewrites existing ones.
 
 ## CLI flags
 

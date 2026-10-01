@@ -1132,7 +1132,7 @@ export const RunMeta = z.object({
    */
   invocation: z
     .object({
-      /** Subcommand: "scan" | "revalidate" | "score" | "dedup" | "recon" | "summary". */
+      /** Subcommand: "scan" | "revalidate" | "score" | "fix" | "dedup" | "recon" | "summary". */
       command: z.string(),
       /** Raw CLI args as typed (process.argv after the node binary + entrypoint). */
       argv: z.string().optional(),

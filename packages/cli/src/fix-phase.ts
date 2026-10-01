@@ -8,13 +8,14 @@ import { handleDetectorError } from "./diagnostics.js";
 import { cleanFix } from "./fixer.js";
 import { logError } from "./log.js";
 
-/** Primaries the combined verdict confirmed that carry no fix yet. A
- *  duplicate never ships on its own; its primary carries the fix. */
-export function selectForFix(findings: ReadonlyArray<Finding>): Finding[] {
+/** Primaries the combined verdict confirmed that carry no fix yet; `force`
+ *  takes the ones that carry one too. A duplicate never ships on its own;
+ *  its primary carries the fix. */
+export function selectForFix(findings: ReadonlyArray<Finding>, force = false): Finding[] {
   return findings.filter(
     (f) =>
       !f.dedup &&
-      !f.suggestedFix &&
+      (force || !f.suggestedFix) &&
       f.filePath !== "(unknown)" &&
       effectiveVerdict(f) === "confirmed",
   );
@@ -34,10 +35,12 @@ export async function runFixPhase(args: {
   runId: string;
   concurrency: number;
   verbose?: boolean;
+  /** Write a fix again for findings that already carry one. */
+  force?: boolean;
   abortController: AbortController;
 }): Promise<void> {
   const { detector, outDir, root, runId, abortController } = args;
-  const work = selectForFix(args.findings);
+  const work = selectForFix(args.findings, args.force);
   if (work.length === 0) return;
   if (!detector.suggestFix) {
     console.log("\nSuggested fixes: backend does not support them, skipping");
