@@ -24,6 +24,7 @@ import { logError } from "../log.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import type { UsageMeter } from "../usage-meter.js";
 import { asValidationField, buildScopeValidatePrompt, LlmValidation } from "../validator.js";
+import { repairJsonText } from "./repair-json.js";
 import { extractCallUsage } from "./vercel-agent.js";
 /**
  * Multi-provider detector. Backed by the Vercel AI SDK's `generateObject`
@@ -134,6 +135,7 @@ export class MultiProviderDetector {
     try {
       const { object } = await this.metered(() =>
         generateObject({
+          experimental_repairText: repairJsonText,
           model: this.model,
           schema: ReconResult,
           mode: "json",
@@ -168,6 +170,7 @@ export class MultiProviderDetector {
     try {
       const { object } = await this.metered(() =>
         generateObject({
+          experimental_repairText: repairJsonText,
           model: this.model,
           schema: SuggestExcludesResult,
           mode: "json",
@@ -195,6 +198,7 @@ export class MultiProviderDetector {
     try {
       const { object } = await this.metered(() =>
         generateObject({
+          experimental_repairText: repairJsonText,
           model: this.model,
           schema: AgentSpec,
           mode: "json",
@@ -231,6 +235,7 @@ export class MultiProviderDetector {
     try {
       const { object } = await this.metered(() =>
         generateObject({
+          experimental_repairText: repairJsonText,
           model: this.model,
           schema: DetectionResult,
           mode: "json",
@@ -260,6 +265,7 @@ export class MultiProviderDetector {
     try {
       const { object } = await this.metered(() =>
         generateObject({
+          experimental_repairText: repairJsonText,
           model: this.model,
           schema: PreconditionCheck,
           mode: "json",
@@ -284,6 +290,7 @@ export class MultiProviderDetector {
     try {
       const { object } = await this.metered(() =>
         generateObject({
+          experimental_repairText: repairJsonText,
           model: this.model,
           schema: LlmValidation,
           mode: "json",
@@ -313,6 +320,7 @@ export class MultiProviderDetector {
     try {
       const { object } = await this.metered(() =>
         generateObject({
+          experimental_repairText: repairJsonText,
           model: this.model,
           schema: LlmScore,
           mode: "json",
@@ -342,6 +350,7 @@ export class MultiProviderDetector {
     try {
       const { object } = await this.metered(() =>
         generateObject({
+          experimental_repairText: repairJsonText,
           model: this.model,
           schema: LlmDedup,
           mode: "json",

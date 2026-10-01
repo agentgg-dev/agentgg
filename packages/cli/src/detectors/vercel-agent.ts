@@ -61,6 +61,7 @@ import {
   VALIDATION_CUT_SHORT,
 } from "../validator.js";
 import { looksLikeRefusal } from "./refusal.js";
+import { repairJsonText } from "./repair-json.js";
 export type Effort = "low" | "medium" | "high" | "max";
 export type Thinking = "off" | "adaptive" | "enabled";
 
@@ -753,6 +754,7 @@ export class VercelAgentDetector implements Detector {
       const schema = (tools[toolName] as { parameters: z.ZodTypeAny }).parameters;
       try {
         const { object } = await generateObject({
+          experimental_repairText: repairJsonText,
           model: this.structuredModel ?? this.model,
           schema,
           mode: this.objectMode,
@@ -822,6 +824,7 @@ export class VercelAgentDetector implements Detector {
       const { object } = await this.metered(
         () =>
           generateObject({
+            experimental_repairText: repairJsonText,
             model: this.model,
             schema: SuggestExcludesResult,
             mode: this.objectMode,
@@ -915,6 +918,7 @@ export class VercelAgentDetector implements Detector {
       const { object } = await this.metered(
         () =>
           generateObject({
+            experimental_repairText: repairJsonText,
             model: this.model,
             schema,
             mode: this.objectMode,
@@ -1150,6 +1154,7 @@ export class VercelAgentDetector implements Detector {
     const { object } = await this.metered(
       () =>
         generateObject({
+          experimental_repairText: repairJsonText,
           model: this.model,
           schema: RequotedExcerpts,
           mode: this.objectMode,
@@ -1173,6 +1178,7 @@ export class VercelAgentDetector implements Detector {
       const { object } = await this.metered(
         () =>
           generateObject({
+            experimental_repairText: repairJsonText,
             model: this.model,
             schema: PreconditionCheck,
             mode: this.objectMode,
@@ -1208,6 +1214,7 @@ export class VercelAgentDetector implements Detector {
         const { object } = await this.metered(
           () =>
             generateObject({
+              experimental_repairText: repairJsonText,
               model: this.model,
               schema: LlmValidation,
               mode: this.objectMode,
@@ -1307,6 +1314,7 @@ export class VercelAgentDetector implements Detector {
       const { object } = await this.metered(
         () =>
           generateObject({
+            experimental_repairText: repairJsonText,
             model: this.model,
             schema: LlmValidation,
             mode: this.objectMode,
@@ -1339,6 +1347,7 @@ export class VercelAgentDetector implements Detector {
     const { object } = await this.metered(
       () =>
         generateObject({
+          experimental_repairText: repairJsonText,
           model: this.model,
           schema: GeneratedProofScript,
           mode: this.objectMode,
@@ -1462,6 +1471,7 @@ export class VercelAgentDetector implements Detector {
       const { object } = await this.metered(
         () =>
           generateObject({
+            experimental_repairText: repairJsonText,
             model: this.model,
             schema: LlmScore,
             mode: this.objectMode,
@@ -1488,6 +1498,7 @@ export class VercelAgentDetector implements Detector {
       const { object } = await this.metered(
         () =>
           generateObject({
+            experimental_repairText: repairJsonText,
             model: this.model,
             schema: LlmDedup,
             mode: this.objectMode,
@@ -1520,6 +1531,7 @@ export class VercelAgentDetector implements Detector {
       if (!this.structuredModel) throw extractErr;
       try {
         const reformat = await generateObject({
+          experimental_repairText: repairJsonText,
           model: this.structuredModel,
           schema: DetectionResult,
           mode: this.objectMode,
@@ -1591,6 +1603,7 @@ export class VercelAgentDetector implements Detector {
       if (!this.structuredModel) throw extractErr;
       try {
         const reformat = await generateObject({
+          experimental_repairText: repairJsonText,
           model: this.structuredModel,
           schema: LlmValidation,
           mode: this.objectMode,
@@ -1663,6 +1676,7 @@ export class VercelAgentDetector implements Detector {
       if (!this.structuredModel) throw extractErr;
       try {
         const reformat = await generateObject({
+          experimental_repairText: repairJsonText,
           model: this.structuredModel,
           schema: ReproduceFindingResult,
           mode: this.objectMode,
@@ -1695,6 +1709,7 @@ export class VercelAgentDetector implements Detector {
       if (!this.structuredModel) throw extractErr;
       try {
         const reformat = await generateObject({
+          experimental_repairText: repairJsonText,
           model: this.structuredModel,
           schema: AgentSpec,
           mode: this.objectMode,
@@ -1725,6 +1740,7 @@ export class VercelAgentDetector implements Detector {
       if (!this.structuredModel) throw extractErr;
       try {
         const reformat = await generateObject({
+          experimental_repairText: repairJsonText,
           model: this.structuredModel,
           schema: ReconResult,
           mode: this.objectMode,
