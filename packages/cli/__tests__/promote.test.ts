@@ -145,6 +145,7 @@ describe("applyGroupVerdict", () => {
     list[0].cvss = { baseScore: 9.8 };
     list[0].severity = "CRITICAL";
     list[0].live = { result: "inconclusive", reasoning: "old" };
+    list[0].suggestedFix = "old fix";
     const changed = applyGroupVerdict(list, list[0], { ...failed, leadId: "d1" }, () => true);
     expect(list[1].dedup).toBeUndefined();
     expect(list[1].validation?.verdict).toBe("confirmed");
@@ -153,6 +154,7 @@ describe("applyGroupVerdict", () => {
     expect(list[0].cvss).toBeUndefined();
     expect(list[0].severity).toBeUndefined();
     expect(list[0].live).toBeUndefined();
+    expect(list[0].suggestedFix).toBeUndefined();
     expect(list[2].dedup?.duplicateOf).toBe("d1");
     expect(list[2].dedup?.reasoning).toBe("d2-vs-p1");
     expect(new Set(changed.map((x) => x.id))).toEqual(new Set(["p1", "d1", "d2"]));

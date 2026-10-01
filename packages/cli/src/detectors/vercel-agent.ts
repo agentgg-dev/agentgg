@@ -50,6 +50,7 @@ import {
   type UnverifiedExcerpt,
 } from "../detect.js";
 import { ExpectedDetectorError, isInFlightCreditError } from "../diagnostics.js";
+import { buildFixPrompt } from "../fixer.js";
 import { logError, logInfo, logWarn } from "../log.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import type { CallUsage, UsageMeter } from "../usage-meter.js";
@@ -1484,6 +1485,29 @@ export class VercelAgentDetector implements Detector {
       return asCvssScore(object);
     } catch (err) {
       debugLog("VercelAgentDetector.scoreFinding", err);
+      throw err;
+    }
+  }
+
+  async suggestFix(args: {
+    finding: Finding;
+    fileContent: string;
+    signal?: AbortSignal;
+  }): Promise<string> {
+    try {
+      const { text } = await this.metered(
+        () =>
+          generateText({
+            model: this.model,
+            prompt: buildFixPrompt(args),
+            providerOptions: this.providerOptionsArg(),
+            abortSignal: args.signal,
+          }),
+        { label: `fix:${args.finding.id}`, signal: args.signal },
+      );
+      return text;
+    } catch (err) {
+      debugLog("VercelAgentDetector.suggestFix", err);
       throw err;
     }
   }

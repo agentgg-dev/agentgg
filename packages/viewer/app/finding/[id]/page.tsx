@@ -1,4 +1,4 @@
-import { effectiveVerdict, type Finding, groupPrimary } from "@agentgg/core";
+import { effectiveVerdict, type Finding, groupPrimary, suggestedFixOf } from "@agentgg/core";
 import { liveState } from "@agentgg/core/live";
 import { ArrowLeft, ExternalLink, Hash } from "lucide-react";
 import Link from "next/link";
@@ -116,6 +116,7 @@ export default async function FindingPage({ params }: { params: Promise<{ id: st
 }
 
 function DetailsPanel({ finding, holder }: { finding: Finding; holder: Finding }) {
+  const fix = suggestedFixOf(holder);
   return (
     <>
       <Section title="Details">
@@ -135,6 +136,12 @@ function DetailsPanel({ finding, holder }: { finding: Finding; holder: Finding }
         )}
         <Markdown source={finding.impact} />
       </Section>
+
+      {fix && (
+        <Section title="Suggested fix">
+          <Markdown source={fix} />
+        </Section>
+      )}
 
       {finding.dedup && (
         <Section title="Duplicate">

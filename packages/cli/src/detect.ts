@@ -415,6 +415,15 @@ export interface Detector {
   ): Promise<CvssScore>;
 
   /**
+   * Fix phase — write the remediation for one confirmed finding, as
+   * Markdown. Single call, no tools: the prompt carries the finding and its
+   * file. The caller decides which findings qualify and cleans the answer
+   * with `cleanFix`. Optional so a backend can opt out; callers invoke it as
+   * `detector.suggestFix?.(args)`.
+   */
+  suggestFix?(args: { finding: Finding; fileContent: string } & AbortableArgs): Promise<string>;
+
+  /**
    * De-duplication phase — the gather pass. Given every finding for ONE
    * source file (unioned across agent shards) and, when readable, the
    * file content, return the equivalence classes of findings that describe

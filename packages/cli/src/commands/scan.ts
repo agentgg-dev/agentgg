@@ -39,6 +39,7 @@ import { loadDefaultScope } from "../default-scope.js";
 import type { AgentCandidate } from "../detect.js";
 import { FatalScanError, handleDetectorError } from "../diagnostics.js";
 import { listChangedFiles, loadCommitPatch } from "../diff.js";
+import { runFixPhase } from "../fix-phase.js";
 import { loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
 import { logError, logInfo, logWarn } from "../log.js";
 import { evaluatePreFilter } from "../pre-filter.js";
@@ -222,6 +223,12 @@ interface ScanOpts {
   /** Re-score findings even when they already carry a `cvss` on disk. */
   rescore?: boolean;
   /**
+   * Run the fix phase after scoring. On by default (Commander default
+   * `true`); pass `--no-fix` to skip it. Writes a suggested fix for each
+   * primary the combined verdict confirmed, and for no other finding.
+   */
+  fix?: boolean;
+  /**
    * Run the de-duplication phase right after detection. On by default
    * (Commander default `true`); pass `--no-dedup` to skip it. Groups
    * findings by source file across agents, folds same-root-cause findings
@@ -273,7 +280,7 @@ interface ScanOpts {
 
 /**
  * Orchestrate a scan: recon → preconditions → run queued agents → validate
- * → score → report.
+ * → score → fix → report.
  *
  * Every agent is one unified, tool-enabled shape. An agent with a file
  * scope (`extensions` / `filePatterns`) resolves to a concrete file set,
@@ -2147,6 +2154,21 @@ export async function runScan(
       }
     }
 
+    // -------- fix phase --------
+    // After scoring, so the combined verdict it gates on has settled.
+    if (opts.fix) {
+      await runFixPhase({
+        findings,
+        detector,
+        outDir,
+        root,
+        runId: runMeta.runId,
+        concurrency,
+        verbose: opts.verbose,
+        abortController: scanAbortController,
+      });
+    }
+
     const completedAt = new Date();
 
     updateRunStage(outDir, runMeta.runId, "report");
@@ -2469,6 +2491,15 @@ export function registerScanCommand(program: Command): void {
     .option(
       "--rescore",
       "Re-score findings even when they already carry a CVSS score on disk (default: skip them)",
+    )
+    .option(
+      "--fix",
+      "Write a suggested fix for each confirmed finding, shown in its report. Runs last, one call per primary finding the combined verdict (static plus live) confirmed; every other finding gets no fix. On by default; disable with --no-fix.",
+      true,
+    )
+    .option(
+      "--no-fix",
+      "skip the fix phase (it runs by default). Confirmed findings ship without a suggested fix.",
     )
     .option(
       "--dedup",

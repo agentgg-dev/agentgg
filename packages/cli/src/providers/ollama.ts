@@ -53,6 +53,8 @@ function buildDetector(config: UserConfig, options: ResolveOptions): Detector {
     validateFinding: (args) => agentDetector.validateFinding(args),
     validateFindingByScope: (args) => fileDetector.validateFindingByScope(args),
     scoreFinding: (args) => fileDetector.scoreFinding(args),
+    // Plain text, so it goes to the model without `structuredOutputs`.
+    suggestFix: (args) => agentDetector.suggestFix(args),
     dedupeFindings: (args) => fileDetector.dedupeFindings(args),
     // Fan the meter out to both inner detectors so usage from the tool path
     // and the structured-output path lands in one shared ledger.

@@ -28,6 +28,7 @@ import {
   type SuggestExcludesArgs,
   SuggestExcludesResult,
 } from "../detect.js";
+import { buildFixPrompt, LlmFix } from "../fixer.js";
 import { logError, logWarn } from "../log.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import type { CallUsage, UsageMeter } from "../usage-meter.js";
@@ -427,6 +428,21 @@ export class ClaudeAgentDetector implements Detector {
       signal: args.signal,
     });
     return asCvssScore(llmScore);
+  }
+
+  async suggestFix(args: {
+    finding: Finding;
+    fileContent: string;
+    signal?: AbortSignal;
+  }): Promise<string> {
+    const result = await this.runStructured({
+      prompt: buildFixPrompt(args),
+      tools: [],
+      maxTurns: this.validateMaxTurns,
+      schema: LlmFix,
+      signal: args.signal,
+    });
+    return result.fix;
   }
 
   async dedupeFindings(args: {

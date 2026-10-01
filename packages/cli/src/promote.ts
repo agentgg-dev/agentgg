@@ -48,7 +48,7 @@ export function membersOf(findings: Finding[]): Map<string, Finding[]> {
 
 /** Make `heir` the primary of `primary`'s group. The demoted primary takes
  *  the heir's reasoning (that pair was compared); the rest keep their own.
- *  Its score and live result judged its own text, so they go too. */
+ *  Its score, live result and fix judged its own text, so they go too. */
 function handOver(primary: Finding, dupes: Finding[], heir: Finding): void {
   const heirReasoning = heir.dedup?.reasoning ?? "";
   const heirRunId = heir.dedup?.runId;
@@ -56,6 +56,7 @@ function handOver(primary: Finding, dupes: Finding[], heir: Finding): void {
   primary.cvss = undefined;
   primary.severity = undefined;
   primary.live = undefined;
+  primary.suggestedFix = undefined;
   for (const f of [primary, ...dupes]) {
     if (f.id === heir.id) continue;
     const reasoning = f.id === primary.id ? heirReasoning : (f.dedup?.reasoning ?? "");

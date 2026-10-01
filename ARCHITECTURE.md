@@ -9,7 +9,7 @@ One-page reference for what's wired and how. User-facing docs are in [README.md]
 1. **Recon** — one tool-enabled survey of the repo via the built-in recon agent ([`src/agents/recon.md`](packages/cli/src/agents/recon.md), loaded by [`recon-agent.ts`](packages/cli/src/recon-agent.ts)). Produces a concise `ReconReport` → `state/recon.json`. Cached by `reconHash` (source identity + `fingerprint` tags); `--re-recon` forces a refresh, `--no-recon` skips it entirely. The brief is injected into precondition prompt checks and into every agent's detection prompt.
 2. **Precondition** — for each selected agent, decide queued vs skipped ([`precondition.ts`](packages/cli/src/precondition.ts)). The decisions (with reasons) are written to `state/plan.json` **before any agent runs**. Reused like recon: when a `plan.json` already matches the recon brief and covers the `-t` selection, the for-loop is skipped and its decisions are lifted from disk (`--re-recon` re-evaluates; `--no-recon` bypasses gating and queues every `-t` agent).
 3. **Run** — each queued agent runs over its `where` file set, in batches.
-4. **Dedup**, then **Validate** (`--scope` for rules; `--live-validate` adds a live sub-pass at its end), then **Score** — second-pass passes over the findings. Dedup leads so validation and scoring only run on primaries; scoring reads the combined static + live verdict. All three run by default; disable individually with `--no-validate` / `--no-score` / `--no-dedup`.
+4. **Dedup**, then **Validate** (`--scope` for rules; `--live-validate` adds a live sub-pass at its end), then **Score**, then **Fix** — second-pass passes over the findings. Dedup leads so validation, scoring and fixing only run on primaries; scoring and fixing read the combined static + live verdict. Fix writes a `suggestedFix` only for a primary that verdict confirmed ([`fix-phase.ts`](packages/cli/src/fix-phase.ts)). All four run by default; disable individually with `--no-validate` / `--no-score` / `--no-fix` / `--no-dedup`.
 5. **Report** — per-finding `findings/*.md` + `summary.md`. Skippable with `--no-summary` (state still persists); regenerate later with `agentgg summary`. `--serve` (opt-in) boots the viewer once the report is written.
 
 Each phase is also a standalone command over the same `--output` dir, sharing the artifacts above: **`agentgg recon`** (phases 1–2 only, no detection), **`agentgg revalidate`** (phase 4 validate), **`agentgg score`** (phase 4 score), **`agentgg summary`** (phase 5). `recon` writes `recon.json` + `plan.json` that a later `scan` reuses — the durable plan→run hand-off.
@@ -97,12 +97,13 @@ Resume:
 
 `--rescan` bypasses resume. Changing scope (`--diff`, `--exclude`, `--only`, `--max-file-size`, source identity) or the recon brief (`--re-recon` / a stack change) invalidates the affected agents. Source identity is the absolute scan root unless `--source-id <id>` overrides it; the override is what lets a distributed runner (or a CI job with a moving checkout path) extract the same source to a different path each run and still resume. It is recorded verbatim as `scope.rootPath` on the sidecar and `rootPath` on `plan.json`, and is never resolved as a path. `--no-recon` uses a synthetic `reconHash` (`"no-recon"`) and queues every `-t` agent, so its runs resume independently of recon-bearing runs.
 
-## Validator & scoring
+## Validator, scoring & fix
 
-Three Detector methods, so any provider participates without bespoke wiring:
+Four Detector methods, so any provider participates without bespoke wiring:
 - **`validateFinding`** — full classifier; re-reads source → `confirmed` / `false-positive` / `out-of-scope` / `uncertain` + reasoning. Used by `--validate` and `agentgg revalidate`.
 - **`validateFindingByScope`** — cheap variant, no source read; only `out-of-scope` / `uncertain`. Triggered by an explicit `--scope <path>` combined with `--no-validate` (a pre-filter that stands in for the full validator when it's turned off).
 - **`scoreFinding`** — picks the 8 CVSS 3.1 base metrics; vector string, base score, and severity bucket are computed deterministically in [`scoring.asCvssScore`](packages/cli/src/scoring.ts). Triggered by `--score` or `agentgg score`.
+- **`suggestFix`** — one tool-less call per confirmed primary; returns the remediation as plain Markdown (a fix is mostly code, which is what breaks structured output). Every reader goes through `suggestedFixOf` in [`verdict.ts`](packages/core/src/verdict.ts), which hides the fix unless the combined verdict is `confirmed`, so a verdict that changes later hides a fix still on disk. Triggered by `--fix`.
 
 ## CLI flags
 
@@ -120,6 +121,7 @@ Three Detector methods, so any provider participates without bespoke wiring:
 | `--auto-exclude` / `--no-auto-exclude` | file selection (pre-recon) | LLM pass that picks non-runtime folders to skip, folded in like `--exclude`. **On by default**; `--no-auto-exclude` disables. Logged (reasons under `--verbose`). |
 | `--validate` / `--no-validate` / `--revalidate-all` / `--scope` | post-detection | Validation passes (see above). **On by default**; `--no-validate` for a detection-only run. |
 | `--score` / `--no-score` / `--rescore` | post-detection | CVSS scoring pass. **On by default**; `--no-score` to skip. |
+| `--fix` / `--no-fix` | post-detection | Suggested-fix pass over confirmed primaries. **On by default**; `--no-fix` to skip. |
 | `--dedup` / `--no-dedup` / `--delete-duplicates` | post-detection | De-duplication pass, clustering same-root-cause findings per file. **On by default**; `--no-dedup` to skip. |
 | `--serve [port]` | after report | Boot the local web UI when the scan finishes. Opt-in (default port 3737). |
 
