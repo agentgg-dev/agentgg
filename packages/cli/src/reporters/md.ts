@@ -1,7 +1,7 @@
 import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { Finding, Severity } from "@agentgg/core";
-import { effectiveVerdict, getEvidenceDir, groupPrimary } from "@agentgg/core";
+import { effectiveVerdict, getEvidenceDir, groupPrimary, suggestedFixOf } from "@agentgg/core";
 
 /**
  * Sort order for rendered findings: severity bucket descending, then
@@ -339,6 +339,13 @@ export function renderFindingMd(
   lines.push("### Impact");
   lines.push(f.impact);
   lines.push("");
+
+  const fix = suggestedFixOf(holder);
+  if (fix) {
+    lines.push("### Suggested fix");
+    lines.push(fix);
+    lines.push("");
+  }
 
   if (f.references.length > 0) {
     lines.push("### References");

@@ -494,6 +494,12 @@ export const Finding = z.object({
   /** Filled in after the live (browser) validation pass. */
   live: LiveValidation.optional(),
   /**
+   * Markdown remediation, written by the fix phase for a primary the
+   * combined verdict confirmed. Readers go through `suggestedFixOf`: a
+   * later verdict change must hide a fix that is still on disk.
+   */
+  suggestedFix: z.string().optional(),
+  /**
    * Set by the de-duplication phase (`agentgg dedup`) when this finding
    * describes the same root cause as another finding in the SAME source
    * file. Orthogonal to `validation`: a finding can be both `confirmed`
@@ -532,7 +538,7 @@ export type Finding = z.infer<typeof Finding>;
 
 export const AnalysisRun = z.object({
   runId: z.string(),
-  phase: z.enum(["detect", "validate", "dedup", "score", "reproduce"]),
+  phase: z.enum(["detect", "validate", "dedup", "score", "reproduce", "fix"]),
   ranAt: z.string(),
   durationMs: z.number().int().nonnegative().default(0),
   provider: z.string(),
@@ -1108,7 +1114,9 @@ export const RunMeta = z.object({
   type: z.enum(["scan", "detect", "validate", "dedup"]),
   phase: z.enum(["running", "done", "error"]),
   /** Pipeline stage this run is currently in. Absent before the first stage write. */
-  stage: z.enum(["recon", "detect", "dedupe", "validate", "live", "score", "report"]).optional(),
+  stage: z
+    .enum(["recon", "detect", "dedupe", "validate", "live", "score", "fix", "report"])
+    .optional(),
   /** Units completed within the current stage, e.g. batches or findings. */
   progress: z
     .object({ done: z.number().int().nonnegative(), total: z.number().int().nonnegative() })

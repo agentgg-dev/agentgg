@@ -31,6 +31,11 @@ export function effectiveVerdict(
   return staticVerdict;
 }
 
+/** The fix a reader sees: only a finding the combined verdict confirms shows one. */
+export function suggestedFixOf(f: Finding): string | undefined {
+  return effectiveVerdict(f) === "confirmed" ? f.suggestedFix : undefined;
+}
+
 /** The finding that holds the group's verdict and score. A duplicate whose
  *  primary is not loaded stands for itself. */
 export function groupPrimary(f: Finding, byId: Map<string, Finding>): Finding {

@@ -27,6 +27,11 @@ describe("updateRunStage", () => {
     expect(readRunMeta(outputDir, runId)?.stage).toBe("live");
   });
 
+  it("records the fix stage", () => {
+    updateRunStage(outputDir, runId, "fix", { done: 0, total: 2 });
+    expect(readRunMeta(outputDir, runId)?.stage).toBe("fix");
+  });
+
   it("does not throw when the run doesn't exist on disk", () => {
     expect(() => updateRunStage(outputDir, "missing-run-id", "detect")).not.toThrow();
   });
