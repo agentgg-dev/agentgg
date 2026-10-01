@@ -273,7 +273,7 @@ export async function runReconCommand(
       detector,
       recon,
       concurrency: opts.concurrency,
-      signal: reconAbortController.signal,
+      abortController: reconAbortController,
       verbose: opts.verbose,
     });
     const queuedAgents = selection.queued;

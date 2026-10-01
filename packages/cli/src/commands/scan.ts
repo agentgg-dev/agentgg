@@ -884,7 +884,7 @@ export async function runScan(
           detector,
           recon,
           concurrency: opts.concurrency,
-          signal: scanAbortController.signal,
+          abortController: scanAbortController,
           verbose: opts.verbose,
         });
         queuedAgents = selection.queued;

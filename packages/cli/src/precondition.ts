@@ -4,7 +4,9 @@ import type { Agent, PreconditionRegex, ReconReport } from "@agentgg/core";
 import { minimatch } from "minimatch";
 import { compileAgentRegex } from "./agent-regex.js";
 import { runConcurrent } from "./concurrent.js";
-import type { Detector } from "./detect.js";
+import type { Detector, PreconditionCheck } from "./detect.js";
+import { handleDetectorError } from "./diagnostics.js";
+import { logWarn } from "./log.js";
 import { renderReconForPrompt } from "./recon.js";
 import { collectAllFiles, type WalkConfig } from "./walker.js";
 
@@ -41,7 +43,8 @@ export interface SelectAgentsOptions {
   recon?: ReconReport;
   /** Parallelism for the LLM prompt gates. Defaults to 5. */
   concurrency?: number;
-  signal?: AbortSignal;
+  /** Cancels the prompt gates; a fatal provider error aborts it. */
+  abortController?: AbortController;
   verbose?: boolean;
 }
 
@@ -66,14 +69,7 @@ export async function selectAgents(
   const decisionBySlug = new Map<string, PreconditionDecision>();
 
   await runConcurrent(agents, Math.max(1, opts.concurrency ?? 5), async (agent) => {
-    const decision = await evaluateAgent(
-      agent,
-      files,
-      opts.rootDir,
-      opts.detector,
-      reconBlock,
-      opts.signal,
-    );
+    const decision = await evaluateAgent(agent, files, reconBlock, opts);
     decisionBySlug.set(agent.slug, decision);
   });
 
@@ -88,11 +84,11 @@ export async function selectAgents(
 async function evaluateAgent(
   agent: Agent,
   files: string[],
-  rootDir: string,
-  detector: Detector,
   reconBlock: string | undefined,
-  signal: AbortSignal | undefined,
+  opts: SelectAgentsOptions,
 ): Promise<PreconditionDecision> {
+  const { rootDir, detector, abortController } = opts;
+  const signal = abortController?.signal;
   const pre = agent.precondition;
   const hasRegex = !!pre?.regex && regexHasConstraint(pre.regex);
   const hasPrompt = !!pre?.prompt && pre.prompt.trim().length > 0;
@@ -117,13 +113,24 @@ async function evaluateAgent(
   // Prompt gate (regex already passed or was absent).
   // biome-ignore lint/style/noNonNullAssertion: hasPrompt implies pre.prompt
   const conditionPrompt = pre!.prompt!;
-  const check = await detector.checkPrecondition({
-    agentName: agent.name,
-    agentDescription: agent.description,
-    conditionPrompt,
-    recon: reconBlock,
-    signal,
-  });
+  let check: PreconditionCheck;
+  try {
+    check = await detector.checkPrecondition({
+      agentName: agent.name,
+      agentDescription: agent.description,
+      conditionPrompt,
+      recon: reconBlock,
+      signal,
+    });
+  } catch (err) {
+    if (signal?.aborted) throw err;
+    const label = `precondition:${agent.slug}`;
+    // Rethrows an error that would fail every later call (bad key, no credits).
+    handleDetectorError(opts, label, err, abortController);
+    // An unknown gate must not cost coverage, so the agent runs.
+    logWarn(`${label}: check failed, running the agent without it`);
+    return { slug: agent.slug, queued: true, reason: "precondition check failed, queued anyway" };
+  }
   return {
     slug: agent.slug,
     queued: check.relevant,
