@@ -145,6 +145,10 @@ read what the fix depends on:
 - the other files the flow passes through, when the root cause or a
   safer place for the fix is there.
 
+You have a limited number of tool calls. Read only what the fix needs,
+and write the fix as soon as you know it: a session that ends with no
+fix is a failure, and an unread file that the fix does not touch is not.
+
 A block can edit any file you have read. Put the fix where the code goes
 wrong, even when that is not the finding's file. Say nothing about a
 file you have not read. If you cannot write a correct fix, do not guess:

@@ -316,6 +316,11 @@ describe("buildFixPrompt with read tools", () => {
     expect(withTools).toContain("have not seen in this repository");
   });
 
+  it("tells the model that its tool calls are limited, so it writes the fix when it knows it", () => {
+    expect(withTools).toContain("limited number of tool calls");
+    expect(single).not.toContain("limited number of tool calls");
+  });
+
   it("lets a block edit another file, named on the line above the block", () => {
     expect(withTools).toContain("path of its file");
     expect(withTools).not.toContain("You cannot see that file");
