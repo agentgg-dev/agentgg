@@ -17,7 +17,9 @@ export async function runConcurrent<T>(
   limit: number,
   fn: (item: T, index: number) => Promise<void>,
 ): Promise<void> {
-  const cap = Math.max(1, limit);
+  // A NaN limit (an unparseable --concurrency) would start zero workers and
+  // resolve as if every item had been processed.
+  const cap = Number.isFinite(limit) ? Math.max(1, limit) : 1;
   if (items.length === 0) return;
 
   let cursor = 0;

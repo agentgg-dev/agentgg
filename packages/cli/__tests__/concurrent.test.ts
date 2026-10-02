@@ -27,6 +27,15 @@ describe("runConcurrent", () => {
     expect(seen.sort()).toEqual(["a", "b"]);
   });
 
+  it("still processes every item when the limit is not a number", async () => {
+    const seen: string[] = [];
+    // What `--concurrency abc` parses to.
+    await runConcurrent(["a", "b"], Number.NaN, async (item) => {
+      seen.push(item);
+    });
+    expect(seen).toEqual(["a", "b"]);
+  });
+
   it("caps active workers at `limit`", async () => {
     let inFlight = 0;
     let peak = 0;
