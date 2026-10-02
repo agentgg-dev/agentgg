@@ -2168,6 +2168,7 @@ export async function runScan(
         runId: runMeta.runId,
         concurrency,
         verbose: opts.verbose,
+        recon,
         signal: scanAbortController.signal,
       });
     }

@@ -1492,10 +1492,11 @@ export class VercelAgentDetector implements Detector {
   async suggestFix(args: {
     finding: Finding;
     fileContent: string;
+    recon?: ReconReport;
     signal?: AbortSignal;
   }): Promise<string> {
     try {
-      const { text } = await this.metered(
+      const { text, finishReason } = await this.metered(
         () =>
           generateText({
             model: this.model,
@@ -1505,6 +1506,10 @@ export class VercelAgentDetector implements Detector {
           }),
         { label: `fix:${args.finding.id}`, signal: args.signal },
       );
+      // Half a fix reads like a whole one in the report.
+      if (finishReason === "length") {
+        throw new ExpectedDetectorError("the fix was cut off at the model's output limit");
+      }
       return text;
     } catch (err) {
       debugLog("VercelAgentDetector.suggestFix", err);

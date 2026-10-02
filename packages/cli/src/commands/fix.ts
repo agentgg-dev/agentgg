@@ -4,6 +4,7 @@ import {
   completeRun,
   createRunMeta,
   loadAllFileRecords,
+  readReconReport,
   readScanMeta,
   writeRunMeta,
 } from "@agentgg/core";
@@ -111,6 +112,7 @@ export async function runFix(
     concurrency: Math.max(1, opts.concurrency ?? 5),
     verbose: opts.verbose,
     force: opts.force,
+    recon: readReconReport(outputDir) ?? undefined,
   });
 
   const completedAt = new Date();

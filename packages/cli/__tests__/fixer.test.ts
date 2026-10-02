@@ -23,14 +23,14 @@ function makeFinding(overrides: Partial<Finding> = {}): Finding {
   };
 }
 
-function mockModelAnswering(text: string) {
+function mockModelAnswering(text: string, finishReason: "stop" | "length" = "stop") {
   const prompts: string[] = [];
   const model = new MockLanguageModelV1({
     doGenerate: async (options) => {
       prompts.push(JSON.stringify(options.prompt));
       return {
         rawCall: { rawPrompt: null, rawSettings: {} },
-        finishReason: "stop",
+        finishReason,
         usage: { promptTokens: 10, completionTokens: 10 },
         text,
       };
@@ -78,6 +78,89 @@ describe("buildFixPrompt", () => {
     });
     expect(out).toContain("`id` reaches db.query() unescaped.");
   });
+
+  it("names a live run as the proof when only the live run confirmed the finding", () => {
+    const out = buildFixPrompt({
+      finding: makeFinding({
+        validation: { verdict: "uncertain", reasoning: "Could not trace the entry point." },
+        live: {
+          result: "reproduced",
+          reasoning: "The login returned a session for the injected user.",
+          counterevidence: "",
+        },
+      }),
+      fileContent: "x",
+    });
+    expect(out).toContain("A live run reproduced the vulnerability");
+    expect(out).toContain("The login returned a session for the injected user.");
+    // An uncertain review is not a confirmation, so it is not quoted as one.
+    expect(out).not.toContain("A reviewer confirmed");
+    expect(out).not.toContain("Could not trace the entry point.");
+  });
+
+  it("shows the requests the live run sent", () => {
+    const out = buildFixPrompt({
+      finding: makeFinding({
+        validation: { verdict: "confirmed", reasoning: "r" },
+        live: {
+          result: "reproduced",
+          reasoning: "r",
+          counterevidence: "",
+          evidence: {
+            screenshots: [],
+            requests: [
+              {
+                method: "POST",
+                url: "http://app.test/login",
+                status: 200,
+                requestBody: "user=' OR 1=1--",
+              },
+            ],
+          },
+        },
+      }),
+      fileContent: "x",
+    });
+    expect(out).toContain("POST http://app.test/login → 200");
+    expect(out).toContain("user=' OR 1=1--");
+  });
+
+  it("leaves the live section out when the live run did not reproduce the finding", () => {
+    const out = buildFixPrompt({
+      finding: makeFinding({
+        validation: { verdict: "confirmed", reasoning: "r" },
+        live: { result: "error", reasoning: "The sandbox crashed.", counterevidence: "" },
+      }),
+      fileContent: "x",
+    });
+    expect(out).not.toContain("The sandbox crashed.");
+  });
+
+  it("includes the recon brief when there is one", () => {
+    const out = buildFixPrompt({
+      finding: makeFinding(),
+      fileContent: "x",
+      recon: {
+        purpose: "p",
+        languages: ["typescript"],
+        frameworks: ["express"],
+        integrations: [],
+        notableDirs: [],
+        summary: "An Express API backed by Postgres.",
+        reconHash: "h",
+        generatedAt: "2026-01-01T00:00:00.000Z",
+      },
+    });
+    expect(out).toContain("An Express API backed by Postgres.");
+    expect(out).toContain("express");
+  });
+
+  it("asks for a fix of the whole class of input, and gives the model a way out", () => {
+    const out = buildFixPrompt({ finding: makeFinding(), fileContent: "x" });
+    expect(out).toContain("not only the PoC");
+    expect(out).toContain("valid input");
+    expect(out).toContain("cannot write a correct fix");
+  });
 });
 
 describe("cleanFix", () => {
@@ -98,6 +181,22 @@ describe("cleanFix", () => {
     const answer = "```ts\ndb.query(sql, [id]);\n```\nBind the parameter.";
     expect(cleanFix(answer)).toBe(answer);
   });
+
+  it.each(["````", "~~~"])("unwraps a markdown wrapper written with %s", (fence) => {
+    const inner = "Bind the parameter.\n\n```ts\ndb.query(sql, [id]);\n```";
+    expect(cleanFix(`${fence}markdown\n${inner}\n${fence}`)).toBe(inner);
+  });
+
+  it("keeps the closing fence of a code block when the wrapper was never closed", () => {
+    const inner = "Bind the parameter.\n```ts\ndb.query(sql, [id]);\n```";
+    expect(cleanFix(`\`\`\`markdown\n${inner}`)).toBe(inner);
+  });
+
+  it("closes a code fence the answer left open, so it cannot swallow the report after it", () => {
+    expect(cleanFix("Bind the parameter.\n```ts\ndb.query(sql, [id]);")).toBe(
+      "Bind the parameter.\n```ts\ndb.query(sql, [id]);\n```",
+    );
+  });
 });
 
 describe("VercelAgentDetector.suggestFix", () => {
@@ -110,5 +209,15 @@ describe("VercelAgentDetector.suggestFix", () => {
     expect(fix).toBe("Bind the parameter.");
     expect(prompts).toHaveLength(1);
     expect(prompts[0]).toContain("Concatenated SQL in login handler");
+  });
+
+  it("rejects an answer the output limit cut off", async () => {
+    const { model } = mockModelAnswering("Bind the parameter.\n```ts\ndb.que", "length");
+    await expect(
+      new VercelAgentDetector("openai", model).suggestFix({
+        finding: makeFinding(),
+        fileContent: "x",
+      }),
+    ).rejects.toThrow(/cut off/);
   });
 });

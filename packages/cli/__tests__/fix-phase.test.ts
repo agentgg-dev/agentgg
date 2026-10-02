@@ -125,6 +125,44 @@ describe("runFixPhase", () => {
     expect(scan.signal.aborted).toBe(false);
   });
 
+  it("records no fix when the model refuses", async () => {
+    const findings = [makeFinding("a1")];
+    seed(findings);
+
+    const result = await run(findings, async () => "I can't help with this request.");
+
+    expect(result.written).toBe(0);
+    expect(onDisk("a1")?.suggestedFix).toBeUndefined();
+  });
+
+  it("gives the detector the recon brief", async () => {
+    const findings = [makeFinding("a1")];
+    seed(findings);
+    const recon = {
+      purpose: "p",
+      languages: [],
+      frameworks: ["express"],
+      integrations: [],
+      notableDirs: [],
+      summary: "An Express API.",
+      reconHash: "h",
+      generatedAt: "2026-01-01T00:00:00.000Z",
+    };
+    const suggestFix = vi.fn(async () => "fix");
+
+    await runFixPhase({
+      findings,
+      detector: { name: "test-mock", suggestFix } as unknown as Detector,
+      outDir,
+      root,
+      runId: "run-1",
+      concurrency: 1,
+      recon,
+    });
+
+    expect(suggestFix.mock.calls[0]).toMatchObject([{ recon }]);
+  });
+
   it("makes no call for a finding with no record on disk", async () => {
     const suggestFix = vi.fn(async () => "fix");
 

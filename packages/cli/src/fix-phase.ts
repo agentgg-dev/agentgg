@@ -1,9 +1,10 @@
 import { readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
-import type { Finding } from "@agentgg/core";
+import type { Finding, ReconReport } from "@agentgg/core";
 import { effectiveVerdict, readFileRecord, updateRunStage, writeFileRecord } from "@agentgg/core";
 import { runConcurrent } from "./concurrent.js";
 import type { Detector } from "./detect.js";
+import { looksLikeRefusal } from "./detectors/refusal.js";
 import { FatalScanError, handleDetectorError } from "./diagnostics.js";
 import { cleanFix } from "./fixer.js";
 import { logError, logWarn } from "./log.js";
@@ -78,6 +79,8 @@ export async function runFixPhase(args: {
   verbose?: boolean;
   /** Write a fix again for findings that already carry one. */
   force?: boolean;
+  /** The scan's recon brief, when it has one. */
+  recon?: ReconReport;
   /** The caller's abort signal. Aborting it cancels the phase's calls. */
   signal?: AbortSignal;
 }): Promise<FixPhaseResult> {
@@ -127,11 +130,16 @@ export async function runFixPhase(args: {
             await detector.suggestFix?.({
               finding,
               fileContent: content,
+              recon: args.recon,
               signal: phaseAbort.signal,
             }),
           );
           if (!fix) {
             if (args.verbose) console.log(`    no fix ${finding.id}: the model returned nothing`);
+            return;
+          }
+          if (looksLikeRefusal(fix)) {
+            logWarn(`[fix:${finding.id}] the model declined to write a fix`);
             return;
           }
           finding.suggestedFix = fix;

@@ -433,6 +433,7 @@ export class ClaudeAgentDetector implements Detector {
   async suggestFix(args: {
     finding: Finding;
     fileContent: string;
+    recon?: ReconReport;
     signal?: AbortSignal;
   }): Promise<string> {
     const result = await this.runStructured({

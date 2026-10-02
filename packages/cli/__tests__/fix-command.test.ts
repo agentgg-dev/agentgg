@@ -9,6 +9,7 @@ import {
   saveUserConfig,
   upsertScanMeta,
   writeFileRecord,
+  writeReconReport,
 } from "@agentgg/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -216,6 +217,26 @@ describe("runFix", () => {
     expect(detectorMock.resolved[0]).toMatchObject({
       credentials: { openrouterApiKey: "sk-test" },
       openrouterRouting: '{"sort":"price"}',
+    });
+  });
+
+  it("gives the detector the recon brief the scan wrote", async () => {
+    seed([makeFinding("a1", { validation: CONFIRMED })]);
+    writeReconReport(outputDir, {
+      purpose: "p",
+      languages: [],
+      frameworks: ["express"],
+      integrations: [],
+      notableDirs: [],
+      summary: "An Express API.",
+      reconHash: "h",
+      generatedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    await runFix(outputDir, {}, env);
+
+    expect(detectorMock.suggestFix.mock.calls[0][0]).toMatchObject({
+      recon: { summary: "An Express API." },
     });
   });
 
