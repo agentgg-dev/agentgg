@@ -30,16 +30,18 @@ const detectorMock = vi.hoisted(() => ({
       justification: "stub",
     }),
   ),
+  /** The options each `resolveDetector` call received. */
+  resolved: [] as Record<string, unknown>[],
 }));
 
 vi.mock("../src/llm.js", async () => {
   const actual = await vi.importActual<typeof import("../src/llm.js")>("../src/llm.js");
   return {
     ...actual,
-    resolveDetector: () => ({
-      name: "test-mock",
-      scoreFinding: detectorMock.scoreFinding,
-    }),
+    resolveDetector: (_config: unknown, options: Record<string, unknown>) => {
+      detectorMock.resolved.push(options);
+      return { name: "test-mock", scoreFinding: detectorMock.scoreFinding };
+    },
   };
 });
 
@@ -64,6 +66,7 @@ beforeEach(() => {
   };
   saveUserConfig(cfg, env);
   detectorMock.scoreFinding.mockClear();
+  detectorMock.resolved.length = 0;
 });
 
 afterEach(() => {
@@ -128,5 +131,51 @@ describe("runScore --no-summary", () => {
     expect(existsSync(join(outputDir, "summary.md"))).toBe(false);
     const reloaded = readFileRecord(outputDir, "sql-injection", "server.js");
     expect(reloaded?.findings[0].cvss?.baseScore).toBe(9.8);
+  });
+});
+
+describe("runScore provider options", () => {
+  const ROUTING = '{"sort":"price"}';
+
+  // No records: the detector is built before they are loaded.
+  beforeEach(() => {
+    upsertScanMeta(outputDir, projectRoot);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  it("gives the detector the routing the other commands do", async () => {
+    await runScore(outputDir, { provider: "openrouter", openrouterRouting: ROUTING }, env);
+
+    expect(detectorMock.resolved[0]).toMatchObject({ openrouterRouting: ROUTING });
+  });
+
+  it("passes project and region to the Vertex credentials", async () => {
+    await runScore(outputDir, { provider: "vertex", project: "my-project", region: "global" }, env);
+
+    expect(detectorMock.resolved[0]).toMatchObject({
+      credentials: { vertexProject: "my-project", vertexRegion: "global" },
+    });
+  });
+
+  it("passes the one-shot key to OpenRouter", async () => {
+    await runScore(outputDir, { provider: "openrouter", apiKey: "sk-or-test" }, env);
+
+    expect(detectorMock.resolved[0]).toMatchObject({
+      credentials: { openrouterApiKey: "sk-or-test" },
+    });
+  });
+
+  it("refuses a flag the provider does not accept", async () => {
+    await expect(runScore(outputDir, { region: "us-east-1" }, env)).rejects.toThrow(
+      /not valid for provider 'anthropic'/,
+    );
+    expect(detectorMock.resolved).toHaveLength(0);
+  });
+
+  it("passes no routing when the flag is absent", async () => {
+    await runScore(outputDir, {}, env);
+
+    expect(detectorMock.resolved).toHaveLength(1);
+    expect(detectorMock.resolved[0].openrouterRouting).toBeUndefined();
   });
 });

@@ -23,17 +23,22 @@ const detectorMock = vi.hoisted(() => ({
     verdict: "confirmed" as const,
     reasoning: "default mock",
   })),
+  /** The options each `resolveDetector` call received. */
+  resolved: [] as Record<string, unknown>[],
 }));
 
 vi.mock("../src/llm.js", async () => {
   const actual = await vi.importActual<typeof import("../src/llm.js")>("../src/llm.js");
   return {
     ...actual,
-    resolveDetector: () => ({
-      name: "test-mock",
-      detectFile: async () => [],
-      validateFinding: detectorMock.validateFinding,
-    }),
+    resolveDetector: (_config: unknown, options: Record<string, unknown>) => {
+      detectorMock.resolved.push(options);
+      return {
+        name: "test-mock",
+        detectFile: async () => [],
+        validateFinding: detectorMock.validateFinding,
+      };
+    },
   };
 });
 
@@ -50,6 +55,7 @@ beforeEach(() => {
   projectRoot = mkdtempSync(join(tmpdir(), "agentgg-project-"));
   outputDir = mkdtempSync(join(tmpdir(), "agentgg-out-"));
   env = { AGENTGG_HOME: agentggHome };
+  detectorMock.resolved.length = 0;
 });
 
 afterEach(() => {
@@ -424,5 +430,32 @@ describe("runRevalidate", () => {
     const demoted = readFileRecord(outputDir, "alpha", "server.js")?.findings[0];
     expect(demoted?.validation).toBeUndefined();
     expect(demoted?.dedup?.duplicateOf).toBe("dupe-1");
+  });
+
+  // No records in the two cases below: the detector is built before they are loaded.
+  it("gives the detector the routing", async () => {
+    saveAnthropicConfig();
+    upsertScanMeta(outputDir, projectRoot);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await runRevalidate(
+      outputDir,
+      { provider: "openrouter", openrouterRouting: '{"sort":"price"}' },
+      env,
+    );
+
+    expect(detectorMock.resolved[0]).toMatchObject({ openrouterRouting: '{"sort":"price"}' });
+  });
+
+  it("passes the project to the Vertex credentials", async () => {
+    saveAnthropicConfig();
+    upsertScanMeta(outputDir, projectRoot);
+    vi.spyOn(console, "log").mockImplementation(() => {});
+
+    await runRevalidate(outputDir, { provider: "vertex", project: "my-project" }, env);
+
+    expect(detectorMock.resolved[0]).toMatchObject({
+      credentials: { vertexProject: "my-project" },
+    });
   });
 });

@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import type { FileRecord, Finding } from "@agentgg/core";
+import type { FileRecord, Finding, Provider } from "@agentgg/core";
 import {
   completeRun,
   createRunMeta,
@@ -14,8 +14,13 @@ import {
 import type { Command } from "commander";
 import { runConcurrent } from "../concurrent.js";
 import { handleDetectorError } from "../diagnostics.js";
-import { type CredentialOverrides, loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
+import { loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
 import { logError } from "../log.js";
+import {
+  buildCredentialsFromOpts,
+  REGION_FLAG_HELP,
+  validateProviderFlags,
+} from "../providers/index.js";
 import { findingFilenameSlug, writeMarkdownReport } from "../reporters/md.js";
 import { createUsageMeter } from "../usage-meter.js";
 import { buildInvocation } from "./invocation.js";
@@ -25,7 +30,11 @@ interface ScoreOpts {
   apiKey?: string;
   oauthToken?: string;
   baseUrl?: string;
+  region?: string;
+  project?: string;
   model?: string;
+  /** `--openrouter-routing`: see the twin option on `scan`. */
+  openrouterRouting?: string;
   /** Re-score findings that already carry a CVSS score on disk. */
   force?: boolean;
   /**
@@ -85,16 +94,14 @@ export async function runScore(
   const recon = readReconReport(outputDir) ?? undefined;
 
   const config = loadOrSynthesizeConfig(env, opts.provider);
-  const credentials: CredentialOverrides = {
-    ...(opts.apiKey ? { anthropicApiKey: opts.apiKey, openaiApiKey: opts.apiKey } : {}),
-    ...(opts.oauthToken ? { anthropicOauthToken: opts.oauthToken } : {}),
-    ...(opts.baseUrl ? { ollamaBaseUrl: opts.baseUrl } : {}),
-  };
+  const activeProvider = (opts.provider ?? config.provider) as Provider;
+  validateProviderFlags(activeProvider, opts);
   const detector = resolveDetector(config, {
     provider: opts.provider,
     model: opts.model,
-    credentials,
+    credentials: buildCredentialsFromOpts(opts),
     verbose: opts.verbose,
+    openrouterRouting: opts.openrouterRouting,
   });
 
   // See scan.ts for the design note. On a fatal quota / auth diagnostic,
@@ -294,10 +301,22 @@ export function registerScoreCommand(program: Command): void {
       "--provider <name>",
       "LLM provider for this run: anthropic | openai | ollama (overrides saved default)",
     )
-    .option("--api-key <key>", "One-shot API key for the selected provider (not persisted).")
+    .option(
+      "--api-key <key>",
+      "One-shot API key (not persisted). Valid for: anthropic, openai, openrouter.",
+    )
     .option("--oauth-token <token>", "One-shot Anthropic OAuth token (sk-ant-oat…). Not persisted.")
     .option("--base-url <url>", "One-shot Ollama base URL (not persisted)")
+    .option("--region <name>", REGION_FLAG_HELP)
+    .option(
+      "--project <id>",
+      "GCP project ID for Vertex AI. Falls back to $GOOGLE_CLOUD_PROJECT / $GCLOUD_PROJECT. Vertex only.",
+    )
     .option("--model <name>", "One-shot model override for the selected provider (not persisted)")
+    .option(
+      "--openrouter-routing <json|file>",
+      "OpenRouter provider-routing block, overriding OPENROUTER_* env for this run: inline JSON (must start with {) or a path to a .json file (avoids shell-quoting JSON on Windows). Invalid JSON aborts before any LLM call. OpenRouter only.",
+    )
     .option("--force", "re-score findings that already carry a CVSS score (default: skip them)")
     .option(
       "--include-disqualified",

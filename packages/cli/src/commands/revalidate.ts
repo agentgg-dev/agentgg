@@ -54,7 +54,10 @@ interface RevalidateOpts {
   oauthToken?: string;
   baseUrl?: string;
   region?: string;
+  project?: string;
   model?: string;
+  /** `--openrouter-routing`: see the twin option on `scan`. */
+  openrouterRouting?: string;
   force?: boolean;
   verbose?: boolean;
   /** Override the scanned root recorded in scan.json — rare. */
@@ -108,6 +111,7 @@ export async function runRevalidate(
     credentials,
     verbose: opts.verbose,
     validateMaxTurns: opts.validateMaxTurns,
+    openrouterRouting: opts.openrouterRouting,
   });
 
   // Same abort-on-fatal-diagnostic pattern as scan — see scan.ts for the
@@ -444,14 +448,25 @@ export function registerRevalidateCommand(program: Command): void {
       "--provider <name>",
       "LLM provider for this run: anthropic | openai | ollama | bedrock (overrides saved default)",
     )
-    .option("--api-key <key>", "One-shot API key (not persisted). Valid for: anthropic, openai.")
+    .option(
+      "--api-key <key>",
+      "One-shot API key (not persisted). Valid for: anthropic, openai, openrouter.",
+    )
     .option(
       "--oauth-token <token>",
       "One-shot Anthropic OAuth token (sk-ant-oat…). Not persisted. Anthropic only.",
     )
     .option("--base-url <url>", "One-shot Ollama base URL (not persisted). Ollama only.")
     .option("--region <name>", REGION_FLAG_HELP)
+    .option(
+      "--project <id>",
+      "GCP project ID for Vertex AI. Falls back to $GOOGLE_CLOUD_PROJECT / $GCLOUD_PROJECT. Vertex only.",
+    )
     .option("--model <name>", "One-shot model override for the selected provider (not persisted)")
+    .option(
+      "--openrouter-routing <json|file>",
+      "OpenRouter provider-routing block, overriding OPENROUTER_* env for this run: inline JSON (must start with {) or a path to a .json file (avoids shell-quoting JSON on Windows). Invalid JSON aborts before any LLM call. OpenRouter only.",
+    )
     .option(
       "--validate-max-turns <n>",
       "Max tool-use turns per validator call (default: 50). Bump if the validator hits the turn cap.",
