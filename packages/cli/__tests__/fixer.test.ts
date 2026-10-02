@@ -394,6 +394,67 @@ describe("VercelAgentDetector.suggestFix", () => {
     expect(calls[0].maxTokens).toBeLessThanOrEqual(32_000);
   });
 
+  describe("a session that ends on a tool call written as text", () => {
+    const LEAKED =
+      "<tool_call>Read<arg_key>path</arg_key><arg_value>src/login.ts</arg_value></tool_call>";
+
+    /** A model that gives each answer in turn, then repeats the last one. */
+    function answering(...answers: string[]) {
+      let call = 0;
+      return new MockLanguageModelV1({
+        defaultObjectGenerationMode: "json",
+        doGenerate: async () => ({
+          rawCall: { rawPrompt: null, rawSettings: {} },
+          finishReason: "stop",
+          usage: { promptTokens: 10, completionTokens: 10 },
+          text: answers[Math.min(call++, answers.length - 1)],
+        }),
+      });
+    }
+    const fixWith = (model: MockLanguageModelV1) =>
+      new VercelAgentDetector("openai", model).suggestFix({
+        finding: makeFinding(),
+        fileContent: "x",
+        root: process.cwd(),
+      });
+
+    it("asks once more with no tools, and returns that answer", async () => {
+      const model = answering(LEAKED, JSON.stringify({ fix: "Bind the parameter." }));
+      await expect(fixWith(model)).resolves.toBe("Bind the parameter.");
+    });
+
+    it("fails when the answer with no tools is a tool call too", async () => {
+      await expect(fixWith(answering(LEAKED))).rejects.toThrow(/no fix/);
+    });
+  });
+
+  it("uses fewer turns than the validator, because it reads definitions and does not trace a chain", async () => {
+    const steps: number[] = [];
+    const model = new MockLanguageModelV1({
+      doGenerate: async () => {
+        steps.push(steps.length);
+        return {
+          rawCall: { rawPrompt: null, rawSettings: {} },
+          finishReason: "tool-calls",
+          usage: { promptTokens: 10, completionTokens: 10 },
+          toolCalls: [
+            {
+              toolCallType: "function",
+              toolCallId: `c${steps.length}`,
+              toolName: "Glob",
+              args: JSON.stringify({ pattern: `*.x${steps.length}` }),
+            },
+          ],
+        };
+      },
+    });
+    await new VercelAgentDetector("openai", model, { validateMaxTurns: 50 })
+      .suggestFix({ finding: makeFinding(), fileContent: "x", root: process.cwd() })
+      .catch(() => {});
+    // The tool loop, plus the two last-chance calls with no tools.
+    expect(steps.length).toBeLessThanOrEqual(30);
+  });
+
   it("fails when the tool session ends with no answer", async () => {
     const { model } = recordingModel("");
     await expect(

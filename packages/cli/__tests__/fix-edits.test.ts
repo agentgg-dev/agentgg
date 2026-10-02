@@ -212,6 +212,12 @@ describe("finishFix", () => {
     expect(problems(`<<<<<<< SEARCH\n${LOGIN}\n=======\n${BOUND}`)).toContain("not closed");
   });
 
+  it("rejects a tool call the model wrote as its answer", () => {
+    const leaked =
+      "<tool_call>Read<arg_key>path</arg_key><arg_value>src/login.ts</arg_value></tool_call>";
+    expect(problems(leaked)).toContain("tool call");
+  });
+
   it("names every bad block, so one retry can fix them all", () => {
     const text = problems(`${block("nope", "x")}\n\n${block("", "y")}`);
     expect(text).toContain("Block 1");

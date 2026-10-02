@@ -27,6 +27,15 @@ const BLOCK =
 
 const MARKER = /^(?:<{5,9} ?SEARCH|>{5,9} ?REPLACE)\b/m;
 
+/**
+ * A tool call written out as text. A model whose tools were taken away on
+ * its last turn can spend that turn on one, and as prose it would pass for
+ * a fix in words.
+ */
+export function looksLikeToolCall(text: string): boolean {
+  return /<\/?(?:tool_call|arg_key|arg_value)>/.test(text);
+}
+
 interface Hunk {
   /** 1-based position of the block in the answer, for the problem text. */
   block: number;
@@ -264,6 +273,10 @@ export function finishFix(
   if (words.some((part) => MARKER.test(part))) {
     problems.push(
       "A SEARCH/REPLACE block is not closed. Every block needs its <<<<<<< SEARCH, =======, and >>>>>>> REPLACE lines.",
+    );
+  } else if (words.some(looksLikeToolCall)) {
+    problems.push(
+      "Your answer is a tool call written as text, not a fix. Write the fix now, from what you have read.",
     );
   } else if (words.some((part) => part.split("\n").some((line) => FENCE.test(line)))) {
     problems.push(

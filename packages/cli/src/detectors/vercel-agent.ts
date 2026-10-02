@@ -50,6 +50,7 @@ import {
   type UnverifiedExcerpt,
 } from "../detect.js";
 import { ExpectedDetectorError, isInFlightCreditError } from "../diagnostics.js";
+import { looksLikeToolCall } from "../fix-edits.js";
 import { buildFixPrompt, type FixRetry, type LiveScript, LlmFix } from "../fixer.js";
 import { logError, logInfo, logWarn } from "../log.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
@@ -433,6 +434,14 @@ const ARTIFACT: Record<ToolLoopPhase, string> = {
  * costs several times a normal call and still ends with nothing.
  */
 const FIX_MAX_OUTPUT_TOKENS = 24_000;
+
+/**
+ * Turn budget of a fix session, below the validator's. The validator traces
+ * an exploit chain end to end; a fix reads a few definitions. Every turn
+ * re-sends the transcript, so in a large repository a session that never
+ * settles costs many times a normal one.
+ */
+const FIX_MAX_TURNS = 25;
 
 /** `answerWithoutTools` returns the schema object as JSON, or free text. */
 function fixFromLastAnswer(last: string): string {
@@ -1525,7 +1534,8 @@ export class VercelAgentDetector implements Detector {
       // Same tool loop as the validator when there is a repository to read: a
       // fix leans on code outside the finding's file (a helper's signature, a
       // template engine's syntax), and written blind it invents them.
-      const stop = hardStop(label, this.validateMaxTurns + 1);
+      const maxTurns = Math.min(this.validateMaxTurns, FIX_MAX_TURNS);
+      const stop = hardStop(label, maxTurns + 1);
       const gen = await this.metered(
         () =>
           generateText({
@@ -1543,7 +1553,7 @@ export class VercelAgentDetector implements Detector {
                     phase: "fix",
                     onStall: stop.onStall,
                   }),
-                  maxSteps: this.validateMaxTurns + 1,
+                  maxSteps: maxTurns + 1,
                   experimental_prepareStep: stop.prepareStep,
                   experimental_repairToolCall: this.toolCallRepair(label),
                 }
@@ -1558,9 +1568,11 @@ export class VercelAgentDetector implements Detector {
         throw new ExpectedDetectorError("the fix was cut off at the model's output limit");
       }
       if (!root) return gen.text;
-      warnIfTurnCapped(label, gen, this.validateMaxTurns);
-      if (gen.text.trim()) return gen.text;
-      // The loop ended on a tool call. Same last chance the validator gets.
+      warnIfTurnCapped(label, gen, maxTurns);
+      if (gen.text.trim() && !looksLikeToolCall(gen.text)) return gen.text;
+      // The loop ended on a tool call, made or written out as text: GLM
+      // ignores `toolChoice: "none"` on its last turn. Same last chance the
+      // validator gets.
       const last = await this.answerWithoutTools(
         label,
         prompt,
@@ -1571,7 +1583,7 @@ export class VercelAgentDetector implements Detector {
         args.signal,
       );
       const answer = fixFromLastAnswer(last);
-      if (!answer.trim()) {
+      if (!answer.trim() || looksLikeToolCall(answer)) {
         throw new ExpectedDetectorError(
           "the model wrote no fix: its tool session ended unanswered",
         );
