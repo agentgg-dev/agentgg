@@ -75,8 +75,23 @@ function matches(file: string[], search: string[]): number[] {
   return found;
 }
 
-function renderDiff(filePath: string, hunks: Hunk[]): string {
+/** Where a hunk lands in the scanned file, in words. Counts only the lines
+ *  that change: the lines a block repeats to anchor itself are not the fix. */
+function place(start: number, oldLength: number, pre: number, post: number): string {
+  const first = start + 1 + pre;
+  const last = start + oldLength - post;
+  if (last > first) return `lines ${first}–${last}`;
+  if (last === first) return `line ${first}`;
+  // Nothing removed: the block only adds lines next to the line it copied.
+  return pre > 0 ? `after line ${start + pre}` : `before line ${start + 1}`;
+}
+
+/** One unified diff for the file, plus where each hunk lands. A hunk header
+ *  alone (`@@ -68,1 +68,2 @@`) does not read as "line 68" to most people, so
+ *  the place is also written after it, where patch tools ignore it. */
+function renderDiff(filePath: string, hunks: Hunk[]): { diff: string; places: string[] } {
   const body = [`--- a/${filePath}`, `+++ b/${filePath}`];
+  const places: string[] = [];
   let shift = 0;
   for (const { start, old, neu } of hunks) {
     // Lines the block repeats to anchor itself are context, not changes.
@@ -87,9 +102,11 @@ function renderDiff(filePath: string, hunks: Hunk[]): string {
     while (post < shared - pre && same(old[old.length - 1 - post], neu[neu.length - 1 - post])) {
       post++;
     }
+    const where = place(start, old.length, pre, post);
+    places.push(where);
     const newStart = start + 1 + shift;
     body.push(
-      `@@ -${start + 1},${old.length} +${neu.length === 0 ? newStart - 1 : newStart},${neu.length} @@`,
+      `@@ -${start + 1},${old.length} +${neu.length === 0 ? newStart - 1 : newStart},${neu.length} @@ ${where}`,
     );
     for (const line of old.slice(0, pre)) body.push(` ${line}`);
     for (const line of old.slice(pre, old.length - post)) body.push(`-${line}`);
@@ -100,8 +117,11 @@ function renderDiff(filePath: string, hunks: Hunk[]): string {
   const text = body.join("\n");
   const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
   const fence = "`".repeat(Math.max(3, longest + 1));
-  return `${fence}diff\n${text}\n${fence}`;
+  return { diff: `${fence}diff\n${text}\n${fence}`, places };
 }
+
+const list = (items: string[]): string =>
+  items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
 
 /**
  * Check the model's answer against the file and build the Markdown to store.
@@ -186,6 +206,8 @@ export function finishFix(
   // The diff goes where the first block was: after the explanation.
   const lead = prose[0].trim();
   const rest = words.slice(lead === "" ? 0 : 1);
-  const parts = [lead, renderDiff(filePath, hunks), ...rest].filter((part) => part !== "");
+  const { diff, places } = renderDiff(filePath, hunks);
+  const location = `**Location:** \`${filePath}\`, ${list(places)}`;
+  const parts = [lead, location, diff, ...rest].filter((part) => part !== "");
   return { kind: "fix", fix: parts.join("\n\n"), edits: hunks.length };
 }

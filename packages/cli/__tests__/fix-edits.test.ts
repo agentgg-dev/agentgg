@@ -39,10 +39,12 @@ describe("finishFix", () => {
       fix: [
         "Bind the value.",
         "",
+        "**Location:** `src/login.ts`, line 3",
+        "",
         "```diff",
         "--- a/src/login.ts",
         "+++ b/src/login.ts",
-        "@@ -3,1 +3,1 @@",
+        "@@ -3,1 +3,1 @@ line 3",
         `-${LOGIN}`,
         `+${BOUND}`,
         "```",
@@ -57,7 +59,12 @@ describe("finishFix", () => {
     const result = fix(block(before, `  const { username } = req.body;\n${BOUND}`));
 
     expect(result.kind === "fix" && result.fix).toContain(
-      ["@@ -2,2 +2,2 @@", "   const { username } = req.body;", `-${LOGIN}`, `+${BOUND}`].join("\n"),
+      [
+        "@@ -2,2 +2,2 @@ line 3",
+        "   const { username } = req.body;",
+        `-${LOGIN}`,
+        `+${BOUND}`,
+      ].join("\n"),
     );
   });
 
@@ -75,9 +82,56 @@ describe("finishFix", () => {
     expect(text.match(/^--- a\//gm)).toHaveLength(1);
   });
 
+  describe("location", () => {
+    const location = (answer: string) => {
+      const result = fix(answer);
+      return result.kind === "fix" ? (/^\*\*Location:\*\* (.*)$/m.exec(result.fix)?.[1] ?? "") : "";
+    };
+
+    it("names every place the fix changes, in file order", () => {
+      const answer = `${block(GO, 'app.get("/go", safeRedirect);')}\n\n${block(LOGIN, BOUND)}`;
+      expect(location(answer)).toBe("`src/login.ts`, line 3 and line 8");
+    });
+
+    it("gives a range when several lines in a row change, and leaves out the context lines", () => {
+      const before = [
+        LOGIN,
+        '  if (row) return res.redirect("/");',
+        '  res.status(401).send("bad");',
+      ];
+      const after = [
+        BOUND,
+        '  if (row) return res.redirect("/home");',
+        '  res.status(401).send("bad");',
+      ];
+      const answer = block(before.join("\n"), after.join("\n"));
+      expect(location(answer)).toBe("`src/login.ts`, lines 3–4");
+      expect(fix(answer).kind === "fix" && fix(answer)).toMatchObject({
+        fix: expect.stringContaining("@@ -3,3 +3,3 @@ lines 3–4"),
+      });
+    });
+
+    it("says after which line new code goes when the block only adds lines", () => {
+      expect(location(block(LOGIN, `${LOGIN}\n  audit(username);`))).toBe(
+        "`src/login.ts`, after line 3",
+      );
+    });
+
+    it("says before which line new code goes when it comes ahead of the copied line", () => {
+      expect(location(block(LOGIN, `  audit(username);\n${LOGIN}`))).toBe(
+        "`src/login.ts`, before line 3",
+      );
+    });
+
+    it("has no location line for an answer in words only", () => {
+      const result = fix("The fix belongs in the session middleware.");
+      expect(result.kind === "fix" && result.fix).not.toContain("Location");
+    });
+  });
+
   it("renders a block with an empty REPLACE as a deletion", () => {
     const result = fix(block(GO, ""));
-    expect(result.kind === "fix" && result.fix).toContain(`@@ -8,1 +7,0 @@\n-${GO}`);
+    expect(result.kind === "fix" && result.fix).toContain(`@@ -8,1 +7,0 @@ line 8\n-${GO}`);
   });
 
   it("matches a file with CRLF line endings, and ignores trailing whitespace", () => {
@@ -94,13 +148,15 @@ describe("finishFix", () => {
 
   it("unwraps an answer the model put in one markdown fence", () => {
     const result = fix(`\`\`\`markdown\nBind the value.\n\n${block(LOGIN, BOUND)}\n\`\`\``);
-    expect(result.kind === "fix" && result.fix.startsWith("Bind the value.\n\n```diff")).toBe(true);
+    expect(result.kind === "fix" && result.fix.startsWith("Bind the value.\n\n**Location:**")).toBe(
+      true,
+    );
   });
 
   it("fences the diff with more backticks than the code in it has", () => {
     const file = "const doc = `\n```\nold\n```\n`;";
     const result = fix(block("```\nold\n```", "```\nnew\n```"), file);
-    expect(result.kind === "fix" && result.fix.startsWith("````diff\n")).toBe(true);
+    expect(result.kind === "fix" && result.fix.includes("\n\n````diff\n")).toBe(true);
   });
 
   it("keeps an answer in words only, with no block", () => {
