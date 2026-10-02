@@ -123,12 +123,16 @@ export function applyGroupVerdict(
     confirmed && primaryClaimHolds === false && leadId && leadId !== primary.id
       ? dupes.find((d) => d.id === leadId)
       : undefined;
+  // A fix was written for the verdict it had then; the fix phase writes a
+  // new one for this verdict.
   if (!heir || ![primary, ...dupes].every(canMark)) {
     primary.validation = validation;
+    primary.suggestedFix = undefined;
     return [primary];
   }
   handOver(primary, dupes, heir);
   heir.validation = validation;
+  heir.suggestedFix = undefined;
   primary.validation = undefined;
   return [primary, ...dupes];
 }

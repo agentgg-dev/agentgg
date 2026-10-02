@@ -139,6 +139,13 @@ describe("applyGroupVerdict", () => {
     expect(changed.map((x) => x.id)).toEqual(["p1"]);
   });
 
+  it("drops the fix written for the verdict it replaces", () => {
+    const list = group();
+    list[0].suggestedFix = "old fix";
+    applyGroupVerdict(list, list[0], confirmed, () => true);
+    expect(list[0].suggestedFix).toBeUndefined();
+  });
+
   it("swaps to the lead when the primary's claim fails, and clears the old primary's results", () => {
     const list = group();
     list[0].validation = { verdict: "uncertain", reasoning: "stale" };

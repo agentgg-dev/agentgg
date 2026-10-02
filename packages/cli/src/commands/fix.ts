@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import type { Provider } from "@agentgg/core";
 import {
   completeRun,
   createRunMeta,
@@ -8,8 +9,13 @@ import {
 } from "@agentgg/core";
 import type { Command } from "commander";
 import { runFixPhase, selectForFix } from "../fix-phase.js";
-import { type CredentialOverrides, loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
+import { loadOrSynthesizeConfig, resolveDetector } from "../llm.js";
 import { logError } from "../log.js";
+import {
+  buildCredentialsFromOpts,
+  REGION_FLAG_HELP,
+  validateProviderFlags,
+} from "../providers/index.js";
 import { writeMarkdownReport } from "../reporters/md.js";
 import { createUsageMeter } from "../usage-meter.js";
 import { buildInvocation } from "./invocation.js";
@@ -19,7 +25,11 @@ interface FixOpts {
   apiKey?: string;
   oauthToken?: string;
   baseUrl?: string;
+  region?: string;
+  project?: string;
   model?: string;
+  /** `--openrouter-routing`: see the twin option on `scan`. */
+  openrouterRouting?: string;
   /** Write a fix again for findings that already carry one. */
   force?: boolean;
   /** Drop false-positive findings from the markdown report (kept by default). */
@@ -55,16 +65,14 @@ export async function runFix(
   const rootPath = opts.root ? resolve(opts.root) : scanMeta.root;
 
   const config = loadOrSynthesizeConfig(env, opts.provider);
-  const credentials: CredentialOverrides = {
-    ...(opts.apiKey ? { anthropicApiKey: opts.apiKey, openaiApiKey: opts.apiKey } : {}),
-    ...(opts.oauthToken ? { anthropicOauthToken: opts.oauthToken } : {}),
-    ...(opts.baseUrl ? { ollamaBaseUrl: opts.baseUrl } : {}),
-  };
+  const activeProvider = (opts.provider ?? config.provider) as Provider;
+  validateProviderFlags(activeProvider, opts);
   const detector = resolveDetector(config, {
     provider: opts.provider,
     model: opts.model,
-    credentials,
+    credentials: buildCredentialsFromOpts(opts),
     verbose: opts.verbose,
+    openrouterRouting: opts.openrouterRouting,
   });
 
   const records = loadAllFileRecords(outputDir);
@@ -94,7 +102,7 @@ export async function runFix(
   detector.attachUsageMeter?.(usageMeter);
 
   const startedAt = new Date();
-  await runFixPhase({
+  const { fatal } = await runFixPhase({
     findings,
     detector,
     outDir: outputDir,
@@ -103,32 +111,34 @@ export async function runFix(
     concurrency: Math.max(1, opts.concurrency ?? 5),
     verbose: opts.verbose,
     force: opts.force,
-    abortController: new AbortController(),
   });
 
   const completedAt = new Date();
-  completeRun(outputDir, runMeta.runId, "done", {
+  completeRun(outputDir, runMeta.runId, fatal ? "error" : "done", {
     findingsCount: work.length,
     totalDurationMs: completedAt.getTime() - startedAt.getTime(),
   });
   usageMeter.flush();
 
+  // Rendered even after a fatal error: the fixes written before it are on
+  // disk, and the report should show them.
   if (opts.summary === false) {
     console.log("  Summary: skipped (--no-summary). Run `agentgg summary` to render it.");
-    return;
+  } else {
+    const byAgent: Record<string, number> = {};
+    for (const f of findings) byAgent[f.agentSlug] = (byAgent[f.agentSlug] ?? 0) + 1;
+    writeMarkdownReport({
+      outDir: outputDir,
+      root: rootPath,
+      startedAt,
+      completedAt,
+      findings,
+      filesScanned: records.length,
+      byAgent,
+      excludeFalsePositives: opts.excludeFalsePositives,
+    });
   }
-  const byAgent: Record<string, number> = {};
-  for (const f of findings) byAgent[f.agentSlug] = (byAgent[f.agentSlug] ?? 0) + 1;
-  writeMarkdownReport({
-    outDir: outputDir,
-    root: rootPath,
-    startedAt,
-    completedAt,
-    findings,
-    filesScanned: records.length,
-    byAgent,
-    excludeFalsePositives: opts.excludeFalsePositives,
-  });
+  if (fatal) throw fatal;
 }
 
 export function registerFixCommand(program: Command): void {
@@ -148,12 +158,27 @@ export function registerFixCommand(program: Command): void {
     )
     .option(
       "--provider <name>",
-      "LLM provider for this run: anthropic | openai | ollama (overrides saved default)",
+      "LLM provider for this run: anthropic | openai | ollama | bedrock | vertex | openrouter (overrides saved default)",
     )
-    .option("--api-key <key>", "One-shot API key for the selected provider (not persisted).")
-    .option("--oauth-token <token>", "One-shot Anthropic OAuth token (sk-ant-oat…). Not persisted.")
-    .option("--base-url <url>", "One-shot Ollama base URL (not persisted)")
+    .option(
+      "--api-key <key>",
+      "One-shot API key (not persisted). Valid for: anthropic, openai, openrouter.",
+    )
+    .option(
+      "--oauth-token <token>",
+      "One-shot Anthropic OAuth token (sk-ant-oat…). Not persisted. Anthropic only.",
+    )
+    .option("--base-url <url>", "One-shot Ollama base URL (not persisted). Ollama only.")
+    .option("--region <name>", REGION_FLAG_HELP)
+    .option(
+      "--project <id>",
+      "GCP project ID for Vertex AI. Falls back to $GOOGLE_CLOUD_PROJECT / $GCLOUD_PROJECT. Vertex only.",
+    )
     .option("--model <name>", "One-shot model override for the selected provider (not persisted)")
+    .option(
+      "--openrouter-routing <json|file>",
+      "OpenRouter provider-routing block, overriding OPENROUTER_* env for this run: inline JSON (must start with {) or a path to a .json file (avoids shell-quoting JSON on Windows). Invalid JSON aborts before any LLM call. OpenRouter only.",
+    )
     .option("--force", "write a fix again for findings that already have one (default: skip them)")
     .option(
       "--exclude-false-positives",

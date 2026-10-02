@@ -264,4 +264,51 @@ describe("scan fix phase", () => {
     expect(detectorMock.suggestFix).toHaveBeenCalledTimes(1);
     expect(onDisk("a1").suggestedFix).toBe("fix for a1");
   });
+
+  it("still writes the report when the provider fails fatally in the fix phase", async () => {
+    report("a1", "a2");
+    detectorMock.suggestFix.mockImplementation(async ({ finding }: { finding: Finding }) => {
+      // Classified as fatal: every later call would fail the same way.
+      if (finding.id === "a2") {
+        throw new Error("No allowed providers are available for the selected model.");
+      }
+      return `fix for ${finding.id}`;
+    });
+
+    await runScan(projectRoot, opts({ concurrency: 1 }), env);
+
+    expect(findingMd("a1")).toContain("### Suggested fix\nfix for a1");
+    expect(findingMd("a2")).not.toContain("Suggested fix");
+  });
+
+  it("writes a new fix when validation gives the finding a new verdict", async () => {
+    report("a1");
+    await runScan(projectRoot, opts(), env);
+    detectorMock.suggestFix.mockImplementation(async () => "second fix");
+
+    await runScan(projectRoot, opts({ revalidateAll: true }), env);
+
+    expect(onDisk("a1").suggestedFix).toBe("second fix");
+  });
+
+  it("removes the fix of a primary that validation demotes to a duplicate", async () => {
+    report("a1", "a2");
+    detectorMock.dedupeFindings.mockImplementation(async () => [
+      { primaryId: "a1", duplicateIds: ["a2"], reasoning: "same sink" },
+    ]);
+    await runScan(projectRoot, opts(), env);
+    expect(onDisk("a1").suggestedFix).toBe("fix for a1");
+    detectorMock.validateFinding.mockImplementation(async () => ({
+      verdict: "confirmed",
+      reasoning: "stub",
+      leadId: "a2",
+      primaryClaimHolds: false,
+    }));
+
+    await runScan(projectRoot, opts({ revalidateAll: true }), env);
+
+    expect(onDisk("a1").dedup?.duplicateOf).toBe("a2");
+    expect(onDisk("a1").suggestedFix).toBeUndefined();
+    expect(onDisk("a2").suggestedFix).toBe("fix for a2");
+  });
 });

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type { FileRecord, Finding, UserConfig } from "@agentgg/core";
 import {
   hashContent,
+  listRuns,
   readFileRecord,
   saveUserConfig,
   upsertScanMeta,
@@ -11,17 +12,25 @@ import {
 } from "@agentgg/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const detectorMock = vi.hoisted(() => ({ suggestFix: vi.fn() }));
+const detectorMock = vi.hoisted(() => ({
+  suggestFix: vi.fn(),
+  /** The options each `resolveDetector` call received. */
+  resolved: [] as Record<string, unknown>[],
+}));
 
 vi.mock("../src/llm.js", async () => {
   const actual = await vi.importActual<typeof import("../src/llm.js")>("../src/llm.js");
   return {
     ...actual,
-    resolveDetector: () => ({ name: "test-mock", suggestFix: detectorMock.suggestFix }),
+    resolveDetector: (_config: unknown, options: Record<string, unknown>) => {
+      detectorMock.resolved.push(options);
+      return { name: "test-mock", suggestFix: detectorMock.suggestFix };
+    },
   };
 });
 
 import { runFix } from "../src/commands/fix.js";
+import { FatalScanError } from "../src/diagnostics.js";
 import { findingFilename } from "../src/reporters/md.js";
 
 const CONFIRMED = { verdict: "confirmed", reasoning: "r" } as const;
@@ -44,6 +53,7 @@ beforeEach(() => {
     schemaVersion: 1,
   };
   saveUserConfig(cfg, env);
+  detectorMock.resolved.length = 0;
   detectorMock.suggestFix.mockReset();
   detectorMock.suggestFix.mockImplementation(
     async ({ finding }: { finding: Finding }) => `fix for ${finding.id}`,
@@ -174,6 +184,47 @@ describe("runFix", () => {
 
     expect(existsSync(join(outputDir, "summary.md"))).toBe(false);
     expect(onDisk("a1").suggestedFix).toBe("fix for a1");
+  });
+
+  it("keeps and renders the fixes written before a fatal provider error, then fails", async () => {
+    seed([
+      makeFinding("a1", { validation: CONFIRMED }),
+      makeFinding("a2", { validation: CONFIRMED }),
+    ]);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    detectorMock.suggestFix.mockImplementation(async ({ finding }: { finding: Finding }) => {
+      // Classified as fatal: every later call would fail the same way.
+      if (finding.id === "a2") {
+        throw new Error("No allowed providers are available for the selected model.");
+      }
+      return `fix for ${finding.id}`;
+    });
+
+    await expect(runFix(outputDir, { concurrency: 1 }, env)).rejects.toBeInstanceOf(FatalScanError);
+
+    expect(onDisk("a1").suggestedFix).toBe("fix for a1");
+    const md = readFileSync(join(outputDir, "findings", findingFilename(onDisk("a1"))), "utf8");
+    expect(md).toContain("### Suggested fix\nfix for a1");
+    expect(listRuns(outputDir)[0].phase).toBe("error");
+  });
+
+  it("gives the detector the same credentials and routing the other commands do", async () => {
+    seed([makeFinding("a1", { validation: CONFIRMED })]);
+
+    await runFix(outputDir, { apiKey: "sk-test", openrouterRouting: '{"sort":"price"}' }, env);
+
+    expect(detectorMock.resolved[0]).toMatchObject({
+      credentials: { openrouterApiKey: "sk-test" },
+      openrouterRouting: '{"sort":"price"}',
+    });
+  });
+
+  it("rejects a credential flag the active provider does not take", async () => {
+    seed([makeFinding("a1", { validation: CONFIRMED })]);
+
+    await expect(runFix(outputDir, { region: "us-east-1" }, env)).rejects.toThrow(
+      /not valid for provider 'anthropic'/,
+    );
   });
 
   it("fails when the output directory holds no scan", async () => {

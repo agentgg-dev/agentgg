@@ -263,6 +263,7 @@ export async function runRevalidate(
             verdict: result.verdict,
             reasoning: result.reasoning,
           };
+          finding.suggestedFix = undefined;
           dirtyRecords.add(record);
         }
         if (opts.verbose) {

@@ -1777,6 +1777,7 @@ export async function runScan(
                   verdict: result.verdict,
                   reasoning: result.reasoning,
                 };
+                finding.suggestedFix = undefined;
               }
               if (opts.verbose) {
                 const note =
@@ -1865,7 +1866,7 @@ export async function runScan(
               const live = inMemory.get(rec.id);
               if (!live) return rec;
               // Copied even when absent: that is how a swap clears the old
-              // primary's marker, verdict, score and live result on disk.
+              // primary's marker, verdict, score, live result and fix on disk.
               return {
                 ...rec,
                 validation: live.validation,
@@ -1873,6 +1874,7 @@ export async function runScan(
                 cvss: live.cvss,
                 severity: live.severity,
                 live: live.live,
+                suggestedFix: live.suggestedFix,
               };
             });
             record.analysisHistory.push({
@@ -2155,7 +2157,8 @@ export async function runScan(
     }
 
     // -------- fix phase --------
-    // After scoring, so the combined verdict it gates on has settled.
+    // After scoring, so the combined verdict it gates on has settled. It
+    // never throws on a provider failure: the report below is still owed.
     if (opts.fix) {
       await runFixPhase({
         findings,
@@ -2165,7 +2168,7 @@ export async function runScan(
         runId: runMeta.runId,
         concurrency,
         verbose: opts.verbose,
-        abortController: scanAbortController,
+        signal: scanAbortController.signal,
       });
     }
 

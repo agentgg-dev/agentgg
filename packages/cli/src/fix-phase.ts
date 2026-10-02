@@ -4,28 +4,69 @@ import type { Finding } from "@agentgg/core";
 import { effectiveVerdict, readFileRecord, updateRunStage, writeFileRecord } from "@agentgg/core";
 import { runConcurrent } from "./concurrent.js";
 import type { Detector } from "./detect.js";
-import { handleDetectorError } from "./diagnostics.js";
+import { FatalScanError, handleDetectorError } from "./diagnostics.js";
 import { cleanFix } from "./fixer.js";
-import { logError } from "./log.js";
+import { logError, logWarn } from "./log.js";
+
+const shardPath = (f: Finding): string => f.filePath.replace(/\\/g, "/");
 
 /** Primaries the combined verdict confirmed that carry no fix yet; `force`
  *  takes the ones that carry one too. A duplicate never ships on its own;
- *  its primary carries the fix. */
+ *  its primary carries the fix. A finding with no shard to write to is left
+ *  out, or every run would pay for a fix it cannot keep. */
 export function selectForFix(findings: ReadonlyArray<Finding>, force = false): Finding[] {
   return findings.filter(
     (f) =>
       !f.dedup &&
       (force || !f.suggestedFix) &&
       f.filePath !== "(unknown)" &&
+      !isAbsolute(shardPath(f)) &&
       effectiveVerdict(f) === "confirmed",
   );
+}
+
+export interface FixPhaseResult {
+  written: number;
+  total: number;
+  /** Set when a fatal provider error stopped the phase early. */
+  fatal?: FatalScanError;
+}
+
+/** Write one finding's fix into its shard. Read-modify-write with no await
+ *  in between, so concurrent workers on the same shard can't lose a fix. */
+function persistFix(outDir: string, finding: Finding, provider: string, runId: string): boolean {
+  const record = readFileRecord(outDir, finding.agentSlug, shardPath(finding));
+  if (!record) return false;
+  record.findings = record.findings.map((rec) =>
+    rec.id === finding.id ? { ...rec, suggestedFix: finding.suggestedFix } : rec,
+  );
+  record.analysisHistory.push({
+    runId,
+    phase: "fix",
+    ranAt: new Date().toISOString(),
+    durationMs: 0,
+    provider,
+    agentSlugs: [finding.agentSlug],
+    findingCount: 1,
+  });
+  try {
+    writeFileRecord(outDir, record);
+    return true;
+  } catch (err) {
+    logError(`[fix:${finding.id}] persist failed: ${(err as Error).message}`);
+    return false;
+  }
 }
 
 /**
  * Write a suggested fix for every confirmed primary. Runs after the
  * combined verdict (static plus live) has settled, so it pays only for
- * findings the report shows as confirmed. A failed call costs that one
- * finding its fix, never the scan.
+ * findings the report shows as confirmed. Each fix is persisted as soon as
+ * its call returns, so an interrupted phase keeps what it finished.
+ *
+ * The phase is optional, so it never throws on a provider failure: a failed
+ * call costs that one finding its fix, and a fatal error (no credit, bad
+ * key) stops the phase and is returned for the caller to act on.
  */
 export async function runFixPhase(args: {
   findings: ReadonlyArray<Finding>;
@@ -37,96 +78,80 @@ export async function runFixPhase(args: {
   verbose?: boolean;
   /** Write a fix again for findings that already carry one. */
   force?: boolean;
-  abortController: AbortController;
-}): Promise<void> {
-  const { detector, outDir, root, runId, abortController } = args;
+  /** The caller's abort signal. Aborting it cancels the phase's calls. */
+  signal?: AbortSignal;
+}): Promise<FixPhaseResult> {
+  const { detector, outDir, root, runId } = args;
   const work = selectForFix(args.findings, args.force);
-  if (work.length === 0) return;
+  const result: FixPhaseResult = { written: 0, total: work.length };
+  if (work.length === 0) return result;
   if (!detector.suggestFix) {
     console.log("\nSuggested fixes: backend does not support them, skipping");
-    return;
+    return result;
   }
 
   console.log(`\nWriting a suggested fix for ${work.length} confirmed finding(s)`);
   updateRunStage(outDir, runId, "fix", { done: 0, total: work.length });
 
+  // Own controller: a fatal error here cancels this phase's in-flight calls,
+  // not the caller's run, which still has a report to write.
+  const phaseAbort = new AbortController();
+  const onParentAbort = () => phaseAbort.abort(args.signal?.reason);
+  if (args.signal?.aborted) onParentAbort();
+  else args.signal?.addEventListener("abort", onParentAbort, { once: true });
+
   let done = 0;
   const fileCache = new Map<string, string | null>();
-  const fixedByShard = new Map<string, { agentSlug: string; filePath: string; ids: Set<string> }>();
-  // fixedByShard is mutated only after the await (no yield in between), so
-  // concurrent workers can't lose an entry.
-  await runConcurrent(work, args.concurrency, async (finding) => {
-    try {
-      let content = fileCache.get(finding.filePath);
-      if (content === undefined) {
-        try {
-          content = readFileSync(resolve(root, finding.filePath), "utf8");
-        } catch {
-          content = null;
-        }
-        fileCache.set(finding.filePath, content);
-      }
-      if (content === null) {
-        if (args.verbose) console.log(`    skip fix ${finding.id}: file not readable`);
-        return;
-      }
+  try {
+    await runConcurrent(work, args.concurrency, async (finding) => {
       try {
-        const fix = cleanFix(
-          await detector.suggestFix?.({
-            finding,
-            fileContent: content,
-            signal: abortController.signal,
-          }),
-        );
-        if (!fix) {
-          if (args.verbose) console.log(`    no fix ${finding.id}: the model returned nothing`);
+        if (!readFileRecord(outDir, finding.agentSlug, shardPath(finding))) {
+          logWarn(`[fix:${finding.id}] skipped: no file record for "${finding.filePath}"`);
           return;
         }
-        finding.suggestedFix = fix;
-        const filePath = finding.filePath.replace(/\\/g, "/");
-        const key = `${finding.agentSlug} ${filePath}`;
-        const entry = fixedByShard.get(key) ?? {
-          agentSlug: finding.agentSlug,
-          filePath,
-          ids: new Set<string>(),
-        };
-        entry.ids.add(finding.id);
-        fixedByShard.set(key, entry);
-      } catch (err) {
-        handleDetectorError(args, `fix:${finding.id}`, err, abortController);
+        let content = fileCache.get(finding.filePath);
+        if (content === undefined) {
+          try {
+            content = readFileSync(resolve(root, finding.filePath), "utf8");
+          } catch {
+            content = null;
+          }
+          fileCache.set(finding.filePath, content);
+        }
+        if (content === null) {
+          if (args.verbose) console.log(`    skip fix ${finding.id}: file not readable`);
+          return;
+        }
+        try {
+          const fix = cleanFix(
+            await detector.suggestFix?.({
+              finding,
+              fileContent: content,
+              signal: phaseAbort.signal,
+            }),
+          );
+          if (!fix) {
+            if (args.verbose) console.log(`    no fix ${finding.id}: the model returned nothing`);
+            return;
+          }
+          finding.suggestedFix = fix;
+          if (persistFix(outDir, finding, detector.name, runId)) result.written++;
+        } catch (err) {
+          handleDetectorError(args, `fix:${finding.id}`, err, phaseAbort);
+        }
+      } finally {
+        done++;
+        updateRunStage(outDir, runId, "fix", { done, total: work.length });
       }
-    } finally {
-      done++;
-      updateRunStage(outDir, runId, "fix", { done, total: work.length });
-    }
-  });
-
-  const byId = new Map(work.map((f) => [f.id, f] as const));
-  let written = 0;
-  for (const { agentSlug, filePath, ids } of fixedByShard.values()) {
-    if (isAbsolute(filePath)) continue;
-    const record = readFileRecord(outDir, agentSlug, filePath);
-    if (!record) continue;
-    record.findings = record.findings.map((rec) =>
-      ids.has(rec.id) ? { ...rec, suggestedFix: byId.get(rec.id)?.suggestedFix } : rec,
-    );
-    record.analysisHistory.push({
-      runId,
-      phase: "fix",
-      ranAt: new Date().toISOString(),
-      durationMs: 0,
-      provider: detector.name,
-      agentSlugs: [agentSlug],
-      findingCount: ids.size,
     });
-    try {
-      writeFileRecord(outDir, record);
-      written += ids.size;
-    } catch (err) {
-      if (args.verbose) {
-        logError(`persist failed for ${agentSlug}/${filePath}: ${(err as Error).message}`);
-      }
-    }
+  } catch (err) {
+    if (!(err instanceof FatalScanError)) throw err;
+    result.fatal = err;
+    logWarn(`Suggested fixes stopped early: ${err.message}`);
+  } finally {
+    args.signal?.removeEventListener("abort", onParentAbort);
   }
-  console.log(`  Fixes: ${written} of ${work.length} written`);
+
+  console.log(`  Fixes: ${result.written} of ${work.length} written`);
+  return result;
 }
