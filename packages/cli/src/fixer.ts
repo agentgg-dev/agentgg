@@ -5,9 +5,17 @@ import { renderReconForPrompt } from "./recon.js";
 
 /** Wrapper for a backend that can only return a schema-constrained object. */
 export const LlmFix = z.object({
-  fix: z.string().describe("The fix, in Markdown."),
+  fix: z
+    .string()
+    .describe("The whole answer: the explanation, the SEARCH/REPLACE blocks, any further steps."),
 });
 export type LlmFix = z.infer<typeof LlmFix>;
+
+/** An answer `finishFix` rejected, sent back to the model once. */
+export interface FixRetry {
+  answer: string;
+  problems: string[];
+}
 
 /** Requests of a live run shown in the prompt. A run can send dozens; the
  *  first ones carry the exploit, the rest are navigation. */
@@ -27,16 +35,19 @@ function liveBlock(finding: Finding): string {
 
 /**
  * Prompt the fix phase sends for one confirmed finding. Same grounding as
- * the validator and the scorer (finding + full file content), and the
- * answer is plain Markdown: a fix is mostly code, and code inside a JSON
- * string is what breaks structured output.
+ * the validator and the scorer (finding + full file content). The answer is
+ * plain text, not JSON: a fix is mostly code, and code inside a JSON string
+ * is what breaks structured output. The code comes as SEARCH/REPLACE blocks
+ * so `finishFix` can check every changed line against the file, and so each
+ * fix is a small edit instead of a rewritten function.
  */
 export function buildFixPrompt(args: {
   finding: Finding;
   fileContent: string;
   recon?: ReconReport;
+  retry?: FixRetry;
 }): string {
-  const { finding, fileContent, recon } = args;
+  const { finding, fileContent, recon, retry } = args;
   const lang = languageFromPath(finding.filePath);
   const lineHint = finding.lineRange
     ? `lines ${finding.lineRange[0]}–${finding.lineRange[1]}`
@@ -63,6 +74,19 @@ export function buildFixPrompt(args: {
 
   const reviewBlock = reviewed
     ? `\n### Validator's reasoning\n${finding.validation?.reasoning}\n`
+    : "";
+
+  const retryBlock = retry
+    ? `
+
+## Your previous answer was rejected
+
+${retry.answer}
+
+Problems:
+${retry.problems.map((p) => `- ${p}`).join("\n")}
+
+Answer again in the same format, with every problem fixed.`
     : "";
 
   return `You are writing the remediation for a confirmed security finding.
@@ -94,14 +118,34 @@ ${fileContent}
 
 ## Your task
 
-Write the fix in Markdown, in this order:
+Write the fix in this order:
 
 1. One or two sentences: the root cause, and the change that removes it.
-2. The corrected code for the affected lines of \`${finding.filePath}\`,
-   in a fenced code block. Change only what the fix needs, and keep the
-   surrounding code, names and style as they are.
-3. Only when that edit is not the whole fix: one short line per further
-   step (another call site, a configuration value, a dependency upgrade).
+2. The edit to \`${finding.filePath}\`, as one or more SEARCH/REPLACE blocks:
+
+<<<<<<< SEARCH
+lines copied from the file above
+=======
+the lines that replace them
+>>>>>>> REPLACE
+
+3. Only when those edits are not the whole fix: a short list of the
+   further steps, one line each.
+
+Rules for the blocks:
+
+- SEARCH holds whole lines copied character for character from the file
+  above, indentation included. It is checked against the file, and a
+  block that does not match is rejected.
+- SEARCH must match exactly one place in the file. Add neighbouring
+  lines until it does, and no more than that.
+- One block for each place that changes, and only the lines that change
+  there. Do not put a whole function in a block to change one line.
+- To add code, put the existing line it goes next to in SEARCH and
+  repeat that line in REPLACE.
+- Never shorten code with "..." or a comment that stands for skipped
+  lines.
+- Every code change goes in a block. Use no code fence anywhere.
 
 Fix the root cause where the code goes wrong. The fix must stop the whole
 class of input, not only the PoC payload: cover every path to the same
@@ -111,55 +155,14 @@ hand-written filter or a blocklist of bad input.
 
 Write code only for the file shown above, and only with names you can
 see in it or that its framework provides. When part of the fix belongs
-in a file you cannot see, name that file and describe the change in
-words; do not invent its code. If you cannot write a correct fix from
-this file alone, do not guess: describe the change in words and say what
-you would need to see.
+in another file, name the file and say in words what must change there.
+You cannot see that file, so do not state what it contains. If you
+cannot write a correct fix from this file alone, do not guess: write no
+block, describe the change in words and say what you would need to see.
+
+A further step is something the fix needs to work, or another place with
+the same flaw. No optional hardening, no tests, no documentation changes.
 
 Do not restate the vulnerability, the PoC or the impact. No heading, no
-closing remark.`;
-}
-
-const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
-
-/** True when `line` closes a fence opened with `open`. */
-function closes(line: string, open: string): boolean {
-  const m = FENCE.exec(line);
-  return !!m && m[1][0] === open[0] && m[1].length >= open.length && m[2].trim() === "";
-}
-
-/** The marker of the fence still open at the end of `lines`, if any. */
-function openFence(lines: string[]): string | undefined {
-  let open: string | undefined;
-  for (const line of lines) {
-    if (open) {
-      if (closes(line, open)) open = undefined;
-    } else {
-      open = FENCE.exec(line)?.[1];
-    }
-  }
-  return open;
-}
-
-/**
- * Normalize the model's answer. Blank means no fix. A model sometimes wraps
- * its whole Markdown answer in one \`markdown\` fence, which would render the
- * fix as a code block; and an answer that leaves a code fence open would
- * swallow every report section after it.
- */
-export function cleanFix(text: string | undefined): string | undefined {
-  let lines = (text ?? "").trim().split(/\r?\n/);
-  const wrapper = FENCE.exec(lines[0]);
-  if (wrapper && /^(?:markdown|md)$/i.test(wrapper[2].trim())) {
-    const inner = lines.slice(1, -1);
-    // The last line is the wrapper's own closing fence only when the content
-    // between them is balanced; otherwise it closes a code block inside.
-    const wrapped =
-      lines.length > 1 && closes(lines[lines.length - 1], wrapper[1]) && !openFence(inner);
-    lines = wrapped ? inner : lines.slice(1);
-  }
-  const open = openFence(lines);
-  if (open) lines.push(open);
-  const fix = lines.join("\n").trim();
-  return fix.length > 0 ? fix : undefined;
+closing remark.${retryBlock}`;
 }

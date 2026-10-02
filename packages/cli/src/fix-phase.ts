@@ -6,7 +6,8 @@ import { runConcurrent } from "./concurrent.js";
 import type { Detector } from "./detect.js";
 import { looksLikeRefusal } from "./detectors/refusal.js";
 import { FatalScanError, handleDetectorError } from "./diagnostics.js";
-import { cleanFix } from "./fixer.js";
+import { finishFix } from "./fix-edits.js";
+import type { FixRetry } from "./fixer.js";
 import { logError, logWarn } from "./log.js";
 
 const shardPath = (f: Finding): string => f.filePath.replace(/\\/g, "/");
@@ -125,25 +126,45 @@ export async function runFixPhase(args: {
           if (args.verbose) console.log(`    skip fix ${finding.id}: file not readable`);
           return;
         }
+        const source = content;
         try {
-          const fix = cleanFix(
-            await detector.suggestFix?.({
+          const ask = (retry?: FixRetry) =>
+            detector.suggestFix?.({
               finding,
-              fileContent: content,
+              fileContent: source,
               recon: args.recon,
+              retry,
               signal: phaseAbort.signal,
-            }),
-          );
-          if (!fix) {
+            });
+          let answer = await ask();
+          let checked = finishFix(answer, source, shardPath(finding));
+          if (checked.kind === "rejected") {
+            // One more ask, with what the check found. After a second miss the
+            // finding gets no fix: code the check could not place is not shown.
+            if (args.verbose) console.log(`    retry fix ${finding.id}: ${checked.problems[0]}`);
+            answer = await ask({ answer: answer ?? "", problems: checked.problems });
+            checked = finishFix(answer, source, shardPath(finding));
+          }
+          if (checked.kind === "rejected") {
+            logWarn(
+              `[fix:${finding.id}] no fix: the answer did not match ${finding.filePath}. ${checked.problems[0]}`,
+            );
+            return;
+          }
+          if (checked.kind === "empty") {
             if (args.verbose) console.log(`    no fix ${finding.id}: the model returned nothing`);
             return;
           }
-          if (looksLikeRefusal(fix)) {
+          if (looksLikeRefusal(checked.fix)) {
             logWarn(`[fix:${finding.id}] the model declined to write a fix`);
             return;
           }
-          finding.suggestedFix = fix;
-          if (persistFix(outDir, finding, detector.name, runId)) result.written++;
+          finding.suggestedFix = checked.fix;
+          if (!persistFix(outDir, finding, detector.name, runId)) return;
+          result.written++;
+          if (args.verbose) {
+            console.log(`    fix ${finding.id}: ${checked.edits} edit(s)  ${finding.filePath}`);
+          }
         } catch (err) {
           handleDetectorError(args, `fix:${finding.id}`, err, phaseAbort);
         }

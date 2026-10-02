@@ -163,6 +163,73 @@ describe("runFixPhase", () => {
     expect(suggestFix.mock.calls[0]).toMatchObject([{ recon }]);
   });
 
+  describe("edit check", () => {
+    // The seeded file is `const x = 1;`.
+    const GOOD = "Use two.\n\n<<<<<<< SEARCH\nconst x = 1;\n=======\nconst x = 2;\n>>>>>>> REPLACE";
+    const BAD = "Use two.\n\n<<<<<<< SEARCH\nconst y = 1;\n=======\nconst y = 2;\n>>>>>>> REPLACE";
+    type Args = { retry?: { answer: string; problems: string[] } };
+
+    it("stores the checked diff, not the model's blocks", async () => {
+      const findings = [makeFinding("a1")];
+      seed(findings);
+
+      await run(findings, async () => GOOD);
+
+      const fix = onDisk("a1")?.suggestedFix ?? "";
+      expect(fix).toContain("```diff\n--- a/server.js\n+++ b/server.js\n@@ -1,1 +1,1 @@");
+      expect(fix).toContain("-const x = 1;\n+const x = 2;");
+      expect(fix).not.toContain("<<<<<<<");
+    });
+
+    it("asks once more, with the problems, when the code does not match the file", async () => {
+      const findings = [makeFinding("a1")];
+      seed(findings);
+      const suggestFix = vi.fn(async (args: Args) => (args.retry ? GOOD : BAD));
+
+      const result = await run(findings, suggestFix as Detector["suggestFix"]);
+
+      expect(suggestFix).toHaveBeenCalledTimes(2);
+      const retry = suggestFix.mock.calls[1][0].retry;
+      expect(retry?.answer).toBe(BAD);
+      expect(retry?.problems.join(" ")).toContain("do not occur in server.js");
+      expect(result.written).toBe(1);
+      expect(onDisk("a1")?.suggestedFix).toContain("+const x = 2;");
+    });
+
+    it("records no fix when the second answer does not match the file either", async () => {
+      const findings = [makeFinding("a1")];
+      seed(findings);
+      const suggestFix = vi.fn(async () => BAD);
+
+      const result = await run(findings, suggestFix);
+
+      expect(suggestFix).toHaveBeenCalledTimes(2);
+      expect(result.written).toBe(0);
+      expect(onDisk("a1")?.suggestedFix).toBeUndefined();
+      expect(vi.mocked(console.warn).mock.calls.flat().join(" ")).toContain("a1");
+    });
+
+    it("prints one line for each fix with verbose on", async () => {
+      const findings = [makeFinding("a1")];
+      seed(findings);
+
+      await runFixPhase({
+        findings,
+        detector: { name: "test-mock", suggestFix: async () => GOOD } as unknown as Detector,
+        outDir,
+        root,
+        runId: "run-1",
+        concurrency: 1,
+        verbose: true,
+      });
+
+      const lines = vi.mocked(console.log).mock.calls.map((c) => String(c[0]));
+      expect(lines.filter((l) => l.includes("a1"))).toEqual([
+        expect.stringMatching(/a1.*1 edit.*server\.js/),
+      ]);
+    });
+  });
+
   it("makes no call for a finding with no record on disk", async () => {
     const suggestFix = vi.fn(async () => "fix");
 

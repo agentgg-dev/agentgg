@@ -28,7 +28,7 @@ import {
   type SuggestExcludesArgs,
   SuggestExcludesResult,
 } from "../detect.js";
-import { buildFixPrompt, LlmFix } from "../fixer.js";
+import { buildFixPrompt, type FixRetry, LlmFix } from "../fixer.js";
 import { logError, logWarn } from "../log.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import type { CallUsage, UsageMeter } from "../usage-meter.js";
@@ -434,6 +434,7 @@ export class ClaudeAgentDetector implements Detector {
     finding: Finding;
     fileContent: string;
     recon?: ReconReport;
+    retry?: FixRetry;
     signal?: AbortSignal;
   }): Promise<string> {
     const result = await this.runStructured({

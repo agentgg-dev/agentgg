@@ -2,7 +2,7 @@ import type { Finding } from "@agentgg/core";
 import { MockLanguageModelV1 } from "ai/test";
 import { describe, expect, it } from "vitest";
 import { VercelAgentDetector } from "../src/detectors/vercel-agent.js";
-import { buildFixPrompt, cleanFix } from "../src/fixer.js";
+import { buildFixPrompt } from "../src/fixer.js";
 
 function makeFinding(overrides: Partial<Finding> = {}): Finding {
   return {
@@ -163,39 +163,37 @@ describe("buildFixPrompt", () => {
   });
 });
 
-describe("cleanFix", () => {
-  it("trims the answer", () => {
-    expect(cleanFix("\n  Bind the parameter.  \n")).toBe("Bind the parameter.");
+describe("buildFixPrompt answer format", () => {
+  const prompt = (extra: object = {}) =>
+    buildFixPrompt({ finding: makeFinding(), fileContent: "x", ...extra });
+
+  it("asks for the code change as SEARCH/REPLACE blocks that are checked against the file", () => {
+    const out = prompt();
+    expect(out).toContain("<<<<<<< SEARCH");
+    expect(out).toContain(">>>>>>> REPLACE");
+    expect(out).toContain("checked against the file");
   });
 
-  it("returns nothing for a blank answer", () => {
-    expect(cleanFix(" \n\t")).toBeUndefined();
+  it("forbids statements about files the model cannot see, and optional extras", () => {
+    const out = prompt();
+    expect(out).toContain("do not state what it contains");
+    expect(out).toContain("No optional hardening");
   });
 
-  it("unwraps an answer the model put in one markdown fence", () => {
-    const inner = "Bind the parameter.\n\n```ts\ndb.query(sql, [id]);\n```";
-    expect(cleanFix(`\`\`\`markdown\n${inner}\n\`\`\``)).toBe(inner);
+  it("has no retry section on the first ask", () => {
+    expect(prompt()).not.toContain("previous answer");
   });
 
-  it("keeps a code fence that opens the answer", () => {
-    const answer = "```ts\ndb.query(sql, [id]);\n```\nBind the parameter.";
-    expect(cleanFix(answer)).toBe(answer);
-  });
-
-  it.each(["````", "~~~"])("unwraps a markdown wrapper written with %s", (fence) => {
-    const inner = "Bind the parameter.\n\n```ts\ndb.query(sql, [id]);\n```";
-    expect(cleanFix(`${fence}markdown\n${inner}\n${fence}`)).toBe(inner);
-  });
-
-  it("keeps the closing fence of a code block when the wrapper was never closed", () => {
-    const inner = "Bind the parameter.\n```ts\ndb.query(sql, [id]);\n```";
-    expect(cleanFix(`\`\`\`markdown\n${inner}`)).toBe(inner);
-  });
-
-  it("closes a code fence the answer left open, so it cannot swallow the report after it", () => {
-    expect(cleanFix("Bind the parameter.\n```ts\ndb.query(sql, [id]);")).toBe(
-      "Bind the parameter.\n```ts\ndb.query(sql, [id]);\n```",
-    );
+  it("shows a rejected answer and its problems when it asks again", () => {
+    const out = prompt({
+      retry: {
+        answer: "Bind it.\n<<<<<<< SEARCH\nnope\n=======\nx\n>>>>>>> REPLACE",
+        problems: ["Block 1: the SEARCH lines do not occur in src/login.ts."],
+      },
+    });
+    expect(out).toContain("Your previous answer was rejected");
+    expect(out).toContain("Bind it.\n<<<<<<< SEARCH\nnope");
+    expect(out).toContain("- Block 1: the SEARCH lines do not occur in src/login.ts.");
   });
 });
 

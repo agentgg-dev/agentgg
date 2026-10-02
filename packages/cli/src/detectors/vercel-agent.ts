@@ -50,7 +50,7 @@ import {
   type UnverifiedExcerpt,
 } from "../detect.js";
 import { ExpectedDetectorError, isInFlightCreditError } from "../diagnostics.js";
-import { buildFixPrompt } from "../fixer.js";
+import { buildFixPrompt, type FixRetry } from "../fixer.js";
 import { logError, logInfo, logWarn } from "../log.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import type { CallUsage, UsageMeter } from "../usage-meter.js";
@@ -1493,6 +1493,7 @@ export class VercelAgentDetector implements Detector {
     finding: Finding;
     fileContent: string;
     recon?: ReconReport;
+    retry?: FixRetry;
     signal?: AbortSignal;
   }): Promise<string> {
     try {
