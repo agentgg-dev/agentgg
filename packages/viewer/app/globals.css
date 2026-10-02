@@ -96,6 +96,25 @@ body {
   color: #c5d1de;
   font-size: 13px;
 }
+/* A diff block: one row per line, coloured like a GitHub diff. Each row
+   spans the padding of the <pre>, and grows with the widest line so the
+   colour does not stop where the block starts to scroll. */
+.prose-finding pre code.language-diff {
+  display: block;
+  width: max-content;
+  min-width: 100%;
+}
+.prose-finding .diff-line {
+  display: block;
+  margin: 0 -16px;
+  padding: 0 16px;
+  white-space: pre;
+}
+.prose-finding .diff-add { background: rgba(46, 160, 67, 0.18); color: #aff5b4; }
+.prose-finding .diff-del { background: rgba(248, 81, 73, 0.18); color: #ffc1ba; }
+.prose-finding .diff-hunk { background: rgba(76, 201, 240, 0.1); color: #4cc9f0; }
+.prose-finding .diff-file { color: #8b98a8; font-weight: 600; }
+
 .prose-finding h1, .prose-finding h2, .prose-finding h3 {
   color: #e6edf3;
   font-weight: 600;
