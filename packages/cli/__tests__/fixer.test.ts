@@ -180,6 +180,10 @@ describe("buildFixPrompt answer format", () => {
     expect(out).toContain("No optional hardening");
   });
 
+  it("asks for the blocks together, because the report shows them as one diff", () => {
+    expect(prompt()).toContain("no text between them");
+  });
+
   it("has no retry section on the first ask", () => {
     expect(prompt()).not.toContain("previous answer");
   });

@@ -146,6 +146,8 @@ Rules for the blocks:
 - Never shorten code with "..." or a comment that stands for skipped
   lines.
 - Every code change goes in a block. Use no code fence anywhere.
+- Put the blocks one after another, with no text between them. The
+  reader sees them as one diff.
 
 Fix the root cause where the code goes wrong. The fix must stop the whole
 class of input, not only the PoC payload: cover every path to the same
