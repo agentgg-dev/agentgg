@@ -280,6 +280,10 @@ Rules for the blocks:
   lines until it does, and no more than that.
 - One block for each place that changes, and only the lines that change
   there. Do not put a whole function in a block to change one line.
+- REPLACE must be valid where it lands. Read each new line as the file
+  will hold it: keep the syntax around the value you change (the
+  delimiters, quotes, brackets and indentation of the original line)
+  unless removing it is the fix.
 - To add code, put the existing line it goes next to in SEARCH and
   repeat that line in REPLACE.
 - Never shorten code with "..." or a comment that stands for skipped

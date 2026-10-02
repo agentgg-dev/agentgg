@@ -157,6 +157,12 @@ describe("buildFixPrompt answer format", () => {
     expect(prompt()).toContain("no text between them");
   });
 
+  it("asks for new lines that stay valid where they land, with the syntax around the changed value kept", () => {
+    const out = prompt();
+    expect(out).toContain("valid where it lands");
+    expect(out).toContain("delimiters, quotes, brackets");
+  });
+
   it("has no retry section on the first ask", () => {
     expect(prompt()).not.toContain("previous answer");
   });
