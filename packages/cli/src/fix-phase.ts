@@ -1,13 +1,19 @@
-import { readFileSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { readFileSync, statSync } from "node:fs";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import type { Finding, ReconReport } from "@agentgg/core";
-import { effectiveVerdict, readFileRecord, updateRunStage, writeFileRecord } from "@agentgg/core";
+import {
+  effectiveVerdict,
+  getEvidenceDir,
+  readFileRecord,
+  updateRunStage,
+  writeFileRecord,
+} from "@agentgg/core";
 import { runConcurrent } from "./concurrent.js";
 import type { Detector } from "./detect.js";
 import { looksLikeRefusal } from "./detectors/refusal.js";
 import { FatalScanError, handleDetectorError } from "./diagnostics.js";
-import { finishFix } from "./fix-edits.js";
-import type { FixRetry } from "./fixer.js";
+import { type FileReader, finishFix } from "./fix-edits.js";
+import type { FixRetry, LiveScript } from "./fixer.js";
 import { logError, logWarn } from "./log.js";
 
 const shardPath = (f: Finding): string => f.filePath.replace(/\\/g, "/");
@@ -32,6 +38,46 @@ export interface FixPhaseResult {
   total: number;
   /** Set when a fatal provider error stopped the phase early. */
   fatal?: FatalScanError;
+}
+
+/** A source file is far below this; a file above it is data or a bundle. */
+const MAX_EDITABLE_BYTES = 2 * 1024 * 1024;
+
+/**
+ * The files a fix may edit: regular files under `root`. A path the model
+ * writes is untrusted, so one that is absolute or climbs out of the
+ * repository reads as no file.
+ */
+export function repoReader(root: string): FileReader {
+  const base = resolve(root);
+  const cache = new Map<string, string | undefined>();
+  return (path) => {
+    if (cache.has(path)) return cache.get(path);
+    let content: string | undefined;
+    const full = resolve(base, path);
+    if (!isAbsolute(path) && full.startsWith(base + sep)) {
+      try {
+        const stat = statSync(full);
+        if (stat.isFile() && stat.size <= MAX_EDITABLE_BYTES) content = readFileSync(full, "utf8");
+      } catch {
+        // not there
+      }
+    }
+    cache.set(path, content);
+    return content;
+  };
+}
+
+/** The reproduction script a reproduced live run left in the finding's evidence. */
+function liveScriptOf(outDir: string, finding: Finding): LiveScript | undefined {
+  const script = finding.live?.result === "reproduced" ? finding.live.evidence?.script : undefined;
+  if (!script) return undefined;
+  try {
+    const dir = getEvidenceDir(outDir, finding.agentSlug, finding.id);
+    return { source: readFileSync(join(dir, script.path), "utf8"), passed: script.passed };
+  } catch {
+    return undefined;
+  }
 }
 
 /** Write one finding's fix into its shard. Read-modify-write with no await
@@ -82,6 +128,9 @@ export async function runFixPhase(args: {
   force?: boolean;
   /** The scan's recon brief, when it has one. */
   recon?: ReconReport;
+  /** The scan's walk filters, so the fix's read tools see the files the scan saw. */
+  excludePatterns?: string[];
+  maxFileSizeKb?: number;
   /** The caller's abort signal. Aborting it cancels the phase's calls. */
   signal?: AbortSignal;
 }): Promise<FixPhaseResult> {
@@ -105,7 +154,7 @@ export async function runFixPhase(args: {
   else args.signal?.addEventListener("abort", onParentAbort, { once: true });
 
   let done = 0;
-  const fileCache = new Map<string, string | null>();
+  const readFile = repoReader(root);
   try {
     await runConcurrent(work, args.concurrency, async (finding) => {
       try {
@@ -113,41 +162,39 @@ export async function runFixPhase(args: {
           logWarn(`[fix:${finding.id}] skipped: no file record for "${finding.filePath}"`);
           return;
         }
-        let content = fileCache.get(finding.filePath);
-        if (content === undefined) {
-          try {
-            content = readFileSync(resolve(root, finding.filePath), "utf8");
-          } catch {
-            content = null;
-          }
-          fileCache.set(finding.filePath, content);
-        }
-        if (content === null) {
+        const source = readFile(shardPath(finding));
+        if (source === undefined) {
           if (args.verbose) console.log(`    skip fix ${finding.id}: file not readable`);
           return;
         }
-        const source = content;
+        const liveScript = liveScriptOf(outDir, finding);
         try {
           const ask = (retry?: FixRetry) =>
             detector.suggestFix?.({
               finding,
               fileContent: source,
               recon: args.recon,
+              liveScript,
+              // With a root the call gets read tools, and its blocks may edit
+              // any file of the repository.
+              root,
+              excludePatterns: args.excludePatterns,
+              maxFileSizeKb: args.maxFileSizeKb,
               retry,
               signal: phaseAbort.signal,
             });
           let answer = await ask();
-          let checked = finishFix(answer, source, shardPath(finding));
+          let checked = finishFix(answer, readFile, shardPath(finding));
           if (checked.kind === "rejected") {
             // One more ask, with what the check found. After a second miss the
             // finding gets no fix: code the check could not place is not shown.
             if (args.verbose) console.log(`    retry fix ${finding.id}: ${checked.problems[0]}`);
             answer = await ask({ answer: answer ?? "", problems: checked.problems });
-            checked = finishFix(answer, source, shardPath(finding));
+            checked = finishFix(answer, readFile, shardPath(finding));
           }
           if (checked.kind === "rejected") {
             logWarn(
-              `[fix:${finding.id}] no fix: the answer did not match ${finding.filePath}. ${checked.problems[0]}`,
+              `[fix:${finding.id}] no fix: the answer did not match the repository. ${checked.problems[0]}`,
             );
             return;
           }
@@ -163,7 +210,8 @@ export async function runFixPhase(args: {
           if (!persistFix(outDir, finding, detector.name, runId)) return;
           result.written++;
           if (args.verbose) {
-            console.log(`    fix ${finding.id}: ${checked.edits} edit(s)  ${finding.filePath}`);
+            const where = checked.files.length > 0 ? checked.files.join(", ") : "in words only";
+            console.log(`    fix ${finding.id}: ${checked.edits} edit(s)  ${where}`);
           }
         } catch (err) {
           handleDetectorError(args, `fix:${finding.id}`, err, phaseAbort);

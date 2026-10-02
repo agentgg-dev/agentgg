@@ -39,4 +39,21 @@ describe("ClaudeAgentDetector.suggestFix", () => {
     expect(call.prompt).toContain("SQLi in user lookup");
     expect(call.options.tools).toEqual([]);
   });
+
+  it("gives the model the read tools, rooted at the repository, when it has a root", async () => {
+    queryMock.mockImplementation(async function* () {
+      yield { type: "result", structured_output: { fix: "Bind the parameter." }, result: "done" };
+    });
+    const detector = new ClaudeAgentDetector({ apiKey: "test-key", model: "claude-opus-4-8" });
+
+    await detector.suggestFix({ ...(ARGS as object), root: "/repo" } as never);
+
+    const call = queryMock.mock.calls[0][0] as {
+      prompt: string;
+      options: { tools: string[]; cwd?: string };
+    };
+    expect(call.options.tools).toEqual(["Read", "Glob", "Grep"]);
+    expect(call.options.cwd).toBe("/repo");
+    expect(call.prompt).toContain("Read, Glob and Grep");
+  });
 });

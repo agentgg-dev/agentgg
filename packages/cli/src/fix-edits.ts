@@ -1,17 +1,23 @@
 /**
  * The text-only check on a suggested fix. The model writes its code changes
- * as SEARCH/REPLACE blocks; each SEARCH must match exactly one place in the
- * scanned file. Blocks that pass are rendered as one unified diff, so every
- * line of code the report shows is known to apply to the file as scanned.
- * That is all it proves: the check says nothing about whether the fix is right.
+ * as SEARCH/REPLACE blocks, each for one file; each SEARCH must match exactly
+ * one place in that file. Blocks that pass are rendered as one unified diff
+ * per file, so every line of code the report shows is known to apply to the
+ * repository as scanned. That is all it proves: the check says nothing about
+ * whether the fix is right.
  */
 
 export type FixResult =
-  /** `fix` is the Markdown to store. `edits` is 0 for an answer in words only. */
-  | { kind: "fix"; fix: string; edits: number }
+  /** `fix` is the Markdown to store. `edits` is 0 for an answer in words
+   *  only. `files` are the files the edits change, the finding's file first. */
+  | { kind: "fix"; fix: string; edits: number; files: string[] }
   | { kind: "empty" }
   /** `problems` is written for the model: it is sent back for one retry. */
   | { kind: "rejected"; problems: string[] };
+
+/** The content of a file by its path from the repository root, or undefined
+ *  for a path the fix may not edit: missing, or outside the repository. */
+export type FileReader = (path: string) => string | undefined;
 
 const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 
@@ -24,6 +30,7 @@ const MARKER = /^(?:<{5,9} ?SEARCH|>{5,9} ?REPLACE)\b/m;
 interface Hunk {
   /** 1-based position of the block in the answer, for the problem text. */
   block: number;
+  file: string;
   /** 0-based index of the first matched line. */
   start: number;
   old: string[];
@@ -123,20 +130,58 @@ function renderDiff(filePath: string, hunks: Hunk[]): { diff: string; places: st
 const list = (items: string[]): string =>
   items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
 
+/** A line that names a file: one token, with the wrappers a model adds
+ *  (backticks, bold, a trailing colon) taken off. */
+function asPath(line: string): string | undefined {
+  const path = line
+    .trim()
+    .replace(/^[`*]+/, "")
+    .replace(/[`*:]+$/, "")
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "");
+  return path === "" || /[\s<>"|?*]/.test(path) || path.includes("://") ? undefined : path;
+}
+
 /**
- * Check the model's answer against the file and build the Markdown to store.
- * `fileContent` is the file the prompt showed; `filePath` labels the diff.
+ * The file a block is for: the path on the line above it. A last line that
+ * is one word and names no file ("done.") is the end of a sentence, so it
+ * stays text; one with a slash that names no file is a path the model got
+ * wrong, and is returned so the block can be rejected for it.
+ */
+function takePath(
+  before: string,
+  isFile: (path: string) => boolean,
+): { path?: string; text: string } {
+  const lines = before.replace(/\n+$/, "").split("\n");
+  const path = asPath(lines[lines.length - 1] ?? "");
+  if (!path || !(isFile(path) || path.includes("/"))) return { text: before };
+  lines.pop();
+  // A fence the model opened around the path and its block.
+  if (lines.length > 0 && FENCE.test(lines[lines.length - 1])) lines.pop();
+  return { path, text: lines.join("\n") };
+}
+
+/**
+ * Check the model's answer against the repository and build the Markdown to
+ * store. `readFile` returns the content of a path from the repository root,
+ * or undefined for anything the fix may not edit. A block with no path line
+ * above it is for `defaultPath`, the finding's file.
  */
 export function finishFix(
   answer: string | undefined,
-  fileContent: string,
-  filePath: string,
+  readFile: FileReader,
+  defaultPath: string,
 ): FixResult {
   const text = unwrap((answer ?? "").replace(/\r\n/g, "\n"));
   if (text.trim() === "") return { kind: "empty" };
 
-  const file = fileContent.replace(/\r\n/g, "\n");
-  const fileLines = file.split("\n");
+  const contents = new Map<string, string | undefined>();
+  const contentOf = (path: string): string | undefined => {
+    if (!contents.has(path)) contents.set(path, readFile(path)?.replace(/\r\n/g, "\n"));
+    return contents.get(path);
+  };
+  const isFile = (path: string): boolean => path === defaultPath || contentOf(path) !== undefined;
+
   const problems: string[] = [];
   const hunks: Hunk[] = [];
   const prose: string[] = [];
@@ -144,8 +189,17 @@ export function finishFix(
   let block = 0;
   for (const m of text.matchAll(BLOCK)) {
     block++;
-    prose.push(text.slice(cursor, m.index));
+    const named = takePath(text.slice(cursor, m.index), isFile);
+    prose.push(named.text);
     cursor = m.index + m[0].length;
+    const filePath = named.path ?? defaultPath;
+    const file = contentOf(filePath);
+    if (file === undefined) {
+      problems.push(
+        `Block ${block}: \`${filePath}\` is not a file you can edit here. Write its path from the repository root, and edit only files that exist.`,
+      );
+      continue;
+    }
     const search = dropLastNewline(m[1]);
     const replace = dropLastNewline(m[2]);
     if (search.trim() === "") {
@@ -154,6 +208,7 @@ export function finishFix(
       );
       continue;
     }
+    const fileLines = file.split("\n");
     const old = search.split("\n");
     const found = matches(fileLines, old);
     if (found.length === 0) {
@@ -177,16 +232,31 @@ export function finishFix(
     }
     // The file's own lines, not the model's copy of them.
     const start = found[0];
-    hunks.push({ block, start, old: fileLines.slice(start, start + old.length), neu });
+    hunks.push({
+      block,
+      file: filePath,
+      start,
+      old: fileLines.slice(start, start + old.length),
+      neu,
+    });
   }
   prose.push(text.slice(cursor));
 
-  hunks.sort((a, b) => a.start - b.start);
-  for (let i = 1; i < hunks.length; i++) {
-    const prev = hunks[i - 1];
-    if (hunks[i].start < prev.start + prev.old.length) {
-      const [a, b] = [prev.block, hunks[i].block].sort((x, y) => x - y);
-      problems.push(`Blocks ${a} and ${b} change the same lines. Merge them into one block.`);
+  // The finding's file first, then the others in the order the model gave them.
+  const files = [...new Set(hunks.map((h) => h.file))].sort(
+    (a, b) => Number(b === defaultPath) - Number(a === defaultPath),
+  );
+  const byFile = files.map((file) => ({
+    file,
+    hunks: hunks.filter((h) => h.file === file).sort((a, b) => a.start - b.start),
+  }));
+  for (const { hunks: inFile } of byFile) {
+    for (let i = 1; i < inFile.length; i++) {
+      const prev = inFile[i - 1];
+      if (inFile[i].start < prev.start + prev.old.length) {
+        const [a, b] = [prev.block, inFile[i].block].sort((x, y) => x - y);
+        problems.push(`Blocks ${a} and ${b} change the same lines. Merge them into one block.`);
+      }
     }
   }
 
@@ -202,12 +272,14 @@ export function finishFix(
   }
   if (problems.length > 0) return { kind: "rejected", problems };
 
-  if (hunks.length === 0) return { kind: "fix", fix: words.join("\n\n"), edits: 0 };
-  // The diff goes where the first block was: after the explanation.
+  if (hunks.length === 0) return { kind: "fix", fix: words.join("\n\n"), edits: 0, files: [] };
+  // The diffs go where the first block was: after the explanation.
   const lead = prose[0].trim();
   const rest = words.slice(lead === "" ? 0 : 1);
-  const { diff, places } = renderDiff(filePath, hunks);
-  const location = `**Location:** \`${filePath}\`, ${list(places)}`;
-  const parts = [lead, location, diff, ...rest].filter((part) => part !== "");
-  return { kind: "fix", fix: parts.join("\n\n"), edits: hunks.length };
+  const diffs = byFile.flatMap(({ file, hunks: inFile }) => {
+    const { diff, places } = renderDiff(file, inFile);
+    return [`**Location:** \`${file}\`, ${list(places)}`, diff];
+  });
+  const parts = [lead, ...diffs, ...rest].filter((part) => part !== "");
+  return { kind: "fix", fix: parts.join("\n\n"), edits: hunks.length, files };
 }

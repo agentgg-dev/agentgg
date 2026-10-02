@@ -1,8 +1,8 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { FileRecord, Finding } from "@agentgg/core";
-import { hashContent, readFileRecord, writeFileRecord } from "@agentgg/core";
+import { getEvidenceDir, hashContent, readFileRecord, writeFileRecord } from "@agentgg/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Detector } from "../src/detect.js";
 import { FatalScanError } from "../src/diagnostics.js";
@@ -227,6 +227,113 @@ describe("runFixPhase", () => {
       expect(lines.filter((l) => l.includes("a1"))).toEqual([
         expect.stringMatching(/a1.*1 edit.*server\.js/),
       ]);
+    });
+  });
+
+  describe("other files of the repository", () => {
+    const inLib = (path: string) =>
+      `Fix the helper.\n\n${path}\n<<<<<<< SEARCH\nexport const y = 1;\n=======\nexport const y = 2;\n>>>>>>> REPLACE`;
+
+    beforeEach(() => {
+      writeFileSync(join(root, "lib.js"), "export const y = 1;", "utf8");
+    });
+
+    it("gives the detector the repository root and the scan's file limits, for its read tools", async () => {
+      const findings = [makeFinding("a1")];
+      seed(findings);
+      const suggestFix = vi.fn(async () => "fix");
+
+      await runFixPhase({
+        findings,
+        detector: { name: "test-mock", suggestFix } as unknown as Detector,
+        outDir,
+        root,
+        runId: "run-1",
+        concurrency: 1,
+        excludePatterns: ["vendor/**"],
+        maxFileSizeKb: 256,
+      });
+
+      expect(suggestFix.mock.calls[0]).toMatchObject([
+        { root, excludePatterns: ["vendor/**"], maxFileSizeKb: 256 },
+      ]);
+    });
+
+    it("stores an edit to another file as a diff of that file", async () => {
+      const findings = [makeFinding("a1")];
+      seed(findings);
+
+      await run(findings, async () => inLib("lib.js"));
+
+      const fix = onDisk("a1")?.suggestedFix ?? "";
+      expect(fix).toContain("**Location:** `lib.js`, line 1");
+      expect(fix).toContain("--- a/lib.js\n+++ b/lib.js");
+    });
+
+    it.each([
+      ["above the repository", "../outside.js"],
+      ["given as an absolute path", "ABSOLUTE"],
+    ])("rejects an edit to a file %s", async (_where, path) => {
+      const outside = join(root, "..", "outside.js");
+      writeFileSync(outside, "export const y = 1;", "utf8");
+      const findings = [makeFinding("a1")];
+      seed(findings);
+      const suggestFix = vi.fn(async () => inLib(path === "ABSOLUTE" ? outside : path));
+
+      try {
+        const result = await run(findings, suggestFix);
+        expect(result.written).toBe(0);
+        expect(onDisk("a1")?.suggestedFix).toBeUndefined();
+      } finally {
+        rmSync(outside, { force: true });
+      }
+    });
+  });
+
+  describe("live evidence", () => {
+    const SCRIPT = "test('exploit', async ({ page }) => { await page.goto('/'); });";
+    const reproduced = (script?: { path: string; executed: boolean; passed: boolean }) =>
+      makeFinding("a1", {
+        live: {
+          result: "reproduced",
+          reasoning: "r",
+          counterevidence: "",
+          negativeControl: "c",
+          evidence: {
+            screenshots: [],
+            requests: [{ method: "GET", url: "http://app.test/", status: 200 }],
+            ...(script ? { script } : {}),
+          },
+        },
+      });
+    const liveScriptOf = async (finding: Finding) => {
+      seed([finding]);
+      const suggestFix = vi.fn(async () => "fix");
+      await run([finding], suggestFix as Detector["suggestFix"]);
+      return (suggestFix.mock.calls[0] as unknown as [{ liveScript?: unknown }])[0].liveScript;
+    };
+    const writeScript = (finding: Finding) => {
+      const dir = getEvidenceDir(outDir, finding.agentSlug, finding.id);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "repro.spec.ts"), SCRIPT, "utf8");
+    };
+
+    it("gives the detector the reproduction script and whether its replay passed", async () => {
+      const finding = reproduced({ path: "repro.spec.ts", executed: true, passed: false });
+      writeScript(finding);
+      expect(await liveScriptOf(finding)).toEqual({ source: SCRIPT, passed: false });
+    });
+
+    it("gives no script when the evidence file is gone", async () => {
+      const finding = reproduced({ path: "repro.spec.ts", executed: true, passed: true });
+      expect(await liveScriptOf(finding)).toBeUndefined();
+    });
+
+    it("gives no script for a finding the live run did not reproduce", async () => {
+      const finding = reproduced({ path: "repro.spec.ts", executed: true, passed: true });
+      writeScript(finding);
+      if (finding.live) finding.live.result = "error";
+      expect(await liveScriptOf(finding)).toBeUndefined();
     });
   });
 

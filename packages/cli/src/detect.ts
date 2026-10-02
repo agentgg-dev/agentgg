@@ -4,7 +4,7 @@ import { extname, resolve } from "node:path";
 import type { Agent, CvssScore, Finding, LiveResult, ReconReport } from "@agentgg/core";
 import { z } from "zod";
 import type { AgentSpec } from "./agent-spec.js";
-import type { FixRetry } from "./fixer.js";
+import type { FixRetry, LiveScript } from "./fixer.js";
 import type { PreFilterHit, TaintStep } from "./pre-filter.js";
 import type { UsageMeter } from "./usage-meter.js";
 import { proofRules } from "./validation/proof-rules.js";
@@ -417,18 +417,26 @@ export interface Detector {
 
   /**
    * Fix phase — write the remediation for one confirmed finding, as text
-   * with SEARCH/REPLACE blocks. Single call, no tools: the prompt carries
-   * the finding, its file, and the recon brief when the scan has one.
-   * Throws when the answer was cut off. The caller decides which findings
-   * qualify, checks the answer against the file with `finishFix`, and
-   * passes a rejected answer back as `retry`. Optional so a backend can
-   * opt out; callers invoke it as `detector.suggestFix?.(args)`.
+   * with SEARCH/REPLACE blocks. The prompt carries the finding, its file,
+   * the recon brief and the live run's script when the scan has them.
+   * With `root` the call is tool-enabled (Read/Glob/Grep rooted there, same
+   * filters as `validateFinding`): a fix often depends on code the
+   * finding's file does not hold, and a block may then edit another file.
+   * Without `root` it is a single call over `fileContent`. Throws when the
+   * answer was cut off or never came. The caller decides which findings
+   * qualify, checks the answer against the repository with `finishFix`,
+   * and passes a rejected answer back as `retry`. Optional so a backend
+   * can opt out; callers invoke it as `detector.suggestFix?.(args)`.
    */
   suggestFix?(
     args: {
       finding: Finding;
       fileContent: string;
       recon?: ReconReport;
+      liveScript?: LiveScript;
+      root?: string;
+      excludePatterns?: string[];
+      maxFileSizeKb?: number;
       retry?: FixRetry;
     } & AbortableArgs,
   ): Promise<string>;

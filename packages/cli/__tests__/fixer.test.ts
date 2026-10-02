@@ -98,33 +98,6 @@ describe("buildFixPrompt", () => {
     expect(out).not.toContain("Could not trace the entry point.");
   });
 
-  it("shows the requests the live run sent", () => {
-    const out = buildFixPrompt({
-      finding: makeFinding({
-        validation: { verdict: "confirmed", reasoning: "r" },
-        live: {
-          result: "reproduced",
-          reasoning: "r",
-          counterevidence: "",
-          evidence: {
-            screenshots: [],
-            requests: [
-              {
-                method: "POST",
-                url: "http://app.test/login",
-                status: 200,
-                requestBody: "user=' OR 1=1--",
-              },
-            ],
-          },
-        },
-      }),
-      fileContent: "x",
-    });
-    expect(out).toContain("POST http://app.test/login → 200");
-    expect(out).toContain("user=' OR 1=1--");
-  });
-
   it("leaves the live section out when the live run did not reproduce the finding", () => {
     const out = buildFixPrompt({
       finding: makeFinding({
@@ -201,6 +174,159 @@ describe("buildFixPrompt answer format", () => {
   });
 });
 
+describe("buildFixPrompt live evidence", () => {
+  type Req = { method: string; url: string; status: number; requestBody?: string };
+  const INJECTION = "' OR '1'='1' --";
+  const SCRIPT = "test('exploit', async ({ page }) => { await page.goto('/login'); });";
+
+  /** A reproduced finding whose agent wrote `reasoning` and sent `requests`. */
+  const reproduced = (requests: Req[], reasoning: string, negativeControl = "") =>
+    makeFinding({
+      poc: "Send the payload to the login form.",
+      validation: { verdict: "confirmed", reasoning: "r" },
+      live: {
+        result: "reproduced",
+        reasoning,
+        counterevidence: "",
+        negativeControl,
+        evidence: { screenshots: [], requests },
+      },
+    });
+
+  const SESSION: Req[] = [
+    { method: "GET", url: "http://app.test/", status: 200 },
+    { method: "GET", url: "http://app.test/assets/app.css", status: 200 },
+    {
+      method: "POST",
+      url: "http://app.test/login",
+      status: 302,
+      requestBody: `username=${INJECTION}&password=anything`,
+    },
+    { method: "GET", url: "http://app.test/", status: 200 },
+    {
+      method: "POST",
+      url: "http://app.test/login",
+      status: 401,
+      requestBody: "username=alice&password=wrong-password",
+    },
+  ];
+  const prompt = (finding: Finding, extra: object = {}) =>
+    buildFixPrompt({ finding, fileContent: "x", ...extra });
+
+  describe("with the reproduction script", () => {
+    const finding = reproduced(SESSION, `I sent ${INJECTION} as the username.`, "alice failed.");
+
+    it("shows a script whose replay passed, and the negative control, in place of the requests", () => {
+      const out = prompt(finding, { liveScript: { source: SCRIPT, passed: true } });
+      expect(out).toContain(SCRIPT);
+      expect(out).toContain("Its replay passed");
+      expect(out).toContain("alice failed.");
+      expect(out).not.toContain("http://app.test/login");
+    });
+
+    it("says so when the replay of the script did not pass", () => {
+      const out = prompt(finding, { liveScript: { source: SCRIPT, passed: false } });
+      expect(out).toContain(SCRIPT);
+      expect(out).toContain("did not pass");
+      expect(out).not.toContain("Its replay passed");
+    });
+
+    it("cuts a long script and says that it did", () => {
+      const out = prompt(finding, { liveScript: { source: "x".repeat(20_000), passed: true } });
+      expect(out).not.toContain("x".repeat(7000));
+      expect(out).toContain("script cut");
+    });
+
+    it("tells the model not to repeat a credential from the script", () => {
+      const out = prompt(finding, { liveScript: { source: SCRIPT, passed: true } });
+      expect(out).toContain("Never repeat a credential");
+    });
+  });
+
+  describe("without a script", () => {
+    it("shows only the requests the agent refers to: the attack and the control", () => {
+      const out = prompt(
+        reproduced(
+          SESSION,
+          `I sent ${INJECTION} as the username and was signed in.`,
+          "A login as alice with wrong-password returned 401.",
+        ),
+      );
+      expect(out).toContain(`POST http://app.test/login → 302, payload \`username=${INJECTION}`);
+      expect(out).toContain("POST http://app.test/login → 401");
+      expect(out).not.toContain("GET http://app.test/ →");
+      expect(out).not.toContain("app.css");
+    });
+
+    it("finds an attack that is carried in the URL, through its decoded value", () => {
+      const url = "http://app.test/search?q=%3Cscript%3Ealert(1)%3C%2Fscript%3E";
+      const out = prompt(
+        reproduced(
+          [{ method: "GET", url, status: 200 }],
+          "The page ran <script>alert(1)</script> from the q parameter.",
+        ),
+      );
+      expect(out).toContain(`GET ${url} → 200`);
+    });
+
+    it("finds a request whose path the agent names", () => {
+      const out = prompt(
+        reproduced(
+          [
+            { method: "GET", url: "http://app.test/notes/1", status: 200 },
+            { method: "GET", url: "http://app.test/notes/2", status: 200 },
+          ],
+          "As bob, I requested /notes/1 and read the note of alice.",
+        ),
+      );
+      expect(out).toContain("GET http://app.test/notes/1 → 200");
+      expect(out).not.toContain("notes/2");
+    });
+
+    it("does not take a request for a value too short to mean anything", () => {
+      const out = prompt(
+        reproduced(
+          [{ method: "GET", url: "http://app.test/item?id=1", status: 200 }],
+          "Step 1 loaded the page.",
+        ),
+      );
+      expect(out).not.toContain("item?id=1");
+    });
+
+    it("lists a repeated request once", () => {
+      const again = { method: "GET", url: "http://app.test/notes/1", status: 200 };
+      const out = prompt(reproduced([again, again, again], "I requested /notes/1."));
+      expect(out.match(/GET http:\/\/app\.test\/notes\/1 → 200/g)).toHaveLength(1);
+    });
+
+    it("has no request list when the agent refers to none of them", () => {
+      const out = prompt(reproduced(SESSION, "The exploit worked."));
+      expect(out).not.toContain("Requests");
+      expect(out).toContain("The exploit worked.");
+    });
+  });
+});
+
+describe("buildFixPrompt with read tools", () => {
+  const withTools = buildFixPrompt({ finding: makeFinding(), fileContent: "x", root: "/repo" });
+  const single = buildFixPrompt({ finding: makeFinding(), fileContent: "x" });
+
+  it("tells the model to read what the fix depends on before it writes", () => {
+    expect(withTools).toContain("Read, Glob and Grep");
+    expect(withTools).toContain("have not seen in this repository");
+  });
+
+  it("lets a block edit another file, named on the line above the block", () => {
+    expect(withTools).toContain("path of its file");
+    expect(withTools).not.toContain("You cannot see that file");
+  });
+
+  it("keeps the fix to the one file shown when there are no tools", () => {
+    expect(single).toContain("You cannot see that file");
+    expect(single).not.toContain("Read, Glob and Grep");
+  });
+});
+
 describe("VercelAgentDetector.suggestFix", () => {
   it("sends the fix prompt and returns the model's text", async () => {
     const { model, prompts } = mockModelAnswering("Bind the parameter.");
@@ -211,6 +337,72 @@ describe("VercelAgentDetector.suggestFix", () => {
     expect(fix).toBe("Bind the parameter.");
     expect(prompts).toHaveLength(1);
     expect(prompts[0]).toContain("Concatenated SQL in login handler");
+  });
+
+  /** A model that records what each call was given. */
+  function recordingModel(text: string) {
+    const calls: { tools: string[]; maxTokens?: number }[] = [];
+    const model = new MockLanguageModelV1({
+      doGenerate: async (options) => {
+        const mode = options.mode as { tools?: { name: string }[] };
+        calls.push({
+          tools: (mode.tools ?? []).map((t) => t.name),
+          maxTokens: options.maxTokens,
+        });
+        return {
+          rawCall: { rawPrompt: null, rawSettings: {} },
+          finishReason: "stop",
+          usage: { promptTokens: 10, completionTokens: 10 },
+          text,
+        };
+      },
+    });
+    return { model, calls };
+  }
+
+  it("gives the model the read tools when it has a repository root", async () => {
+    const { model, calls } = recordingModel("Bind the parameter.");
+    const fix = await new VercelAgentDetector("openai", model).suggestFix({
+      finding: makeFinding(),
+      fileContent: "x",
+      root: process.cwd(),
+    });
+    expect(fix).toBe("Bind the parameter.");
+    expect(calls[0].tools.sort()).toEqual(["Glob", "Grep", "Read"]);
+  });
+
+  it("gives no tools without a repository root", async () => {
+    const { model, calls } = recordingModel("Bind the parameter.");
+    await new VercelAgentDetector("openai", model).suggestFix({
+      finding: makeFinding(),
+      fileContent: "x",
+    });
+    expect(calls[0].tools).toEqual([]);
+  });
+
+  it.each([
+    ["with tools", process.cwd()],
+    ["without tools", undefined],
+  ])("limits the output of a call %s, so a search for a fix cannot run to the model's cap", async (_how, root) => {
+    const { model, calls } = recordingModel("Bind the parameter.");
+    await new VercelAgentDetector("openai", model).suggestFix({
+      finding: makeFinding(),
+      fileContent: "x",
+      root,
+    });
+    expect(calls[0].maxTokens).toBeGreaterThan(0);
+    expect(calls[0].maxTokens).toBeLessThanOrEqual(32_000);
+  });
+
+  it("fails when the tool session ends with no answer", async () => {
+    const { model } = recordingModel("");
+    await expect(
+      new VercelAgentDetector("openai", model).suggestFix({
+        finding: makeFinding(),
+        fileContent: "x",
+        root: process.cwd(),
+      }),
+    ).rejects.toThrow(/no fix/);
   });
 
   it("rejects an answer the output limit cut off", async () => {

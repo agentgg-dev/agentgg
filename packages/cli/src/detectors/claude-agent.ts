@@ -28,7 +28,7 @@ import {
   type SuggestExcludesArgs,
   SuggestExcludesResult,
 } from "../detect.js";
-import { buildFixPrompt, type FixRetry, LlmFix } from "../fixer.js";
+import { buildFixPrompt, type FixRetry, type LiveScript, LlmFix } from "../fixer.js";
 import { logError, logWarn } from "../log.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import type { CallUsage, UsageMeter } from "../usage-meter.js";
@@ -434,13 +434,20 @@ export class ClaudeAgentDetector implements Detector {
     finding: Finding;
     fileContent: string;
     recon?: ReconReport;
+    liveScript?: LiveScript;
+    root?: string;
+    // Accepted for interface parity, as in validateFinding: the SDK's built-in
+    // Read/Glob/Grep don't take agentgg's exclude / size filters.
+    excludePatterns?: string[];
+    maxFileSizeKb?: number;
     retry?: FixRetry;
     signal?: AbortSignal;
   }): Promise<string> {
     const result = await this.runStructured({
       prompt: buildFixPrompt(args),
-      tools: [],
+      tools: args.root ? ["Read", "Glob", "Grep"] : [],
       maxTurns: this.validateMaxTurns,
+      cwd: args.root,
       schema: LlmFix,
       signal: args.signal,
     });

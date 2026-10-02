@@ -2169,6 +2169,10 @@ export async function runScan(
         concurrency,
         verbose: opts.verbose,
         recon,
+        // The fix's read tools honor the same walk excludes + size cap as
+        // detection and validation.
+        excludePatterns: walkExcludes,
+        maxFileSizeKb,
         signal: scanAbortController.signal,
       });
     }

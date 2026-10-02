@@ -50,7 +50,7 @@ import {
   type UnverifiedExcerpt,
 } from "../detect.js";
 import { ExpectedDetectorError, isInFlightCreditError } from "../diagnostics.js";
-import { buildFixPrompt, type FixRetry } from "../fixer.js";
+import { buildFixPrompt, type FixRetry, type LiveScript, LlmFix } from "../fixer.js";
 import { logError, logInfo, logWarn } from "../log.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import type { CallUsage, UsageMeter } from "../usage-meter.js";
@@ -407,7 +407,7 @@ const TOOL_OUTPUT_BUDGET_BYTES = 400_000;
 
 /** Which pass owns this tool loop. Selects the artifact the model is told to
  *  emit when the budget runs out, and when a call repeats. See ARTIFACT. */
-export type ToolLoopPhase = "detect" | "validate" | "recon" | "create-agent" | "reproduce";
+export type ToolLoopPhase = "detect" | "validate" | "recon" | "create-agent" | "reproduce" | "fix";
 
 /**
  * What each phase must output, worded to match that phase's own `## Output
@@ -424,7 +424,24 @@ const ARTIFACT: Record<ToolLoopPhase, string> = {
   recon: "brief JSON",
   "create-agent": "agent spec JSON",
   reproduce: "reproduction result JSON",
+  fix: "fix (the explanation and the SEARCH/REPLACE blocks)",
 };
+
+/**
+ * Output cap for one generation of the fix phase. A fix is short; a model
+ * that cannot find one reasons until the provider's own cap instead, which
+ * costs several times a normal call and still ends with nothing.
+ */
+const FIX_MAX_OUTPUT_TOKENS = 24_000;
+
+/** `answerWithoutTools` returns the schema object as JSON, or free text. */
+function fixFromLastAnswer(last: string): string {
+  try {
+    return LlmFix.parse(JSON.parse(last)).fix;
+  } catch {
+    return last;
+  }
+}
 
 /** Env suffix per phase for the budget override below. */
 const BUDGET_ENV_SUFFIX: Record<ToolLoopPhase, string> = {
@@ -433,6 +450,7 @@ const BUDGET_ENV_SUFFIX: Record<ToolLoopPhase, string> = {
   recon: "RECON",
   "create-agent": "CREATE_AGENT",
   reproduce: "REPRODUCE",
+  fix: "FIX",
 };
 
 /**
@@ -1493,25 +1511,72 @@ export class VercelAgentDetector implements Detector {
     finding: Finding;
     fileContent: string;
     recon?: ReconReport;
+    liveScript?: LiveScript;
+    root?: string;
+    excludePatterns?: string[];
+    maxFileSizeKb?: number;
     retry?: FixRetry;
     signal?: AbortSignal;
   }): Promise<string> {
+    const label = `fix:${args.finding.id}`;
+    const prompt = buildFixPrompt(args);
+    const { root } = args;
     try {
-      const { text, finishReason } = await this.metered(
+      // Same tool loop as the validator when there is a repository to read: a
+      // fix leans on code outside the finding's file (a helper's signature, a
+      // template engine's syntax), and written blind it invents them.
+      const stop = hardStop(label, this.validateMaxTurns + 1);
+      const gen = await this.metered(
         () =>
           generateText({
             model: this.model,
-            prompt: buildFixPrompt(args),
+            prompt,
+            maxTokens: FIX_MAX_OUTPUT_TOKENS,
+            ...(root
+              ? {
+                  tools: buildTools({
+                    cwd: resolve(root),
+                    maxFileSizeKb: args.maxFileSizeKb,
+                    verbose: this.verbose,
+                    exclude: args.excludePatterns ?? [],
+                    label,
+                    phase: "fix",
+                    onStall: stop.onStall,
+                  }),
+                  maxSteps: this.validateMaxTurns + 1,
+                  experimental_prepareStep: stop.prepareStep,
+                  experimental_repairToolCall: this.toolCallRepair(label),
+                }
+              : {}),
             providerOptions: this.providerOptionsArg(),
             abortSignal: args.signal,
           }),
-        { label: `fix:${args.finding.id}`, signal: args.signal },
+        { label, signal: args.signal },
       );
       // Half a fix reads like a whole one in the report.
-      if (finishReason === "length") {
+      if (gen.finishReason === "length") {
         throw new ExpectedDetectorError("the fix was cut off at the model's output limit");
       }
-      return text;
+      if (!root) return gen.text;
+      warnIfTurnCapped(label, gen, this.validateMaxTurns);
+      if (gen.text.trim()) return gen.text;
+      // The loop ended on a tool call. Same last chance the validator gets.
+      const last = await this.answerWithoutTools(
+        label,
+        prompt,
+        gen,
+        "fix",
+        LlmFix,
+        (o) => `${o.fix.length} chars`,
+        args.signal,
+      );
+      const answer = fixFromLastAnswer(last);
+      if (!answer.trim()) {
+        throw new ExpectedDetectorError(
+          "the model wrote no fix: its tool session ended unanswered",
+        );
+      }
+      return answer;
     } catch (err) {
       debugLog("VercelAgentDetector.suggestFix", err);
       throw err;
