@@ -37,7 +37,9 @@ describe("liveState", () => {
   it("names a duplicate as the reason, not the vulnerability class", () => {
     const dup = finding({ dedup: { duplicateOf: "abc999", reasoning: "same" } } as never);
     expect(liveState(dup).kind).toBe("duplicate");
-    expect(liveState(dup).detail).toBe("This repeats finding abc999. Only that one is tested.");
+    expect(liveState(dup).detail).toBe(
+      "This finding duplicates finding abc999. Live tests run only on the original.",
+    );
   });
 
   // The primary may be untested too, so the duplicate must not promise proof.
@@ -57,7 +59,9 @@ describe("liveState", () => {
   it("credits the reviewer when out-of-scope came from its own judgement", () => {
     const f = finding({ validation: validation("out-of-scope") });
     expect(liveState(f).kind).toBe("out-of-scope");
-    expect(liveState(f).detail).toBe("The review judged this out of scope, so nothing tested it.");
+    expect(liveState(f).detail).toBe(
+      "The review marked this finding out of scope, so it was not tested live.",
+    );
     expect(liveState(f).detail).not.toMatch(/scope file/i);
     expect(verdictStory(f)).not.toMatch(/scope file/i);
   });
@@ -104,33 +108,38 @@ describe("liveState", () => {
 describe("verdictStory", () => {
   it("explains the contradiction a reader sees on an uncertain-plus-reproduced finding", () => {
     const f = finding({ validation: validation("uncertain"), live: live() });
-    expect(verdictStory(f)).toBe("Static review said uncertain. The live test reproduced it.");
+    expect(verdictStory(f)).toBe(
+      "Static review marked this finding as uncertain. The live test reproduced the issue.",
+    );
   });
 
   it("says the static verdict stands when the run itself broke", () => {
     const f = finding({ validation: validation("confirmed"), live: live({ result: "error" }) });
-    expect(verdictStory(f)).toContain("The static verdict stands.");
-    expect(verdictStory(f)).toContain("says nothing about the code");
+    expect(verdictStory(f)).toBe(
+      "Static review confirmed this finding. The live test did not complete because of an error. This does not indicate whether the issue exists. The static review verdict still applies.",
+    );
   });
 
   it("flags the disagreement when static rejected what the live test reproduced", () => {
     const f = finding({ validation: validation("false-positive"), live: live() });
-    expect(verdictStory(f)).toContain("Read both.");
+    expect(verdictStory(f)).toContain("Review both results.");
   });
 
-  it("calls a confirmed finding unsettled when the live test could not repeat it", () => {
+  it("calls a confirmed finding unresolved when the live test could not repeat it", () => {
     const f = finding({ validation: validation("confirmed"), live: live({ result: "refuted" }) });
-    expect(verdictStory(f)).toContain("unsettled");
+    expect(verdictStory(f)).toContain("unresolved");
   });
 
   it("stops at out-of-scope without blaming a scope file that does not exist", () => {
     const f = finding({ validation: validation("out-of-scope"), live: live() });
-    expect(verdictStory(f)).toBe("The review judged this out of scope and stopped there.");
+    expect(verdictStory(f)).toBe(
+      "The review marked this finding out of scope, so it was not reviewed further.",
+    );
   });
 
   it("covers a live-only finding with no static verdict", () => {
     expect(verdictStory(finding({ live: live() }))).toBe(
-      "Static review reached no verdict. The live test reproduced it.",
+      "Static review did not reach a verdict. The live test reproduced the issue.",
     );
   });
 

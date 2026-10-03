@@ -4,7 +4,7 @@
 // needs. Kept free of node imports and reachable as `@agentgg/core/live`, so
 // the viewer and the reporters render the same story from the same rules.
 
-import type { Finding } from "./types.js";
+import type { Finding, ValidationVerdict } from "./types.js";
 import { effectiveVerdict } from "./verdict.js";
 
 export const TIMEOUT_PREFIX = "reproduction timed out after";
@@ -34,57 +34,67 @@ export interface LiveState {
 const STATES: Record<LiveStateKind, Omit<LiveState, "kind">> = {
   reproduced: {
     label: "reproduced",
-    detail: "The live test drove this against a running target and captured the proof.",
+    detail: "The live test reproduced this issue against the running target and captured evidence.",
     tellsAboutCode: true,
   },
   refuted: {
     label: "refuted",
-    detail: "The live test tried this against a running target and could not make it happen.",
+    detail: "The live test could not reproduce this issue against the running target.",
     tellsAboutCode: true,
   },
   "timed-out": {
     label: "timed out",
-    detail: "The live test ran out of time before it reached an answer. Nothing was ruled out.",
+    detail:
+      "The live test reached its time limit before it produced a result. The issue has not been ruled out.",
     tellsAboutCode: false,
   },
   inconclusive: {
     label: "inconclusive",
-    detail: "The live test finished without proof either way. Nothing was ruled out.",
+    detail: "The live test finished without conclusive evidence. The issue has not been ruled out.",
     tellsAboutCode: false,
   },
   error: {
     label: "run failed",
-    detail: "The live test broke before it reached an answer. This says nothing about the code.",
+    detail:
+      "The live test did not complete because of an error. This does not indicate whether the issue exists.",
     tellsAboutCode: false,
   },
   "not-reproducible": {
     label: "nothing to reproduce",
     detail:
-      "This class reports a missing control, not an effect an attacker can cause, so a browser has nothing to prove here.",
+      "This type of finding describes a missing security control, not an exploitable behavior, so a live test cannot demonstrate it.",
     tellsAboutCode: false,
   },
   refused: {
     label: "refused",
-    detail: "The live test declined to run this one. This says nothing about the code.",
+    detail:
+      "The testing agent declined to run this test. This does not indicate whether the issue exists.",
     tellsAboutCode: false,
   },
   // Both of these are replaced per finding by `detailFor`. The text here is
   // the fallback for a record that is missing the field it names.
   duplicate: {
     label: "not tested live",
-    detail: "This finding repeats another one. Only that one is tested.",
+    detail: "This finding duplicates another finding. Live tests run only on the original.",
     tellsAboutCode: false,
   },
   "out-of-scope": {
     label: "not tested live",
-    detail: "The review judged this out of scope, so nothing tested it.",
+    detail: "The review marked this finding out of scope, so it was not tested live.",
     tellsAboutCode: false,
   },
   "not-run": {
     label: "not tested live",
-    detail: "No live test ran. Add a target URL to test this one against a running app.",
+    detail: "This finding was not tested live. Add a target URL to test it against a running app.",
     tellsAboutCode: false,
   },
+};
+
+const STATIC_VERDICT_SENTENCE: Record<ValidationVerdict, string> = {
+  confirmed: "Static review confirmed this finding.",
+  "false-positive": "Static review marked this finding as a false positive.",
+  uncertain: "Static review marked this finding as uncertain.",
+  "out-of-scope": "Static review marked this finding out of scope.",
 };
 
 /** The single live state of a finding, with the empty and failure cases kept
@@ -103,10 +113,10 @@ export function liveState(f: Finding): LiveState {
 function detailFor(f: Finding, kind: LiveStateKind): string {
   if (kind === "duplicate" && f.dedup) {
     // Never claim the primary holds proof. It may not have been tested either.
-    return `This repeats finding ${f.dedup.duplicateOf}. Only that one is tested.`;
+    return `This finding duplicates finding ${f.dedup.duplicateOf}. Live tests run only on the original.`;
   }
   if (kind === "out-of-scope" && f.validation?.scopeRef) {
-    return `Your scope file excludes this (${f.validation.scopeRef}), so nothing tested it.`;
+    return `Your scope file excludes this finding (${f.validation.scopeRef}), so it was not tested live.`;
   }
   return STATES[kind].detail;
 }
@@ -151,23 +161,24 @@ export function verdictStory(f: Finding): string | undefined {
 
   if (staticVerdict === "out-of-scope") {
     return f.validation?.scopeRef
-      ? `Your scope file excludes this (${f.validation.scopeRef}). The review stopped there.`
-      : "The review judged this out of scope and stopped there.";
+      ? `Your scope file excludes this finding (${f.validation.scopeRef}), so it was not reviewed further.`
+      : "The review marked this finding out of scope, so it was not reviewed further.";
   }
   if (!staticVerdict) {
     return state.kind === "reproduced"
-      ? "Static review reached no verdict. The live test reproduced it."
-      : "Static review reached no verdict. The live test could not settle it.";
+      ? "Static review did not reach a verdict. The live test reproduced the issue."
+      : "Static review did not reach a verdict, and the live test was not conclusive.";
   }
+  const said = STATIC_VERDICT_SENTENCE[staticVerdict];
   if (!state.tellsAboutCode) {
-    return `Static review said ${staticVerdict}. ${state.detail} The static verdict stands.`;
+    return `${said} ${state.detail} The static review verdict still applies.`;
   }
   if (state.kind === "reproduced") {
     return staticVerdict === "false-positive"
-      ? "Static review called this a false positive, but the live test reproduced it. Read both."
-      : `Static review said ${staticVerdict}. The live test reproduced it.`;
+      ? "Static review marked this finding as a false positive, but the live test reproduced it. Review both results."
+      : `${said} The live test reproduced the issue.`;
   }
   return staticVerdict === "confirmed"
-    ? "Static review confirmed it, but the live test could not. Treat it as unsettled."
-    : `Static review said ${staticVerdict}. The live test could not reproduce it.`;
+    ? "Static review confirmed this finding, but the live test could not reproduce it. Treat it as unresolved."
+    : `${said} The live test could not reproduce the issue.`;
 }
