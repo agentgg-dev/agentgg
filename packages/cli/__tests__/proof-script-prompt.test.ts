@@ -98,4 +98,28 @@ describe("buildProofScriptPrompt", () => {
       /Use `page\.request` only for what a page cannot send/,
     );
   });
+
+  it("tests only this finding, whatever the notes about the target describe", () => {
+    const p = buildProofScriptPrompt(finding, "http://t", "Sign in at /login as alice.");
+    expect(p).toContain("Sign in at /login as alice.");
+    expect(p).toContain("Prove only the finding below, through the input it names.");
+  });
+
+  it("omits the notes section when the target came with no notes", () => {
+    expect(buildProofScriptPrompt(finding, "http://t")).not.toContain(
+      "Notes about the application",
+    );
+  });
+
+  it("does not count a reflection the browser never runs as cross-site scripting", () => {
+    const out = buildProofScriptPrompt(finding, "http://t");
+    expect(out).not.toMatch(/either one alone counts/i);
+    expect(out).toContain("Reflection alone is not the effect");
+  });
+
+  it("forbids the test to draw its own proof on the page", () => {
+    expect(buildProofScriptPrompt(finding, "http://t")).toContain(
+      "Do not add your own banner, overlay or label to the page.",
+    );
+  });
 });

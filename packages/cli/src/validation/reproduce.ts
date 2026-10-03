@@ -130,11 +130,11 @@ async function tryScriptFirst(a: {
     res: {
       result: "reproduced",
       reasoning:
-        "Drove the PoC against the running target and observed the vulnerable effect. The same request with the attacker's input removed did not produce it.",
+        "A generated test drove the attack against the running target, and its check of the vulnerable effect passed. The same steps with the attacker's input removed did not produce it.",
       counterevidence:
-        "The exploit was built from the finding's own description, so it demonstrates what the finding claims rather than an effect a reviewer verified independently.",
+        "This result rests on one unattended test run that no agent watched, so it is only as strong as what the test checked. Read the test script to see its assertions.",
       negativeControl:
-        "Repeated the request with the attacker's input removed; the vulnerable effect did not occur.",
+        "Ran the same steps with the attacker's input removed; the vulnerable effect did not occur.",
     },
     evidence,
   };

@@ -767,6 +767,18 @@ project doesn't use), answer false. When genuinely unsure, answer true
 export const REPRODUCE_CUT_SHORT =
   "The live reproduction was cut short: the model stopped before it reported a verdict, so this finding was not tested against the running application.";
 
+/** The target owner's notes say how to reach and use the application. A bug
+ *  they mention is not the finding under test. */
+function targetNotesBlock(context?: string): string {
+  return context
+    ? `\n## Notes about the application\n\n${context}\n\nUse these notes to reach and use the application: where things are, which\naccounts to use. They do not change what you test. Prove only the finding below, through the input it names.\nIf the notes describe a different issue, leave it alone.\n`
+    : "";
+}
+
+/** Text a test adds to the page reads as the application's own output. */
+const NO_OVERLAY =
+  "Do not add your own banner, overlay or label to the page. The sandbox banner already shows the URL and any script execution it captured, and text you add can be taken for the application's output.";
+
 /**
  * Build the reproduce-finding prompt. The model drives a real browser
  * (via the Playwright MCP tools attached to this session — no Read/Glob/
@@ -787,7 +799,7 @@ export function buildReproducePrompt(
     ? `lines ${finding.lineRange[0]}–${finding.lineRange[1]}`
     : "unspecified lines";
 
-  const contextBlock = context ? `\n## Additional context\n\n${context}\n` : "";
+  const contextBlock = targetNotesBlock(context);
 
   const proofRulesBlock = `\n## What counts as proof\n\n${proofRules(agentRule)}\n`;
 
@@ -833,7 +845,7 @@ ${proofRulesBlock}${staticReviewBlock}
    show: call \`alert(document.domain)\`, or set
    \`window.__agentggXss = document.domain\`. The sandbox captures either and
    draws it on the recording. A payload that only changes the title leaves no
-   visible proof.
+   visible proof. ${NO_OVERLAY}
 4. Run the control the proof rules ask for: the same steps without your
    input, or without the session. Report what happened in
    \`negativeControl\`. A 'reproduced' result without it is downgraded.
@@ -876,7 +888,7 @@ export function buildProofScriptPrompt(
   agentRule?: string,
   staticReview?: { verdict: string; reasoning: string },
 ): string {
-  const contextBlock = context ? `\n## Additional context\n\n${context}\n` : "";
+  const contextBlock = targetNotesBlock(context);
   const staticBlock = staticReview
     ? `\n## Source review of this finding\n\nA reviewer with the source code reached the verdict \`${staticReview.verdict}\`:\n\n${staticReview.reasoning}\n\nWrite the assertions so that a pass answers this review.\n`
     : "";
@@ -952,7 +964,11 @@ The attacker input may not be a query value. Send it where the finding says:
 
 ## How to prove it
 
-Assert BOTH of these where you can; either one alone counts as the effect:
+For cross-site scripting the effect is that the injected code runs (2 below).
+Reflection alone is not the effect: a response the browser does not render as
+HTML, for example XML or JSON, carries the payload as text that never runs, and
+a broken document or a parse error is not script execution either. Assert
+execution, and add the reflection check where you can:
 
 1. Reflection in the raw response. Fetch the exact attack request with
    \`page.request.get(...)\` (or \`.post\`), read \`await res.text()\`, and assert the
@@ -992,6 +1008,8 @@ runs, an "XSS fired" line:
 The banner also captures \`alert()\`; you can assert
 \`await page.evaluate(() => (window).__agentggXss?.length > 0)\` as the proof of
 execution, instead of the local override above.
+
+${NO_OVERLAY}
 
 A generated test finishes in well under a second, so the video is unwatchable
 without pauses. After the vulnerable effect appears, hold on it before the test

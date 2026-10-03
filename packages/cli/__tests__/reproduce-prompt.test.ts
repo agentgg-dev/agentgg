@@ -71,4 +71,16 @@ describe("buildReproducePrompt", () => {
   it("offers the sentinel as a dialog-free alternative the banner also captures", () => {
     expect(buildReproducePrompt(finding, "http://t")).toContain("window.__agentggXss");
   });
+
+  it("tests only this finding, whatever the notes about the target describe", () => {
+    const out = buildReproducePrompt(finding, "http://t", "Sign in at /login as alice.");
+    expect(out).toContain("Sign in at /login as alice.");
+    expect(out).toContain("Prove only the finding below, through the input it names.");
+  });
+
+  it("forbids the agent to draw its own proof on the page", () => {
+    expect(buildReproducePrompt(finding, "http://t")).toContain(
+      "Do not add your own banner, overlay or label to the page.",
+    );
+  });
 });
