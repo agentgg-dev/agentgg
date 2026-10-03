@@ -3,6 +3,7 @@
 // declares `exploit` (the effect) and `control` (the effect absent without the
 // attacker's input); a claim needs both.
 
+import { REQUEST_PANEL_FILE, REQUEST_PANEL_SOURCE, withRequestPanel } from "./request-panel.js";
 import type { Sandbox } from "./sandbox.js";
 
 /** Titles the generated spec must use. The prompt names them, and the outcome
@@ -69,6 +70,8 @@ export interface ProofScriptRun {
  * Run a generated proof spec in the sandbox with tracing on, writing artifacts
  * where `copyEvidence` already looks. Tracing is what makes the captured
  * request available, and a claim with no captured request is not a proof.
+ * The spec runs through the request panel; the caller keeps the spec as the
+ * model wrote it.
  */
 export async function runProofScript(
   sandbox: Sandbox,
@@ -76,7 +79,8 @@ export async function runProofScript(
   timeoutMs = 120_000,
 ): Promise<ProofScriptRun> {
   const path = "/srv/proof.spec.ts";
-  await sandbox.writeFile(path, script);
+  await sandbox.writeFile(`/srv/${REQUEST_PANEL_FILE}`, REQUEST_PANEL_SOURCE);
+  await sandbox.writeFile(path, withRequestPanel(script));
   const { stdout, stderr } = await sandbox.exec(
     [
       "npx",

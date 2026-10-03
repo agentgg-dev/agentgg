@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { parseProofReport } from "../src/validation/proof-script";
+import { describe, expect, it, vi } from "vitest";
+import { parseProofReport, runProofScript } from "../src/validation/proof-script";
+import { REQUEST_PANEL_SOURCE } from "../src/validation/request-panel";
 
 const report = (specs: Array<{ title: string; ok: boolean }>) =>
   JSON.stringify({
@@ -51,5 +52,23 @@ describe("parseProofReport", () => {
       exploit: "missing",
       control: "missing",
     });
+  });
+});
+
+describe("runProofScript", () => {
+  it("runs the spec through the request panel, so its page.request calls show on the recording", async () => {
+    const sandbox = {
+      writeFile: vi.fn(async () => {}),
+      exec: vi.fn(async () => ({ code: 0, stdout: "", stderr: "" })),
+    } as never as Parameters<typeof runProofScript>[0];
+    await runProofScript(sandbox, 'import { test } from "@playwright/test";\n');
+    expect(sandbox.writeFile).toHaveBeenCalledWith(
+      "/srv/agentgg-request-panel.ts",
+      REQUEST_PANEL_SOURCE,
+    );
+    expect(sandbox.writeFile).toHaveBeenCalledWith(
+      "/srv/proof.spec.ts",
+      'import { test } from "./agentgg-request-panel";\n',
+    );
   });
 });
