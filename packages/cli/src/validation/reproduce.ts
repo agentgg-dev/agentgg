@@ -273,7 +273,7 @@ export async function runReproducePhase(args: {
     return;
   }
 
-  if (!(await probe(targetUrl))) {
+  if (!(await probeTarget(targetUrl))) {
     console.log(`  live validation: target ${targetUrl} did not respond, skipping`);
     return;
   }
@@ -530,19 +530,38 @@ export function toContainerBaseUrl(targetUrl: string): string {
   }
 }
 
-/** Fetch the target once with a short timeout. Any HTTP response counts as
- *  answering; only a network error or timeout means "did not respond". */
-async function probe(url: string, timeoutMs = 5_000): Promise<boolean> {
-  const ac = new AbortController();
-  const t = setTimeout(() => ac.abort(), timeoutMs);
-  try {
-    await fetch(url, { signal: ac.signal });
-    return true;
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(t);
+const PROBE_TIMEOUT_MS = 10_000;
+const PROBE_WAIT_MS = 60_000;
+const PROBE_PAUSE_MS = 5_000;
+
+/** Any HTTP response counts as answering; only network errors and timeouts
+ *  for the whole wait mean "did not respond". A cloud NAT can drop new
+ *  connections for the first minute of a container, so it asks again. */
+export async function probeTarget(url: string): Promise<boolean> {
+  const deadline = Date.now() + PROBE_WAIT_MS;
+  for (;;) {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), PROBE_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, { signal: ac.signal });
+      await res.body?.cancel().catch(() => undefined);
+      return true;
+    } catch (err) {
+      const why = ac.signal.aborted ? `no answer in ${PROBE_TIMEOUT_MS / 1000} s` : errorCode(err);
+      console.log(`  live validation: target probe failed (${why})`);
+    } finally {
+      clearTimeout(t);
+    }
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, PROBE_PAUSE_MS));
   }
+}
+
+/** The code only: a message can quote the URL, and with it a query string. */
+function errorCode(err: unknown): string {
+  const cause = (err as { cause?: { code?: unknown } } | null)?.cause;
+  if (typeof cause?.code === "string") return cause.code;
+  return err instanceof Error ? err.name : "unknown error";
 }
 
 /** How long to wait for Playwright to flush the session video. It writes the
