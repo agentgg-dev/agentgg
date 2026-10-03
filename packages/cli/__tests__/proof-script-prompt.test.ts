@@ -87,6 +87,12 @@ describe("buildProofScriptPrompt", () => {
     expect(out).toContain("page.fill(");
   });
 
+  it("forbids the test to set session state itself, since that state proves nothing", () => {
+    const out = buildProofScriptPrompt(finding, "http://t");
+    expect(out).toContain("Do not set a session cookie or other state yourself");
+    expect(out).toContain("context.addCookies");
+  });
+
   it("keeps page.request for what a page cannot send and for the raw-response check", () => {
     expect(buildProofScriptPrompt(finding, "http://t")).toMatch(
       /Use `page\.request` only for what a page cannot send/,

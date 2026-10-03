@@ -1033,6 +1033,10 @@ with one records a blank page until its first navigation.
   would also produce.
 - Assert on what the browser ended up with, not on an intermediate state the
   navigation already consumed.
+- Do not set a session cookie or other state yourself (for example with
+  \`context.addCookies\` or \`localStorage\`). The state the result shows must
+  come from the application's answer to the attack; a state the test set
+  itself proves nothing.
 
 ## Output
 
