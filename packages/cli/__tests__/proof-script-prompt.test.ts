@@ -74,4 +74,22 @@ describe("buildProofScriptPrompt", () => {
     expect(out).toContain("slowMo");
     expect(out).toContain("waitForTimeout");
   });
+
+  it("opens a page before any page.request call, so the recording does not start blank", () => {
+    const out = buildProofScriptPrompt(finding, "http://t");
+    expect(out).toMatch(/Open a page with `page\.goto\(\.\.\.\)` before any `page\.request` call/);
+    expect(out).toContain("after the init scripts above");
+  });
+
+  it("sends an input a page can send through that page, so the recording shows it go in", () => {
+    const out = buildProofScriptPrompt(finding, "http://t");
+    expect(out).toContain("send the attack through that page");
+    expect(out).toContain("page.fill(");
+  });
+
+  it("keeps page.request for what a page cannot send and for the raw-response check", () => {
+    expect(buildProofScriptPrompt(finding, "http://t")).toMatch(
+      /Use `page\.request` only for what a page cannot send/,
+    );
+  });
 });

@@ -944,6 +944,8 @@ raw response (see below) to see how it lands, then choose the payload.
 The attacker input may not be a query value. Send it where the finding says:
 
 - Query or path: build the URL from the base URL above.
+- A form field: open the page that shows the form and submit it there (see
+  "Show the attack on the recording" below).
 - A request header (for example \`X-Forwarded-Host\`): a browser navigation
   CANNOT set request headers. Use \`page.request.get(url, { headers: { ... } })\`,
   or a request body, exactly as the PoC describes.
@@ -997,13 +999,30 @@ ends so the recording and the end-screenshot show the proof:
 
     await page.waitForTimeout(2000);
 
-If the effect only becomes visible after a reload (for example a login bypass
-that sets a session cookie through \`fetch\`), navigate to the affected page again
-before that pause, so the screenshot and video show the result and not the
+If the effect only becomes visible after a reload (for example a session cookie
+that a \`page.request\` call set), navigate to the affected page again before
+that pause, so the screenshot and video show the result and not the
 pre-exploit page:
 
     await page.goto(BASE_URL);   // now the page renders the signed-in state
     await page.waitForTimeout(2000);
+
+## Show the attack on the recording
+
+The recording must show the attack go in and its effect. A request sent with
+\`page.request\` runs outside the page and draws nothing, so a test that starts
+with one records a blank page until its first navigation.
+
+- Open a page with \`page.goto(...)\` before any \`page.request\` call, right
+  after the init scripts above: the page where a user sends this input, or the
+  base URL when no page does.
+- When a page of the application sends this input (a form, a search box, a
+  link), send the attack through that page. Find each field by the parameter
+  name the PoC uses, for example \`page.fill('[name="q"]', payload)\`, and
+  submit with \`page.press('[name="q"]', "Enter")\`. The control test does the
+  same with its benign value.
+- Use \`page.request\` only for what a page cannot send, such as a request
+  header or a raw API call, and for the raw-response check above.
 
 ## How to write it
 
