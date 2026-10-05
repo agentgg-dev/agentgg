@@ -23,6 +23,7 @@ const ENV_KEYS = [
   "OPENROUTER_IGNORE",
   "OPENROUTER_MAX_TOKENS",
   "OPENROUTER_REASONING_MAX_TOKENS",
+  "OPENROUTER_REASONING_EFFORT",
 ];
 afterEach(() => {
   for (const k of ENV_KEYS) delete process.env[k];
@@ -257,6 +258,59 @@ describe("openrouterModule.buildDetector", () => {
 });
 
 /**
+ * Writing the proof script is mechanical work with no tools to check anything
+ * with, which is where a model with a deep default effort talks itself in
+ * circles until the budget is gone. The phase asks for less than the default.
+ */
+describe("per-phase reasoning effort", () => {
+  const sendProofScript = async () => {
+    const inner = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            id: "gen-test",
+            object: "chat.completion",
+            created: 0,
+            model: "z-ai/glm-5.2",
+            choices: [
+              {
+                index: 0,
+                message: { role: "assistant", content: '{"script":"x"}' },
+                finish_reason: "stop",
+              },
+            ],
+            usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", inner);
+    const detector = openrouterModule.buildDetector(
+      { openrouter: { apiKey: "sk-or-test" } } as never,
+      {} as never,
+    );
+    await detector.generateReproScript?.({
+      finding: { id: "f1", title: "t", summary: "s", poc: "p", impact: "i" } as never,
+      baseUrl: "https://example.test",
+    });
+    return JSON.parse((inner.mock.calls[0][1] as RequestInit).body as string);
+  };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("asks for a low effort when generating a proof script", async () => {
+    const sent = await sendProofScript();
+    expect(sent.reasoning_effort).toBe("low");
+  });
+
+  it("does not add a second effort next to the per-phase one", async () => {
+    expect((await sendProofScript()).reasoning).toBeUndefined();
+  });
+});
+
+/**
  * A streamed completion must not be read here. Cloning and parsing an SSE body
  * drains it to completion before the caller sees the response, which would turn
  * a stream into a blocking call. The engine only uses generateText /
@@ -316,17 +370,40 @@ describe("createRoutingFetch output caps", () => {
     expect((await send({})).max_tokens).toBeGreaterThan(2 * 32_000 - 1);
   });
 
-  // GLM-5.2 ignores reasoning.max_tokens, so shipping one bought nothing here
-  // and would throttle a model that DOES honor it. The total cap already bounds
-  // the runaway. Opt in per run if a specific model needs it.
-  it("sends no reasoning cap by default", async () => {
-    expect((await send({})).reasoning).toBeUndefined();
+  // A model whose default effort is its deepest allots nearly all of
+  // max_tokens to thinking and is then cut mid-answer.
+  it("bounds reasoning with an effort by default", async () => {
+    expect((await send({})).reasoning).toEqual({ effort: "high" });
+  });
+
+  // A token budget and an effort are alternatives, and OpenRouter rejects a
+  // request carrying both.
+  it("sends no reasoning token budget alongside the effort", async () => {
+    expect((await send({})).reasoning).not.toHaveProperty("max_tokens");
+  });
+
+  it("takes the effort from the environment", async () => {
+    process.env.OPENROUTER_REASONING_EFFORT = "low";
+    expect((await send({})).reasoning).toEqual({ effort: "low" });
+  });
+
+  it("ignores an effort that is not a level OpenRouter accepts", async () => {
+    process.env.OPENROUTER_REASONING_EFFORT = "nope";
+    expect((await send({})).reasoning).toEqual({ effort: "high" });
   });
 
   it("leaves a caller's own caps alone", async () => {
     const sent = await send({ max_tokens: 100, reasoning: { effort: "low" } });
     expect(sent.max_tokens).toBe(100);
     expect(sent.reasoning).toEqual({ effort: "low" });
+  });
+
+  // What the AI SDK emits for a per-call effort. Adding `reasoning` next to it
+  // would send two efforts for one call.
+  it("leaves a caller's shorthand effort alone", async () => {
+    const sent = await send({ reasoning_effort: "low" });
+    expect(sent.reasoning).toBeUndefined();
+    expect(sent.reasoning_effort).toBe("low");
   });
 
   it("takes the total cap from the environment", async () => {

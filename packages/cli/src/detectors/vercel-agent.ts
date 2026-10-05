@@ -65,6 +65,10 @@ import {
 import { looksLikeRefusal } from "./refusal.js";
 import { repairJsonText } from "./repair-json.js";
 export type Effort = "low" | "medium" | "high" | "max";
+
+/** Which provider's option shape a call carries. Only the providers whose
+ *  reasoning we steer need one. */
+type ProviderKey = "anthropic" | "openai" | "openrouter" | "ollama";
 export type Thinking = "off" | "adaptive" | "enabled";
 
 /**
@@ -328,12 +332,14 @@ type ProviderOptionsArg = {
     thinking?: { type: "enabled" | "disabled"; budgetTokens?: number };
   };
   openai?: {
-    reasoningEffort?: "low" | "medium" | "high";
+    /** Wider than OpenAI's own levels, because OpenRouter reads this shape too
+     *  and takes a level OpenAI has no name for. */
+    reasoningEffort?: Effort;
   };
 };
 
 export interface VercelAgentDetectorOpts {
-  providerKey?: "anthropic" | "openai" | "ollama";
+  providerKey?: ProviderKey;
   effort?: Effort;
   thinking?: Thinking;
   verbose?: boolean;
@@ -661,7 +667,7 @@ export class VercelAgentDetector implements Detector {
   readonly name: string;
   private readonly model: LanguageModelV1;
   private readonly structuredModel?: LanguageModelV1;
-  private readonly providerKey?: "anthropic" | "openai" | "ollama";
+  private readonly providerKey?: ProviderKey;
   private readonly effort?: Effort;
   private readonly thinking?: Thinking;
   private readonly verbose: boolean;
@@ -1386,7 +1392,10 @@ export class VercelAgentDetector implements Detector {
             args.proofRule,
             staticReview,
           ),
-          providerOptions: this.providerOptionsArg(),
+          // Mechanical codegen with no tools to check anything with. Left to
+          // think freely, a model argues with itself about the test library
+          // until the budget is gone and the script never gets written.
+          providerOptions: this.providerOptionsArg("low"),
           abortSignal: args.signal,
         }),
       { label: `proof-script:${args.finding.id}`, signal: args.signal },
@@ -1869,7 +1878,9 @@ export class VercelAgentDetector implements Detector {
     }
   }
 
-  private providerOptionsArg(): ProviderOptionsArg | undefined {
+  /** `phaseEffort` is what a phase asks for itself, and it wins over the run's
+   *  `--effort`: a phase knows how much thinking its own work is worth. */
+  private providerOptionsArg(phaseEffort?: Effort): ProviderOptionsArg | undefined {
     if (!this.providerKey) return undefined;
 
     if (this.providerKey === "anthropic") {
@@ -1878,10 +1889,18 @@ export class VercelAgentDetector implements Detector {
       return { anthropic: { thinking: { type } } };
     }
 
+    const effort = phaseEffort ?? this.effort;
+
+    // The model comes from createOpenAI, so OpenRouter reads the OpenAI-shaped
+    // option. Its own levels go through unchanged; nothing is left out and the
+    // gateway maps a level the model lacks onto the nearest one it has.
+    if (this.providerKey === "openrouter") {
+      return effort ? { openai: { reasoningEffort: effort } } : undefined;
+    }
+
     if (this.providerKey === "openai") {
-      if (!this.effort) return undefined;
-      const reasoningEffort: "low" | "medium" | "high" =
-        this.effort === "max" ? "high" : this.effort;
+      if (!effort) return undefined;
+      const reasoningEffort: "low" | "medium" | "high" = effort === "max" ? "high" : effort;
       return { openai: { reasoningEffort } };
     }
 
@@ -2823,8 +2842,9 @@ function normalizeSep(p: string): string {
   return p.replace(/\\/g, "/");
 }
 
-function derivedProviderKey(name: string): "anthropic" | "openai" | "ollama" | undefined {
+function derivedProviderKey(name: string): ProviderKey | undefined {
   if (name.startsWith("anthropic")) return "anthropic";
+  if (name.startsWith("openrouter")) return "openrouter";
   if (name.startsWith("openai")) return "openai";
   if (name.startsWith("ollama")) return "ollama";
   return undefined;

@@ -181,13 +181,33 @@ export function createCostMeter(): CostMeter {
  * The cap has to leave room for an ANSWER after a long think, so it sits far
  * above what an answer alone needs. Set it too low and a long think leaves the
  * model nothing to write with, which costs a whole batch.
- *
- * There is deliberately NO default reasoning sub-cap. Some models ignore
- * `reasoning.max_tokens` outright, and a model that DOES honor it would be
- * throttled to a fraction of its thinking for no reason. Reasoning depth is the
- * product here. Set OPENROUTER_REASONING_MAX_TOKENS per run when a model needs it.
  */
 const DEFAULT_MAX_TOKENS = 64_000;
+
+/**
+ * Reasoning depth for every completion, as a share of `max_tokens`: the two
+ * come out of one budget, so an unbounded think leaves nothing to answer with.
+ * A model that defaults to its deepest effort keeps about 5% of the budget for
+ * the answer, which a long answer does not fit in.
+ *
+ * `high` rather than a lower level because depth is the product: it still
+ * allows far more thinking than a healthy call uses, and it quadruples what is
+ * left to answer with. A phase whose work is mechanical asks for less itself.
+ *
+ * Effort, not `reasoning.max_tokens`: OpenRouter honors a token budget on
+ * Anthropic and Gemini models only, and every other model ignores it.
+ */
+const DEFAULT_REASONING_EFFORT = "high";
+
+/** The levels OpenRouter accepts. It maps one the model does not have onto the
+ *  nearest one the model declares. */
+const EFFORT_LEVELS = new Set(["minimal", "low", "medium", "high", "xhigh", "max"]);
+
+/** A level from `env`, or the default when it is absent or junk. */
+function reasoningEffort(raw: string | undefined): string {
+  const level = raw?.trim().toLowerCase();
+  return level && EFFORT_LEVELS.has(level) ? level : DEFAULT_REASONING_EFFORT;
+}
 
 /** A positive integer from `env`, or `fallback` when it is absent or junk. */
 function tokenCap(raw: string | undefined, fallback: number): number {
@@ -224,10 +244,15 @@ export function createRoutingFetch(
         if (body.max_tokens == null) {
           body.max_tokens = tokenCap(process.env.OPENROUTER_MAX_TOKENS, DEFAULT_MAX_TOKENS);
         }
-        // Opt-in only: no default, so nothing throttles the model's thinking.
-        const reasoningCap = tokenCap(process.env.OPENROUTER_REASONING_MAX_TOKENS, 0);
-        if (body.reasoning == null && reasoningCap > 0) {
-          body.reasoning = { max_tokens: reasoningCap };
+        // `reasoning_effort` is what the AI SDK emits for a per-call effort.
+        // Either form from the caller wins, and a request may carry only one:
+        // OpenRouter rejects an effort and a token budget together.
+        if (body.reasoning == null && body.reasoning_effort == null) {
+          const reasoningCap = tokenCap(process.env.OPENROUTER_REASONING_MAX_TOKENS, 0);
+          body.reasoning =
+            reasoningCap > 0
+              ? { max_tokens: reasoningCap }
+              : { effort: reasoningEffort(process.env.OPENROUTER_REASONING_EFFORT) };
         }
         nextInit = { ...init, body: JSON.stringify(body) };
       } catch {
