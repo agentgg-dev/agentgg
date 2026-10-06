@@ -25,6 +25,7 @@ const fakeSandbox: Sandbox = {
 describe("live pass without a result", () => {
   let outDir: string;
   let fetchSpy: ReturnType<typeof vi.spyOn>;
+  let ceiling: () => number | null;
 
   beforeEach(() => {
     outDir = mkdtempSync(join(tmpdir(), "agentgg-live-crash-"));
@@ -52,6 +53,7 @@ describe("live pass without a result", () => {
     }));
     vi.resetModules();
     const { runReproducePhase } = await import("../src/validation/reproduce.js");
+    ({ requestDeadlineCeilingMs: ceiling } = await import("../src/request-deadline.js"));
 
     const findings: Finding[] = Array.from({ length: count }, (_, i) => ({
       id: `xss-${i + 1}`,
@@ -110,6 +112,18 @@ describe("live pass without a result", () => {
     expect(finding.live?.result).toBe("inconclusive");
     expect(finding.live?.reasoning).toMatch(/timed out/);
     expect(effectiveVerdict(finding)).toBe("uncertain");
+  });
+
+  // The ceiling is what stops one stalled request from spending the whole
+  // per-finding budget, so the phase must install it and lift it again.
+  it("installs the live request ceiling while a finding runs and lifts it after", async () => {
+    let seen: number | null = -1;
+    await run(async () => {
+      seen = ceiling();
+      throw new Error("stop here");
+    });
+    expect(seen).toBe(50);
+    expect(ceiling()).toBeNull();
   });
 
   // A detector that ignores its abort signal must not strand the pass: the

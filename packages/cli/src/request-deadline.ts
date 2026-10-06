@@ -7,8 +7,22 @@ import { logWarn } from "./log.js";
  * AI SDK gives up on its own. The timeout is a retryable APICallError, so
  * the SDK retries that one request instead of failing the whole call.
  */
+let ceilingMs: number | null = null;
+
+/** Tighten every request for the duration of a phase whose own budget is
+ *  smaller than `createDeadlineFetch`'s. Pass null to lift it. */
+export function setRequestDeadlineCeiling(ms: number | null): void {
+  ceilingMs = ms;
+}
+
+/** The ceiling in force, or null. For tests asserting a phase installed it. */
+export function requestDeadlineCeilingMs(): number | null {
+  return ceilingMs;
+}
+
 export function createDeadlineFetch(inner: typeof fetch, timeoutMs: number): typeof fetch {
   return async (input, init) => {
+    const deadlineMs = Math.min(timeoutMs, ceilingMs ?? Number.POSITIVE_INFINITY);
     const controller = new AbortController();
     const caller = init?.signal;
     let responseHeaders: Record<string, string> | undefined;
@@ -18,7 +32,7 @@ export function createDeadlineFetch(inner: typeof fetch, timeoutMs: number): typ
 
     const timer = setTimeout(() => {
       const genId = responseHeaders?.["x-generation-id"];
-      const message = `request timed out after ${timeoutMs / 1000}s${genId ? ` (genId=${genId})` : " with no response"}`;
+      const message = `request timed out after ${deadlineMs / 1000}s${genId ? ` (genId=${genId})` : " with no response"}`;
       logWarn(`[request-deadline] ${message}`);
       controller.abort(
         new APICallError({
@@ -29,7 +43,7 @@ export function createDeadlineFetch(inner: typeof fetch, timeoutMs: number): typ
           isRetryable: true,
         }),
       );
-    }, timeoutMs);
+    }, deadlineMs);
     // A body the caller never reads must not keep the CLI alive at exit.
     timer.unref?.();
     const settle = () => {

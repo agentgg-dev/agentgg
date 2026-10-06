@@ -15,6 +15,7 @@ import { getEvidenceDir, readFileRecord, updateRunStage, writeFileRecord } from 
 import AdmZip from "adm-zip";
 import type { Detector } from "../detect.js";
 import { logWarn } from "../log.js";
+import { setRequestDeadlineCeiling } from "../request-deadline.js";
 import { ensureSandboxImage } from "./image.js";
 import { runProofScript, scriptProved } from "./proof-script.js";
 import { runReproScript } from "./repro-script.js";
@@ -224,6 +225,13 @@ function abortable<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
   });
 }
 
+/**
+ * Ceiling on one LLM request while the live pass runs. Sized above the slowest
+ * healthy call seen in production and low enough that one stalled call plus its
+ * retry cannot spend a finding's whole budget.
+ */
+export const LIVE_REQUEST_DEADLINE_MS = 180_000;
+
 export async function runReproducePhase(args: {
   findings: Finding[];
   detector: Detector;
@@ -317,6 +325,7 @@ export async function runReproducePhase(args: {
   const runId = `reproduce-${randomUUID()}`;
   let sandbox: Sandbox;
   let agentBaseUrl: string;
+  setRequestDeadlineCeiling(Math.min(LIVE_REQUEST_DEADLINE_MS, args.timeoutMs));
   try {
     if (args.attach) {
       // Attached mode: no container to redirect a localhost target into, so
@@ -537,6 +546,7 @@ export async function runReproducePhase(args: {
     // installed, then remove it so it never masks a later, real rejection.
     await new Promise((r) => setTimeout(r, 0));
     process.off("unhandledRejection", onUnhandled);
+    setRequestDeadlineCeiling(null);
   }
 }
 

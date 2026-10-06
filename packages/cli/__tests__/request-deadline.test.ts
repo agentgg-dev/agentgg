@@ -14,13 +14,14 @@ import {
   createCostMeter,
   openRouterRequestTimeoutMs,
 } from "../src/providers/openrouter.js";
-import { createDeadlineFetch } from "../src/request-deadline.js";
+import { createDeadlineFetch, setRequestDeadlineCeiling } from "../src/request-deadline.js";
 
 type Handler = (req: IncomingMessage, res: ServerResponse, n: number) => void;
 
 let server: Server | undefined;
 afterEach(async () => {
   vi.restoreAllMocks();
+  setRequestDeadlineCeiling(null);
   delete process.env.OPENROUTER_REQUEST_TIMEOUT_MS;
   const s = server;
   server = undefined;
@@ -95,6 +96,39 @@ describe("createDeadlineFetch", () => {
     caller.abort(reason);
     expect(await pending).toBe(reason);
     await sleep(300);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it("cuts at the ceiling a phase installs, not the fetch's own deadline", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const url = await serve(hang);
+    const f = createDeadlineFetch(fetch, 60_000);
+    setRequestDeadlineCeiling(100);
+    const err = await f(`${url}/v1/chat/completions`, post).catch((e: unknown) => e);
+    expect(APICallError.isInstance(err)).toBe(true);
+    expect((err as APICallError).message).toMatch(/after 0.1s/);
+  });
+
+  it("never loosens a deadline that is already tighter than the ceiling", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const url = await serve(hang);
+    const f = createDeadlineFetch(fetch, 100);
+    setRequestDeadlineCeiling(60_000);
+    const err = await f(`${url}/v1/chat/completions`, post).catch((e: unknown) => e);
+    expect((err as APICallError).message).toMatch(/after 0.1s/);
+  });
+
+  it("restores the fetch's own deadline once the ceiling is lifted", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const url = await serve((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end('{"ok":true}');
+    });
+    const f = createDeadlineFetch(fetch, 60_000);
+    setRequestDeadlineCeiling(100);
+    setRequestDeadlineCeiling(null);
+    expect(await (await f(`${url}/v1/chat/completions`, post)).json()).toEqual({ ok: true });
+    await sleep(200);
     expect(warn).not.toHaveBeenCalled();
   });
 });

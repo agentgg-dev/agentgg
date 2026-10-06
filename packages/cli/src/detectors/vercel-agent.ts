@@ -1401,6 +1401,8 @@ export class VercelAgentDetector implements Detector {
           // think freely, a model argues with itself about the test library
           // until the budget is gone and the script never gets written.
           providerOptions: this.providerOptionsArg("low"),
+          // Live only: a finding's budget cannot absorb the SDK's three attempts.
+          maxRetries: 1,
           abortSignal: args.signal,
         }),
       { label: `proof-script:${args.finding.id}`, signal: args.signal },
@@ -1470,6 +1472,8 @@ export class VercelAgentDetector implements Detector {
             experimental_prepareStep: stop.prepareStep,
             experimental_repairToolCall: this.toolCallRepair(label),
             providerOptions: this.providerOptionsArg(),
+            // Live only: a finding's budget cannot absorb the SDK's three attempts.
+            maxRetries: 1,
             abortSignal: args.signal,
           }),
         { label, signal: args.signal },
