@@ -289,11 +289,16 @@ export class ClaudeAgentDetector implements Detector {
     proofRule?: string;
     staticVerdict?: string;
     staticReasoning?: string;
+    staticConfirmedImpact?: string;
     signal?: AbortSignal;
   }): Promise<string> {
     const staticReview =
       args.staticVerdict != null && args.staticReasoning != null
-        ? { verdict: args.staticVerdict, reasoning: args.staticReasoning }
+        ? {
+            verdict: args.staticVerdict,
+            reasoning: args.staticReasoning,
+            ...(args.staticConfirmedImpact ? { confirmedImpact: args.staticConfirmedImpact } : {}),
+          }
         : undefined;
     // No tools and a single turn: this path exists to skip the browser loop, so
     // giving it any tool would reintroduce the cost it is meant to avoid.

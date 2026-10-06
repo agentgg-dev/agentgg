@@ -381,6 +381,7 @@ export interface Detector {
     proofRule?: string;
     staticVerdict?: string;
     staticReasoning?: string;
+    staticConfirmedImpact?: string;
     signal?: AbortSignal;
   }): Promise<string>;
 
@@ -886,11 +887,11 @@ export function buildProofScriptPrompt(
   baseUrl: string,
   context?: string,
   agentRule?: string,
-  staticReview?: { verdict: string; reasoning: string },
+  staticReview?: { verdict: string; reasoning: string; confirmedImpact?: string },
 ): string {
   const contextBlock = targetNotesBlock(context);
   const staticBlock = staticReview
-    ? `\n## Source review of this finding\n\nA reviewer with the source code reached the verdict \`${staticReview.verdict}\`:\n\n${staticReview.reasoning}\n\nWrite the assertions so that a pass answers this review.\n`
+    ? `\n## Source review of this finding\n\nA reviewer with the source code reached the verdict \`${staticReview.verdict}\`:\n\n${staticReview.reasoning}\n\nWrite the assertions so that a pass answers this review.\n${staticReview.confirmedImpact ? `\nAssert the impact the review confirmed:\n\n${staticReview.confirmedImpact}\n\nThe finding text below may claim more. A test that asserts the wider claim\nfails on a finding that is real at the narrower one.\n` : ""}`
     : "";
 
   return `Write a Playwright test that proves one security finding against a
@@ -994,22 +995,22 @@ execution, and add the reflection check where you can:
    payload appears UNESCAPED in the executable position (its angle brackets,
    quotes or script are intact, not turned into \`&lt;\` / \`&quot;\`). This is
    deterministic and does not depend on the browser running anything.
-2. Execution in the browser. Put this at the very top of the test, BEFORE any
-   navigation, so an injected handler that calls it is captured:
-       await page.addInitScript(() => {
-         (window as any).__xssFired = false;
-         for (const fn of ["alert", "prompt", "confirm", "print"]) {
-           (window as any)[fn] = () => { (window as any).__xssFired = true; };
-         }
-       });
+2. Execution in the browser. The recording banner below already replaces
+   \`alert\`, \`confirm\`, \`prompt\` and \`print\`, and records each call in
+   \`window.__agentggXss\`. Do NOT install a catcher of your own: init scripts
+   run in the order you add them, and a second one that replaces the same
+   functions silently disables the first, so a payload that really ran reads
+   as a payload that did not.
    Make your payload call one of those functions (for example
-   \`onerror=alert(1)\`), navigate with \`page.goto(...)\`, then assert
-   \`await page.evaluate(() => (window as any).__xssFired) === true\`. This is more
-   reliable than \`page.waitForEvent("dialog")\` and also catches event handlers.
+   \`onerror=alert(1)\`), or set \`window.__agentggXss\` itself, navigate with
+   \`page.goto(...)\`, then assert
+   \`await page.evaluate(() => (window as any).__agentggXss?.length > 0)\`. This
+   is more reliable than \`page.waitForEvent("dialog")\` and also catches event
+   handlers.
 
 The \`${CONTROL_TEST}\` test runs the same request with a benign value and asserts
 the OPPOSITE: the value is absent or HTML-encoded in the response, and
-\`__xssFired\` stayed false.
+\`__agentggXss\` stayed empty.
 
 ## Record what happened, so the result has a video and a screenshot
 
@@ -1020,13 +1021,10 @@ screenshot at its end, and runs slowly enough to watch:
 
 At the start of every test, before any navigation, load the recording banner so
 the video and screenshot show the URL, the injected payload and, when the code
-runs, an "XSS fired" line:
+runs, an "XSS fired" line. It is also the execution sensor step 2 asserts on,
+so it is the only init script the test needs:
 
     await page.addInitScript({ path: "/srv/url-banner.js" });
-
-The banner also captures \`alert()\`; you can assert
-\`await page.evaluate(() => (window).__agentggXss?.length > 0)\` as the proof of
-execution, instead of the local override above.
 
 ${NO_OVERLAY}
 

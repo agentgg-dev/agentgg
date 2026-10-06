@@ -105,6 +105,7 @@ async function tryScriptFirst(a: {
       proofRule: a.proofRule,
       staticVerdict: a.finding.validation?.verdict,
       staticReasoning: a.finding.validation?.reasoning,
+      staticConfirmedImpact: a.finding.validation?.confirmedImpact,
       signal: a.signal,
     });
     run = await runProofScript(a.sandbox, script, a.timeoutMs);

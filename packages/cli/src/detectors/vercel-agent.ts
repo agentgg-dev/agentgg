@@ -1372,11 +1372,16 @@ export class VercelAgentDetector implements Detector {
     proofRule?: string;
     staticVerdict?: string;
     staticReasoning?: string;
+    staticConfirmedImpact?: string;
     signal?: AbortSignal;
   }): Promise<string> {
     const staticReview =
       args.staticVerdict != null && args.staticReasoning != null
-        ? { verdict: args.staticVerdict, reasoning: args.staticReasoning }
+        ? {
+            verdict: args.staticVerdict,
+            reasoning: args.staticReasoning,
+            ...(args.staticConfirmedImpact ? { confirmedImpact: args.staticConfirmedImpact } : {}),
+          }
         : undefined;
     const { object } = await this.metered(
       () =>

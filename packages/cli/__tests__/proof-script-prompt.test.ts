@@ -32,6 +32,29 @@ describe("buildProofScriptPrompt", () => {
     expect(buildProofScriptPrompt(finding, "http://t", undefined, rule)).toContain(rule);
   });
 
+  /**
+   * A review that cut the impact has already answered the wider claim. Testing
+   * the finding's own text instead would fail a finding that is real at the
+   * narrower impact.
+   */
+  it("asks for the impact the review confirmed, not the one the finding claims", () => {
+    const out = buildProofScriptPrompt(finding, "http://t", undefined, undefined, {
+      verdict: "confirmed",
+      reasoning: "r",
+      confirmedImpact: "Only the signed-in user's own notes leak.",
+    });
+    expect(out).toContain("Only the signed-in user's own notes leak.");
+  });
+
+  it("says nothing about a confirmed impact when the review narrowed none", () => {
+    const out = buildProofScriptPrompt(finding, "http://t", undefined, undefined, {
+      verdict: "confirmed",
+      reasoning: "r",
+    });
+    expect(out).toContain("r");
+    expect(out).not.toMatch(/impact the review confirmed/i);
+  });
+
   it("tells the model to go straight to the endpoint rather than explore", () => {
     expect(buildProofScriptPrompt(finding, "http://t")).toMatch(/do not (explore|crawl)/i);
   });
@@ -89,8 +112,20 @@ describe("buildProofScriptPrompt", () => {
 
   it("offers a reliable execution sensor instead of relying on the dialog event", () => {
     const out = buildProofScriptPrompt(finding, "http://t");
-    expect(out).toContain("__xssFired");
+    expect(out).toContain("__agentggXss");
     expect(out).toContain("addInitScript");
+  });
+
+  /**
+   * Init scripts run in the order they are added, and each one here replaces
+   * the dialog functions outright. A second catcher disables the banner's, so
+   * a payload that ran reads as one that did not and the proof fails.
+   */
+  it("names the banner as the only execution sensor, with no second catcher", () => {
+    const out = buildProofScriptPrompt(finding, "http://t");
+    expect(out).not.toContain("__xssFired");
+    expect(out).toMatch(/do not install a catcher of your own/i);
+    expect(out.match(/addInitScript/g)).toHaveLength(1);
   });
 
   it("explains that a browser navigation cannot set a request header", () => {
