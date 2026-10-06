@@ -370,26 +370,20 @@ describe("createRoutingFetch output caps", () => {
     expect((await send({})).max_tokens).toBeGreaterThan(2 * 32_000 - 1);
   });
 
-  // A model whose default effort is its deepest allots nearly all of
-  // max_tokens to thinking and is then cut mid-answer.
-  it("bounds reasoning with an effort by default", async () => {
-    expect((await send({})).reasoning).toEqual({ effort: "high" });
+  // Reasoning depth is the product, so a run that says nothing gets the
+  // model's own judgment of how deeply the work deserves to be thought about.
+  it("sends no reasoning cap by default", async () => {
+    expect((await send({})).reasoning).toBeUndefined();
   });
 
-  // A token budget and an effort are alternatives, and OpenRouter rejects a
-  // request carrying both.
-  it("sends no reasoning token budget alongside the effort", async () => {
-    expect((await send({})).reasoning).not.toHaveProperty("max_tokens");
-  });
-
-  it("takes the effort from the environment", async () => {
+  it("sends an effort only when the environment asks for one", async () => {
     process.env.OPENROUTER_REASONING_EFFORT = "low";
     expect((await send({})).reasoning).toEqual({ effort: "low" });
   });
 
   it("ignores an effort that is not a level OpenRouter accepts", async () => {
     process.env.OPENROUTER_REASONING_EFFORT = "nope";
-    expect((await send({})).reasoning).toEqual({ effort: "high" });
+    expect((await send({})).reasoning).toBeUndefined();
   });
 
   it("leaves a caller's own caps alone", async () => {
