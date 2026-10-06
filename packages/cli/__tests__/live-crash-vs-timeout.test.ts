@@ -39,7 +39,10 @@ describe("live pass without a result", () => {
     vi.resetModules();
   });
 
-  async function run(reproduceFinding: (a: { signal: AbortSignal }) => Promise<never>) {
+  async function run(
+    reproduceFinding: (a: { signal: AbortSignal }) => Promise<never>,
+    count = 1,
+  ): Promise<Finding[]> {
     vi.doMock("../src/validation/sandbox.js", async (orig) => ({
       ...(await orig<typeof import("../src/validation/sandbox.js")>()),
       startLocalDockerSandbox: async () => fakeSandbox,
@@ -50,8 +53,8 @@ describe("live pass without a result", () => {
     vi.resetModules();
     const { runReproducePhase } = await import("../src/validation/reproduce.js");
 
-    const finding: Finding = {
-      id: "xss-1",
+    const findings: Finding[] = Array.from({ length: count }, (_, i) => ({
+      id: `xss-${i + 1}`,
       agentSlug: "a",
       title: "Reflected XSS on /search",
       vulnSlug: "xss",
@@ -64,19 +67,19 @@ describe("live pass without a result", () => {
       confidence: 0.9,
       notifications: [],
       validation: { verdict: "confirmed", reasoning: "r" },
-    };
+    }));
     writeFileRecord(outDir, {
-      agentSlug: finding.agentSlug,
-      filePath: finding.filePath,
+      agentSlug: "a",
+      filePath: "src/server.ts",
       contentHash: "h",
-      findings: [finding],
+      findings,
       analysisHistory: [],
       candidates: [],
       status: "analyzed",
     } as never);
 
     await runReproducePhase({
-      findings: [finding],
+      findings,
       // biome-ignore lint/suspicious/noExplicitAny: only reproduceFinding is exercised
       detector: { name: "fake", reproduceFinding } as any,
       outDir,
@@ -86,11 +89,11 @@ describe("live pass without a result", () => {
       timeoutMs: 50,
       signal: new AbortController().signal,
     });
-    return finding;
+    return findings;
   }
 
   it("records a crash as error and keeps the static verdict", async () => {
-    const finding = await run(async () => {
+    const [finding] = await run(async () => {
       throw new Error("MCP connection refused");
     });
     expect(finding.live?.result).toBe("error");
@@ -98,7 +101,7 @@ describe("live pass without a result", () => {
   });
 
   it("records a timeout as inconclusive and demotes a static confirm", async () => {
-    const finding = await run(
+    const [finding] = await run(
       ({ signal }) =>
         new Promise<never>((_, reject) => {
           signal.addEventListener("abort", () => reject(new Error("aborted")));
@@ -107,5 +110,13 @@ describe("live pass without a result", () => {
     expect(finding.live?.result).toBe("inconclusive");
     expect(finding.live?.reasoning).toMatch(/timed out/);
     expect(effectiveVerdict(finding)).toBe("uncertain");
+  });
+
+  // A detector that ignores its abort signal must not strand the pass: the
+  // timer alone has to settle the finding and release the loop.
+  it("times out a detector that never settles and still runs the next finding", async () => {
+    const findings = await run(() => new Promise<never>(() => {}), 2);
+    expect(findings.map((f) => f.live?.result)).toEqual(["inconclusive", "inconclusive"]);
+    expect(findings[1]?.live?.reasoning).toMatch(/timed out/);
   });
 });

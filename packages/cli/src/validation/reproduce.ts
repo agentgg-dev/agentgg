@@ -205,6 +205,25 @@ export function gradeLiveResult(
   return captured && (negativeControl?.trim().length ?? 0) > 0 ? "reproduced" : "inconclusive";
 }
 
+/**
+ * Reject as soon as `signal` aborts, even if `p` never settles. A detector that
+ * does not forward the signal to every await inside it would otherwise strand
+ * the loop: no verdict for this finding, and none for the ones after it. `p`
+ * keeps its own handler, so a late rejection is still consumed.
+ */
+function abortable<T>(p: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const fail = () => reject(signal.reason ?? new Error("aborted"));
+    if (signal.aborted) {
+      p.catch(() => {});
+      fail();
+      return;
+    }
+    signal.addEventListener("abort", fail, { once: true });
+    p.then(resolve, reject).finally(() => signal.removeEventListener("abort", fail));
+  });
+}
+
 export async function runReproducePhase(args: {
   findings: Finding[];
   detector: Detector;
@@ -367,32 +386,38 @@ export async function runReproducePhase(args: {
         // Script-first: one call, no browser loop. A spec whose exploit AND
         // control both pass settles the finding in seconds. Anything else hands
         // it to the agent, which can look around.
-        const fromScript = await tryScriptFirst({
-          finding,
-          detector,
-          sandbox,
-          outDir,
-          baseUrl: agentBaseUrl,
-          context,
-          proofRule: args.agentProofRules?.get(finding.agentSlug),
-          timeoutMs: args.timeoutMs,
-          signal: ac.signal,
-        });
+        const fromScript = await abortable(
+          tryScriptFirst({
+            finding,
+            detector,
+            sandbox,
+            outDir,
+            baseUrl: agentBaseUrl,
+            context,
+            proofRule: args.agentProofRules?.get(finding.agentSlug),
+            timeoutMs: args.timeoutMs,
+            signal: ac.signal,
+          }),
+          ac.signal,
+        );
 
         const res =
           fromScript?.res ??
-          (await detector.reproduceFinding({
-            finding,
-            baseUrl: agentBaseUrl,
-            browserEndpoint: sandbox.browserEndpoint(),
-            context,
-            maxTurns: args.reproduceMaxTurns,
-            staticVerdict: finding.validation?.verdict,
-            staticReasoning: finding.validation?.reasoning,
-            staticConfirmedImpact: finding.validation?.confirmedImpact,
-            proofRule: args.agentProofRules?.get(finding.agentSlug),
-            signal: ac.signal,
-          }));
+          (await abortable(
+            detector.reproduceFinding({
+              finding,
+              baseUrl: agentBaseUrl,
+              browserEndpoint: sandbox.browserEndpoint(),
+              context,
+              maxTurns: args.reproduceMaxTurns,
+              staticVerdict: finding.validation?.verdict,
+              staticReasoning: finding.validation?.reasoning,
+              staticConfirmedImpact: finding.validation?.confirmedImpact,
+              proofRule: args.agentProofRules?.get(finding.agentSlug),
+              signal: ac.signal,
+            }),
+            ac.signal,
+          ));
 
         let evidence: Evidence | undefined = fromScript?.evidence;
         if (fromScript) {
