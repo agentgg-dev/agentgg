@@ -36,6 +36,37 @@ describe("buildProofScriptPrompt", () => {
     expect(buildProofScriptPrompt(finding, "http://t")).toMatch(/do not (explore|crawl)/i);
   });
 
+  /**
+   * The call has no tools, so a fact it does not get is one it can only
+   * simulate, and simulation has no stopping point: it re-derives the same
+   * doubt until the token budget is gone and the script is never written.
+   * Every fact here is one a reproduce agent was seen to argue with itself
+   * about.
+   */
+  describe("facts the model cannot check for itself", () => {
+    const p = buildProofScriptPrompt(finding, "http://t");
+
+    it("pins the Playwright version the sandbox runs", () => {
+      expect(p).toMatch(/Playwright 1\.56/);
+    });
+
+    it("says the runner can reach more than the target", () => {
+      expect(p).toMatch(/reaches the public internet/i);
+    });
+
+    it("names the outside origin to use, so none is invented", () => {
+      expect(p).toContain("https://example.com/");
+    });
+
+    it("gives the way to see a redirect response rather than follow it", () => {
+      expect(p).toContain("maxRedirects: 0");
+    });
+
+    it("says what to do with a doubt it cannot settle", () => {
+      expect(p).toMatch(/simplest approach that can\s+work/i);
+    });
+  });
+
   it("carries the target and the PoC the script has to drive", () => {
     const p = buildProofScriptPrompt(finding, "http://target.test");
     expect(p).toContain("http://target.test");

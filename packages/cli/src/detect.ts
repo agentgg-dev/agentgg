@@ -962,6 +962,25 @@ The attacker input may not be a query value. Send it where the finding says:
   CANNOT set request headers. Use \`page.request.get(url, { headers: { ... } })\`,
   or a request body, exactly as the PoC describes.
 
+## The runner, so you do not have to work it out
+
+These are facts about where your test will run. Take them as given:
+
+- Playwright 1.56 with \`@playwright/test\`. Every option in that version's API
+  is available to you, including \`maxRedirects\` on a \`page.request\` call.
+- The runner reaches the public internet, not only the target.
+- \`https://example.com/\` is a stable origin reserved for examples. Use it as
+  the outside site when a test has to show the application handing the browser
+  to one. Never a domain somebody owns and may change.
+- \`page.goto\` follows redirects and ends on the last page, so the browser's own
+  URL after it is what you assert on. To see a 3xx response itself, request it
+  with \`page.request.get(url, { maxRedirects: 0 })\` and read its \`location\`
+  header.
+
+For anything this prompt does not state, choose the simplest approach that can
+work and write the test. You cannot settle it from here and the run will settle
+it: a doubt you cannot check costs more than the mistake it would avoid.
+
 ## How to prove it
 
 For cross-site scripting the effect is that the injected code runs (2 below).
