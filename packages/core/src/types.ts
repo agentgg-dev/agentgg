@@ -1135,7 +1135,8 @@ export const RunMeta = z.object({
     .object({
       /** Subcommand: "scan" | "revalidate" | "score" | "fix" | "dedup" | "recon" | "summary". */
       command: z.string(),
-      /** Raw CLI args as typed (process.argv after the node binary + entrypoint). */
+      /** CLI args as typed (process.argv after the node binary + entrypoint),
+       *  with the value of every credential flag replaced by `***`. */
       argv: z.string().optional(),
     })
     .optional(),
