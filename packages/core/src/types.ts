@@ -278,7 +278,8 @@ export const Agent = z.object({
    * What a live browser run must show before a finding from this agent counts
    * as reproduced. Unlike `validationPrompt`, this ADDS to the proof principle
    * and can never replace it. Write one only when a real run showed the
-   * principle was not enough for this class, and say which run in a comment.
+   * principle was not enough for this class. State the rule itself and nothing
+   * about the run that prompted it: the catalog is public.
    */
   liveProofRule: z.string().optional(),
   /**
