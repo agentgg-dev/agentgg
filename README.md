@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/agentgg-dev/agentgg-agents/main/static/logo.png" />
-    <img src="https://raw.githubusercontent.com/agentgg-dev/agentgg-agents/main/static/logo-light.png" alt="agentgg" width="420" />
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/agentgg-dev/agentgg-agents/main/static/logo-dark.png" />
+    <img src="https://raw.githubusercontent.com/agentgg-dev/agentgg-agents/main/static/logo.png" alt="agentgg" width="420" />
   </picture>
 </p>
 
