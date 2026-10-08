@@ -1387,7 +1387,7 @@ export class VercelAgentDetector implements Detector {
       () =>
         generateObject({
           experimental_repairText: repairJsonText,
-          model: this.model,
+          model: this.structuredModel ?? this.model,
           schema: GeneratedProofScript,
           mode: this.objectMode,
           prompt: buildProofScriptPrompt(

@@ -6,6 +6,7 @@ import { z } from "zod";
 import { REPRODUCE_CUT_SHORT } from "../src/detect.js";
 import { ClaudeAgentDetector } from "../src/detectors/claude-agent.js";
 import { asReproduceField, VercelAgentDetector } from "../src/detectors/vercel-agent.js";
+import { ollamaModule } from "../src/providers/ollama.js";
 
 // reproduceFinding always attaches tools from the sandbox's Playwright MCP
 // server. Keep every other export real; only the network-facing client is
@@ -69,6 +70,59 @@ describe("reproduceFinding", () => {
   it("is present on the vercel detector, so non-anthropic providers can live-validate", () => {
     const d = new VercelAgentDetector("openrouter", openai("gpt-4o-mini"));
     expect(typeof d.reproduceFinding).toBe("function");
+  });
+});
+
+/**
+ * Ollama composes two inner detectors, so the composite has to forward both
+ * reproduce methods, and the proof script needs the structuredOutputs model.
+ */
+describe("ollama live validation", () => {
+  const buildOllama = () =>
+    ollamaModule.buildDetector(
+      { ollama: { baseUrl: "http://ollama.test:11434" } } as never,
+      {} as never,
+    );
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("forwards both reproduce methods", () => {
+    const d = buildOllama();
+    expect(typeof d.reproduceFinding).toBe("function");
+    expect(typeof d.generateReproScript).toBe("function");
+  });
+
+  it("sends the proof-script schema, not a bare json format", async () => {
+    const inner = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            created_at: "2026-01-01T00:00:00Z",
+            done: true,
+            done_reason: "stop",
+            eval_count: 1,
+            eval_duration: 1,
+            message: { content: '{"script":"await page.goto(base)"}', role: "assistant" },
+            model: "qwen2.5",
+            prompt_eval_count: 1,
+            total_duration: 1,
+          }),
+          { headers: { "content-type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", inner);
+
+    const script = await buildOllama().generateReproScript?.({
+      baseUrl: "http://localhost:3000",
+      finding: makeFinding(),
+    });
+
+    expect(script).toBe("await page.goto(base)");
+    const sent = JSON.parse((inner.mock.calls[0][1] as RequestInit).body as string);
+    expect(sent.format).not.toBe("json");
+    expect(sent.format.properties.script).toBeDefined();
   });
 });
 
