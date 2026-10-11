@@ -48,9 +48,7 @@ export function createTruncationTolerantFetch(inner: typeof fetch = fetch): type
     }
     if (body.done === true) return asJson(text);
     const calls = (body.message as { tool_calls?: unknown[] } | undefined)?.tool_calls?.length ?? 0;
-    logWarn(
-      `ollama cut a generation short after ${calls} tool call(s); keeping what it sent.`,
-    );
+    logWarn(`ollama cut a generation short after ${calls} tool call(s); keeping what it sent.`);
     return asJson(
       JSON.stringify({
         ...body,
