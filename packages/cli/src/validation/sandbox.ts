@@ -3,20 +3,25 @@
 // the build context:
 //   docker build -f packages/cli/src/validation/sandbox.Dockerfile -t <DEFAULT_SANDBOX_IMAGE> packages/cli/src/validation
 import { execFile, spawn } from "node:child_process";
+import { createServer } from "node:net";
+import { hostname } from "node:os";
 import { promisify } from "node:util";
 
 const pexec = promisify(execFile);
 
 // Pinned image tag; the scan command's default sandbox image for --target-image.
 // Keep in sync with the tag in sandbox.Dockerfile's build comment.
-export const DEFAULT_SANDBOX_IMAGE = "agentgg/live-sandbox:pw1.56.0-mcp0.0.41-7";
+export const DEFAULT_SANDBOX_IMAGE = "agentgg/live-sandbox:pw1.56.0-mcp0.0.41-8";
 
-// Container port the Playwright MCP server binds; published 1:1 on the host so
-// the Host header the MCP client sends matches what the server allows.
-const MCP_PORT = "8931";
-// Label on every sandbox container so a stale one (left by an aborted run, where
-// dispose never ran) can be found and removed before the next start.
-const SANDBOX_LABEL = "agentgg.live-sandbox=1";
+// Label on every sandbox container, valued `<host>:<pid>` of the CLI process
+// that started it. A run removes only sandboxes whose owner process is gone (an
+// aborted run where dispose never ran), so concurrent live runs on one machine
+// leave each other's sandboxes alone.
+const OWNER_LABEL = "agentgg.live-sandbox.owner";
+// Each sandbox takes the first free port from FIRST_PORT up.
+const FIRST_PORT = 8931;
+const PORT_RANGE = 100;
+const PORT_TAKEN = /port is already allocated|address already in use|bind for .* failed/i;
 const READY_TIMEOUT_MS = 30_000;
 const DEFAULT_EXEC_TIMEOUT_MS = 120_000;
 const EXEC_MAX_BUFFER = 64 * 1024 * 1024;
@@ -46,52 +51,54 @@ export async function dockerAvailable(): Promise<boolean> {
 export async function startLocalDockerSandbox(opts: { image: string }): Promise<Sandbox> {
   const image = opts.image;
 
-  // A run aborted with Ctrl+C leaves its --rm container up (dispose never ran),
-  // holding the fixed port. Remove any stale sandbox before starting.
+  // A run aborted with Ctrl+C leaves its --rm container up (dispose never ran).
   await removeStaleSandboxes();
 
-  let id: string;
-  try {
-    // --add-host: lets the containerized browser reach a target the host
-    // publishes on localhost via http://host.docker.internal.
-    const { stdout } = await pexec("docker", [
-      "run",
-      "-d",
-      "--rm",
-      "--label",
-      SANDBOX_LABEL,
-      "--add-host=host.docker.internal:host-gateway",
-      // Publish 1:1 (not a random host port): the MCP client connects to
-      // localhost:8931, matching the server's own host check. A remapped port
-      // makes the Host header localhost:<random>, which the server rejects.
-      "-p",
-      `${MCP_PORT}:${MCP_PORT}`,
-      image,
-    ]);
-    id = stdout.trim();
-  } catch (err) {
-    const msg = errText(err);
-    if (/port is already allocated|address already in use|bind for .* failed/i.test(msg)) {
-      throw new Error(
-        `Sandbox port ${MCP_PORT} is already in use. Stop whatever holds it ` +
-          `(a leftover sandbox: docker ps, then docker rm -f <id>) and retry.`,
-      );
+  let id = "";
+  let port = FIRST_PORT - 1;
+  while (!id) {
+    port = await nextFreePort(port + 1);
+    try {
+      // --add-host: lets the containerized browser reach a target the host
+      // publishes on localhost via http://host.docker.internal.
+      const { stdout } = await pexec("docker", [
+        "run",
+        "-d",
+        "--rm",
+        "--label",
+        `${OWNER_LABEL}=${hostname()}:${process.pid}`,
+        "--add-host=host.docker.internal:host-gateway",
+        // Same port inside and out: the MCP server checks the Host header
+        // against its own port, so a remapped port is rejected.
+        "-e",
+        `MCP_PORT=${port}`,
+        "-p",
+        `${port}:${port}`,
+        image,
+      ]);
+      id = stdout.trim();
+    } catch (err) {
+      const msg = errText(err);
+      // Another run can publish the port between the check and this run.
+      if (PORT_TAKEN.test(msg)) continue;
+      // Do not auto-build: point the caller at the exact build command instead.
+      if (
+        /no such image|manifest unknown|unable to find image|pull access denied|not found/i.test(
+          msg,
+        )
+      ) {
+        throw new Error(
+          `Sandbox image "${image}" is not available locally. Build it first:\n` +
+            `  docker build -f packages/cli/src/validation/sandbox.Dockerfile -t ${image} packages/cli/src/validation`,
+        );
+      }
+      throw new Error(`Failed to start sandbox container from "${image}": ${msg}`);
     }
-    // Do not auto-build: point the caller at the exact build command instead.
-    if (
-      /no such image|manifest unknown|unable to find image|pull access denied|not found/i.test(msg)
-    ) {
-      throw new Error(
-        `Sandbox image "${image}" is not available locally. Build it first:\n` +
-          `  docker build -f packages/cli/src/validation/sandbox.Dockerfile -t ${image} packages/cli/src/validation`,
-      );
-    }
-    throw new Error(`Failed to start sandbox container from "${image}": ${msg}`);
   }
 
   // Readiness probe hits /sse. Any HTTP response (even a 403/400 to a bare probe
   // GET) proves the server is listening; the agent connects over the same port.
-  const endpoint = `http://localhost:${MCP_PORT}/sse`;
+  const endpoint = `http://localhost:${port}/sse`;
   try {
     await waitForSse(endpoint, READY_TIMEOUT_MS);
   } catch (err) {
@@ -203,11 +210,75 @@ async function waitForSse(url: string, timeoutMs: number): Promise<void> {
 
 async function removeStaleSandboxes(): Promise<void> {
   try {
-    const { stdout } = await pexec("docker", ["ps", "-aq", "--filter", `label=${SANDBOX_LABEL}`]);
-    await Promise.all(stdout.split(/\s+/).filter(Boolean).map(forceRemove));
+    const { stdout } = await pexec("docker", [
+      "ps",
+      "-a",
+      "--filter",
+      `label=${OWNER_LABEL}`,
+      "--format",
+      "{{.ID}}|{{.Labels}}",
+    ]);
+    await Promise.all(staleSandboxIds(String(stdout), hostname(), processAlive).map(forceRemove));
   } catch {
     // Best effort: if docker is unusable we fail later with a clear error.
   }
+}
+
+/**
+ * Sandboxes in a `docker ps --format "{{.ID}}|{{.Labels}}"` listing whose
+ * owner ran on `host` and is no longer alive. A sandbox from another machine
+ * sharing the daemon, or with an owner that cannot be read, is left alone.
+ */
+export function staleSandboxIds(
+  listing: string,
+  host: string,
+  alive: (pid: number) => boolean,
+): string[] {
+  const stale: string[] = [];
+  for (const line of listing.split(/\r?\n/)) {
+    const sep = line.indexOf("|");
+    if (sep <= 0) continue;
+    const id = line.slice(0, sep).trim();
+    const owner = new RegExp(`(?:^|,)${OWNER_LABEL.replace(/\./g, "\\.")}=([^,]+)`).exec(
+      line.slice(sep + 1),
+    )?.[1];
+    if (!owner) continue;
+    const colon = owner.lastIndexOf(":");
+    const pid = Number(owner.slice(colon + 1));
+    if (owner.slice(0, colon) !== host || !Number.isInteger(pid) || pid <= 0) continue;
+    if (!alive(pid)) stale.push(id);
+  }
+  return stale;
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM: the process exists but belongs to another user.
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+async function nextFreePort(from: number): Promise<number> {
+  const last = FIRST_PORT + PORT_RANGE - 1;
+  for (let port = from; port <= last; port++) {
+    if (await portFree(port)) return port;
+  }
+  throw new Error(
+    `No free sandbox port between ${FIRST_PORT} and ${last}. Stop a leftover sandbox ` +
+      `(docker ps, then docker rm -f <id>) and retry.`,
+  );
+}
+
+function portFree(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const server = createServer();
+    server.unref();
+    server.once("error", () => resolve(false));
+    server.listen(port, () => server.close(() => resolve(true)));
+  });
 }
 
 async function forceRemove(id: string): Promise<void> {
