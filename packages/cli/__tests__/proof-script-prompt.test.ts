@@ -63,8 +63,8 @@ describe("buildProofScriptPrompt", () => {
    * The call has no tools, so a fact it does not get is one it can only
    * simulate, and simulation has no stopping point: it re-derives the same
    * doubt until the token budget is gone and the script is never written.
-   * Every fact here is one a reproduce agent was seen to argue with itself
-   * about.
+   * Each fact here is one a tool-less model cannot settle for itself, so the
+   * prompt supplies it rather than leave the model to guess.
    */
   describe("facts the model cannot check for itself", () => {
     const p = buildProofScriptPrompt(finding, "http://t");
@@ -98,16 +98,6 @@ describe("buildProofScriptPrompt", () => {
 
   it("asks for the spec source alone, with no prose around it", () => {
     expect(buildProofScriptPrompt(finding, "http://t")).toMatch(/no prose|nothing else|only the/i);
-  });
-
-  it("tells the model to prove reflection in the raw response, not only a dialog", () => {
-    const out = buildProofScriptPrompt(finding, "http://t");
-    expect(out).toMatch(/page.request.get/);
-    expect(out).toMatch(/unescaped|UNESCAPED/);
-  });
-
-  it("gives a breakout technique for a script-context reflection", () => {
-    expect(buildProofScriptPrompt(finding, "http://t")).toContain("</script>");
   });
 
   it("offers a reliable execution sensor instead of relying on the dialog event", () => {
@@ -177,10 +167,22 @@ describe("buildProofScriptPrompt", () => {
     );
   });
 
-  it("does not count a reflection the browser never runs as cross-site scripting", () => {
-    const out = buildProofScriptPrompt(finding, "http://t");
-    expect(out).not.toMatch(/either one alone counts/i);
-    expect(out).toContain("Reflection alone is not the effect");
+  /**
+   * The payload-context and reflection guidance is cross-site-scripting class
+   * knowledge. It reaches the model through the reporting agent's proof rule,
+   * not the generic prompt, so a validator for another class is not told to
+   * inject HTML. These assertions guard that the generic prompt stays class-
+   * agnostic; the execution sensor above is sandbox infrastructure and stays.
+   */
+  it("keeps cross-site-scripting payload guidance out of the generic prompt", () => {
+    // A neutral finding, so the assertions see the prompt's own text and not
+    // an XSS payload echoed back from the PoC field.
+    const neutral = { ...finding, poc: "GET /x", summary: "s", impact: "i" } as never;
+    const out = buildProofScriptPrompt(neutral, "http://t");
+    expect(out).not.toContain("Match the payload to where the value lands");
+    expect(out).not.toMatch(/unescaped|UNESCAPED/);
+    expect(out).not.toContain("</script>");
+    expect(out).not.toContain("Reflection alone is not the effect");
   });
 
   it("forbids the test to draw its own proof on the page", () => {

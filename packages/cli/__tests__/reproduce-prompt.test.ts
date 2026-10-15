@@ -63,9 +63,10 @@ describe("buildReproducePrompt", () => {
     expect(out).toContain("Reads any user's notes.");
   });
 
-  it("tells the reproduce agent to prove XSS with an alert the recording can show", () => {
+  it("scopes the execution-sensor note to a browser-execution proof", () => {
     const out = buildReproducePrompt(finding, "http://t");
-    expect(out).toContain("alert(document.domain)");
+    expect(out).toMatch(/if your proof is that injected\s+code ran in the browser/i);
+    expect(out).not.toContain("alert(document.domain)");
   });
 
   it("offers the sentinel as a dialog-free alternative the banner also captures", () => {

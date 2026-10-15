@@ -841,12 +841,12 @@ ${proofRulesBlock}${staticReviewBlock}
 2. Reproduce the PoC above against the live application. If you cannot find
    an HTTP way to reach it, say what you tried and return 'inconclusive'.
 3. At the point the vulnerable behavior would appear, take a screenshot
-   as proof, whether or not it reproduces. When the finding is cross-site
-   scripting, make the injected code prove itself in a way the recording can
-   show: call \`alert(document.domain)\`, or set
-   \`window.__agentggXss = document.domain\`. The sandbox captures either and
-   draws it on the recording. A payload that only changes the title leaves no
-   visible proof. ${NO_OVERLAY}
+   as proof, whether or not it reproduces. If your proof is that injected
+   code ran in the browser, the sandbox banner already replaces \`alert\`,
+   \`confirm\`, \`prompt\` and \`print\` and records each call in
+   \`window.__agentggXss\`; make the code call one of those, or set
+   \`window.__agentggXss\` itself, so the recording shows it. A native dialog
+   on its own is invisible to a screenshot. ${NO_OVERLAY}
 4. Run the control the proof rules ask for: the same steps without your
    input, or without the session. Report what happened in
    \`negativeControl\`. A 'reproduced' result without it is downgraded.
@@ -934,24 +934,6 @@ Both tests must pass for the finding to count as proved. The control passing is
 what separates the effect from your own setup, so do not skip it and do not
 make it a copy of the exploit.
 
-## Match the payload to where the value lands
-
-The finding above says where the attacker input is reflected. The payload MUST
-suit that context, because a payload for the wrong context does not fire:
-
-- Reflected in the HTML body (between tags): inject an element with an event
-  handler, for example \`<img src=x onerror=...>\`. Prefer this over an injected
-  \`<script>\`, which a reflected value often will not run.
-- Reflected inside an existing \`<script>\` block: you must first break out with
-  \`</script>\`, then inject an element with an event handler.
-- Reflected inside an HTML attribute (for example \`href="..."\`): close the
-  attribute and the tag first, or add an event-handler attribute such as
-  \`" onmouseover=... x="\`.
-- Reflected inside a JavaScript string: close the quote and statement, for
-  example \`';<your code>;//\`.
-If the finding does not state the context, send the payload once and read the
-raw response (see below) to see how it lands, then choose the payload.
-
 ## What to send it in
 
 The attacker input may not be a query value. Send it where the finding says:
@@ -982,36 +964,6 @@ For anything this prompt does not state, choose the simplest approach that can
 work and write the test. You cannot settle it from here and the run will settle
 it: a doubt you cannot check costs more than the mistake it would avoid.
 
-## How to prove it
-
-For cross-site scripting the effect is that the injected code runs (2 below).
-Reflection alone is not the effect: a response the browser does not render as
-HTML, for example XML or JSON, carries the payload as text that never runs, and
-a broken document or a parse error is not script execution either. Assert
-execution, and add the reflection check where you can:
-
-1. Reflection in the raw response. Fetch the exact attack request with
-   \`page.request.get(...)\` (or \`.post\`), read \`await res.text()\`, and assert the
-   payload appears UNESCAPED in the executable position (its angle brackets,
-   quotes or script are intact, not turned into \`&lt;\` / \`&quot;\`). This is
-   deterministic and does not depend on the browser running anything.
-2. Execution in the browser. The recording banner below already replaces
-   \`alert\`, \`confirm\`, \`prompt\` and \`print\`, and records each call in
-   \`window.__agentggXss\`. Do NOT install a catcher of your own: init scripts
-   run in the order you add them, and a second one that replaces the same
-   functions silently disables the first, so a payload that really ran reads
-   as a payload that did not.
-   Make your payload call one of those functions (for example
-   \`onerror=alert(1)\`), or set \`window.__agentggXss\` itself, navigate with
-   \`page.goto(...)\`, then assert
-   \`await page.evaluate(() => (window as any).__agentggXss?.length > 0)\`. This
-   is more reliable than \`page.waitForEvent("dialog")\` and also catches event
-   handlers.
-
-The \`${CONTROL_TEST}\` test runs the same request with a benign value and asserts
-the OPPOSITE: the value is absent or HTML-encoded in the response, and
-\`__agentggXss\` stayed empty.
-
 ## Record what happened, so the result has a video and a screenshot
 
 Put this once at the top of the file, so each test records a video and a
@@ -1020,11 +972,19 @@ screenshot at its end, and runs slowly enough to watch:
     test.use({ video: "on", screenshot: "on", launchOptions: { slowMo: 400 } });
 
 At the start of every test, before any navigation, load the recording banner so
-the video and screenshot show the URL, the injected payload and, when the code
-runs, an "XSS fired" line. It is also the execution sensor step 2 asserts on,
-so it is the only init script the test needs:
+the video and screenshot show the URL and each request the page makes:
 
     await page.addInitScript({ path: "/srv/url-banner.js" });
+
+The banner also replaces \`alert\`, \`confirm\`, \`prompt\` and \`print\` and records
+each call in \`window.__agentggXss\`. When your proof is that injected code ran
+in the browser, make the payload call one of those functions or set
+\`window.__agentggXss\` itself, then assert
+\`await page.evaluate(() => (window as any).__agentggXss?.length > 0)\`; this is
+more reliable than \`page.waitForEvent("dialog")\` and also catches event
+handlers. Do NOT install a catcher of your own: init scripts run in the order
+you add them, and a second one that replaces the same functions silently
+disables the banner's, so a payload that really ran reads as one that did not.
 
 ${NO_OVERLAY}
 
