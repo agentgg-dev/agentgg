@@ -394,15 +394,15 @@ describe("VercelAgentDetector.suggestFix", () => {
   it.each([
     ["with tools", process.cwd()],
     ["without tools", undefined],
-  ])("limits the output of a call %s, so a search for a fix cannot run to the model's cap", async (_how, root) => {
+  ])("caps the output of a call %s with room for a long think before the answer", async (_how, root) => {
     const { model, calls } = recordingModel("Bind the parameter.");
     await new VercelAgentDetector("openai", model).suggestFix({
       finding: makeFinding(),
       fileContent: "x",
       root,
     });
-    expect(calls[0].maxTokens).toBeGreaterThan(0);
-    expect(calls[0].maxTokens).toBeLessThanOrEqual(32_000);
+    expect(calls[0].maxTokens).toBeGreaterThan(32_000);
+    expect(calls[0].maxTokens).toBeLessThanOrEqual(64_000);
   });
 
   describe("a session that ends on a tool call written as text", () => {

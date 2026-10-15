@@ -435,11 +435,11 @@ const ARTIFACT: Record<ToolLoopPhase, string> = {
 };
 
 /**
- * Output cap for one generation of the fix phase. A fix is short; a model
- * that cannot find one reasons until the provider's own cap instead, which
- * costs several times a normal call and still ends with nothing.
+ * Output cap for one generation of the fix phase. The cap counts reasoning,
+ * and a reasoning model drafts its edits while it thinks before it writes them
+ * out, so a cap sized for the answer alone cuts the answer off.
  */
-const FIX_MAX_OUTPUT_TOKENS = 24_000;
+const FIX_MAX_OUTPUT_TOKENS = 64_000;
 
 /**
  * Turn budget of a fix session, below the validator's. The validator traces
