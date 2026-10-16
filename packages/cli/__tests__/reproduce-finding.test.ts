@@ -157,6 +157,25 @@ describe("asReproduceField", () => {
       counterevidence: "c",
     });
   });
+
+  it("restores escaped UTF-8 bytes in the prose but leaves the script as written", () => {
+    const dash = Buffer.from("—", "utf8").toString("latin1");
+    expect(
+      asReproduceField({
+        result: "reproduced",
+        reasoning: `200 ${dash} leaked`,
+        counterevidence: `none ${dash} clean`,
+        negativeControl: `403 ${dash} denied`,
+        script: `echo '${dash}'`,
+      }),
+    ).toEqual({
+      result: "reproduced",
+      reasoning: "200 — leaked",
+      counterevidence: "none — clean",
+      negativeControl: "403 — denied",
+      script: `echo '${dash}'`,
+    });
+  });
 });
 
 // parseReproduce is private, reached only through reproduceFinding. Each case

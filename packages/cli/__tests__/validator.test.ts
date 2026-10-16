@@ -431,6 +431,21 @@ describe("group validation", () => {
     const v = LlmValidation.parse({ verdict: "uncertain", reasoning: "r", confirmedImpact: "" });
     expect(asValidationField(v)).toEqual({ verdict: "uncertain", reasoning: "r" });
   });
+
+  it("restores punctuation the model wrote as escaped UTF-8 bytes", () => {
+    const v = LlmValidation.parse(
+      JSON.parse(
+        '{"verdict":"confirmed","reasoning":"Real \\u00e2\\u0080\\u0094 see auth.py.",' +
+          '"confirmedImpact":"Mints a key \\u00e2\\u0080\\u0094 any role.",' +
+          '"unconfirmedImpact":"\\u00e2\\u0080\\u009cAdmin\\u00e2\\u0080\\u009d access."}',
+      ),
+    );
+    expect(asValidationField(v)).toMatchObject({
+      reasoning: "Real — see auth.py.",
+      confirmedImpact: "Mints a key — any role.",
+      unconfirmedImpact: "“Admin” access.",
+    });
+  });
 });
 
 describe("buildScopeValidatePrompt", () => {

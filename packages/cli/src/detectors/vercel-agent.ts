@@ -53,6 +53,7 @@ import { ExpectedDetectorError, isInFlightCreditError } from "../diagnostics.js"
 import { looksLikeToolCall } from "../fix-edits.js";
 import { buildFixPrompt, type FixRetry, type LiveScript, LlmFix } from "../fixer.js";
 import { logError, logInfo, logWarn } from "../log.js";
+import { repairMojibake } from "../mojibake.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import type { CallUsage, UsageMeter } from "../usage-meter.js";
 import {
@@ -2889,11 +2890,12 @@ export function asReproduceField(o: ReproduceFindingResult): {
   negativeControl?: string;
   script?: string;
 } {
+  // The script runs as written, so only the prose is repaired.
   const base = {
     result: o.result,
-    reasoning: o.reasoning,
-    counterevidence: o.counterevidence,
-    ...(o.negativeControl ? { negativeControl: o.negativeControl } : {}),
+    reasoning: repairMojibake(o.reasoning),
+    counterevidence: repairMojibake(o.counterevidence),
+    ...(o.negativeControl ? { negativeControl: repairMojibake(o.negativeControl) } : {}),
   };
   if (o.result !== "reproduced") return base;
   return { ...base, ...(o.script ? { script: o.script } : {}) };

@@ -1,6 +1,7 @@
 import type { Finding, ValidationVerdict } from "@agentgg/core";
 import { z } from "zod";
 import { languageFromPath } from "./detect.js";
+import { repairMojibake } from "./mojibake.js";
 
 /**
  * Shape the LLM is asked to produce for a single finding. Maps onto a
@@ -361,9 +362,13 @@ export function asValidationField(v: LlmValidation): {
 } {
   return {
     verdict: v.verdict,
-    reasoning: v.reasoning,
-    ...(v.confirmedImpact?.trim() ? { confirmedImpact: v.confirmedImpact.trim() } : {}),
-    ...(v.unconfirmedImpact?.trim() ? { unconfirmedImpact: v.unconfirmedImpact.trim() } : {}),
+    reasoning: repairMojibake(v.reasoning),
+    ...(v.confirmedImpact?.trim()
+      ? { confirmedImpact: repairMojibake(v.confirmedImpact.trim()) }
+      : {}),
+    ...(v.unconfirmedImpact?.trim()
+      ? { unconfirmedImpact: repairMojibake(v.unconfirmedImpact.trim()) }
+      : {}),
     ...(v.leadId?.trim() ? { leadId: v.leadId.trim() } : {}),
     ...(typeof v.primaryClaimHolds === "boolean" ? { primaryClaimHolds: v.primaryClaimHolds } : {}),
   };
