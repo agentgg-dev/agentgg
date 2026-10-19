@@ -31,6 +31,8 @@ npm install -g agentgg
 
 Requires Node.js 20+. You also need an account with one model provider — Anthropic, OpenAI, AWS Bedrock, Google Vertex AI, OpenRouter, or a local Ollama. See [Providers](https://docs.agentgg.dev/cli/providers) for setup, and [CONTRIBUTING.md](CONTRIBUTING.md) to build from source.
 
+Live validation (`--live-validate`) also needs Docker. If Docker is missing or stopped, agentgg offers to install or start it when the command begins.
+
 ## Quick start
 
 ```bash

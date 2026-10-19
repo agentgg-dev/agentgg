@@ -1,13 +1,26 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { UserConfig } from "@agentgg/core";
-import { saveUserConfig, upsertScanMeta } from "@agentgg/core";
+import type { FileRecord, UserConfig } from "@agentgg/core";
+import { saveUserConfig, upsertScanMeta, writeFileRecord } from "@agentgg/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const detectorMock = vi.hoisted(() => ({
   /** The options each `resolveDetector` call received. */
   resolved: [] as Record<string, unknown>[],
+}));
+
+const liveMocks = vi.hoisted(() => ({
+  setUpDocker: vi.fn(
+    async (): Promise<{ ok: true } | { ok: false; reason: string }> => ({
+      ok: true,
+    }),
+  ),
+  runReproducePhase: vi.fn(async () => {}),
+}));
+vi.mock("../src/validation/docker-setup.js", () => ({ setUpDocker: liveMocks.setUpDocker }));
+vi.mock("../src/validation/reproduce.js", () => ({
+  runReproducePhase: liveMocks.runReproducePhase,
 }));
 
 vi.mock("../src/llm.js", async () => {
@@ -77,5 +90,44 @@ describe("runLiveValidate provider options", () => {
     expect(detectorMock.resolved[0]).toMatchObject({
       credentials: { vertexProject: "my-project" },
     });
+  });
+});
+
+describe("runLiveValidate Docker setup", () => {
+  beforeEach(() => {
+    writeFileRecord(outputDir, {
+      agentSlug: "xss",
+      filePath: "src/app.ts",
+      contentHash: "h",
+      findings: [],
+      analysisHistory: [],
+      candidates: [],
+      status: "validated",
+    } as unknown as FileRecord);
+    liveMocks.setUpDocker.mockClear();
+    liveMocks.runReproducePhase.mockClear();
+  });
+
+  it("stops with the reason when Docker is not ready", async () => {
+    liveMocks.setUpDocker.mockResolvedValueOnce({ ok: false, reason: "Docker is not installed." });
+    await expect(runLiveValidate(outputDir, { targetUrl: TARGET_URL }, env)).rejects.toThrow(
+      "Docker is not installed.",
+    );
+    expect(liveMocks.runReproducePhase).not.toHaveBeenCalled();
+  });
+
+  it("goes on to reproduce once Docker is ready", async () => {
+    await runLiveValidate(outputDir, { targetUrl: TARGET_URL }, env);
+    expect(liveMocks.setUpDocker).toHaveBeenCalledTimes(1);
+    expect(liveMocks.runReproducePhase).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not touch local Docker when attaching to a running sandbox", async () => {
+    await runLiveValidate(
+      outputDir,
+      { targetUrl: TARGET_URL, sandboxEndpoint: "http://127.0.0.1:8931" },
+      { ...env, AGENTGG_SANDBOX_TOKEN: "tk" },
+    );
+    expect(liveMocks.setUpDocker).not.toHaveBeenCalled();
   });
 });

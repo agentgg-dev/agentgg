@@ -56,6 +56,7 @@ import { getSemgrepRulesDir, isSemgrepSuppressed, runSemgrepProject } from "../s
 import { runSmartExclude } from "../smart-exclude.js";
 import { resolveTemplates } from "../template.js";
 import { createUsageMeter, type UsageMeter } from "../usage-meter.js";
+import { setUpDocker } from "../validation/docker-setup.js";
 import { notLiveReproducible, proofRuleMap } from "../validation/proof-rules.js";
 import { runReproducePhase } from "../validation/reproduce.js";
 import { attachFromOpts, DEFAULT_SANDBOX_IMAGE } from "../validation/sandbox.js";
@@ -329,6 +330,17 @@ export async function runScan(
   // must fail before detect/validate/dedup spend anything, not only once the
   // reproduce phase itself starts.
   const attach = opts.liveValidate ? attachFromOpts(opts, env) : undefined;
+  // Before the scan, while the user is still at the terminal to answer the
+  // install or start prompt. A Docker that is not ready skips only the live step.
+  if (opts.liveValidate && !attach) {
+    const docker = await setUpDocker();
+    if (!docker.ok) {
+      console.log(`Live validation: ${docker.reason}`);
+      console.log(
+        "  The scan continues without live validation. To run only the live step later, use `agentgg live-validate`.\n",
+      );
+    }
+  }
 
   const root = resolve(rootArg);
   const outDir = resolve(opts.output ?? "./scan-results/");

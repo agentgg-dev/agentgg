@@ -17,6 +17,7 @@ import {
   validateProviderFlags,
 } from "../providers/index.js";
 import { writeMarkdownReport } from "../reporters/md.js";
+import { setUpDocker } from "../validation/docker-setup.js";
 import { notLiveReproducible, proofRuleMap } from "../validation/proof-rules.js";
 import { runReproducePhase } from "../validation/reproduce.js";
 import { attachFromOpts, DEFAULT_SANDBOX_IMAGE } from "../validation/sandbox.js";
@@ -86,6 +87,12 @@ export async function runLiveValidate(
     return;
   }
   const findings: Finding[] = records.flatMap((r) => r.findings);
+
+  // The live step is this command's only work, so a Docker that is not ready ends it.
+  if (!attach) {
+    const docker = await setUpDocker();
+    if (!docker.ok) throw new Error(docker.reason);
+  }
 
   const runMeta = createRunMeta({
     type: "validate",
