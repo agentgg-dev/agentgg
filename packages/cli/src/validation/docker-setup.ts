@@ -213,11 +213,12 @@ async function installDocker(): Promise<void> {
 async function installWindows(url: string, dir: string): Promise<void> {
   const exe = join(dir, "Docker Desktop Installer.exe");
   await download(url, exe, "Docker Desktop");
-  const { stdout } = await powershell(
+  const { stdout, stderr } = await powershell(
     `$s = Get-AuthenticodeSignature -LiteralPath ${psQuote(exe)}; "$($s.Status)|$($s.SignerCertificate.Subject)"`,
   );
   if (!/^Valid\|.*Docker,? Inc/i.test(stdout.trim())) {
-    throw new Error(`the downloaded installer is not signed by Docker (${stdout.trim()})`);
+    const detail = [stdout.trim(), stderr.trim().split(/\r?\n/)[0]].filter(Boolean).join(" ");
+    throw new Error(`the downloaded installer is not signed by Docker (${detail})`);
   }
   console.log("Installing Docker Desktop. Accept the Windows administrator prompt.");
   // ErrorActionPreference: a declined UAC prompt must fail the script, not exit 0.
@@ -315,9 +316,9 @@ async function download(url: string, dest: string, label: string): Promise<void>
 }
 
 /** Runs with the terminal attached, so sudo and installers can ask the user. */
-function run(cmd: string[]): Promise<void> {
+function run(cmd: string[], env: NodeJS.ProcessEnv = process.env): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd[0], cmd.slice(1), { stdio: "inherit" });
+    const child = spawn(cmd[0], cmd.slice(1), { stdio: "inherit", env });
     child.on("error", (err) => reject(new Error(`could not run ${cmd[0]}: ${err.message}`)));
     child.on("close", (code) =>
       code === 0 ? resolve() : reject(new Error(`${cmd[0]} exited with code ${code}`)),
@@ -335,12 +336,24 @@ function encoded(script: string): string[] {
   ];
 }
 
-function powershell(script: string): Promise<{ stdout: string }> {
-  return pexec("powershell.exe", encoded(script));
+/**
+ * The environment for a Windows PowerShell 5.1 child. A PowerShell 7 parent
+ * leaves its own module folders in PSModulePath, and 5.1 then fails to load
+ * built-in cmdlets such as Get-AuthenticodeSignature. Without the variable,
+ * 5.1 uses its default module folders.
+ */
+export function windowsPowershellEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    Object.entries(env).filter(([key]) => key.toLowerCase() !== "psmodulepath"),
+  );
+}
+
+function powershell(script: string): Promise<{ stdout: string; stderr: string }> {
+  return pexec("powershell.exe", encoded(script), { env: windowsPowershellEnv(process.env) });
 }
 
 function runPowershell(script: string): Promise<void> {
-  return run(["powershell.exe", ...encoded(script)]);
+  return run(["powershell.exe", ...encoded(script)], windowsPowershellEnv(process.env));
 }
 
 function psQuote(s: string): string {

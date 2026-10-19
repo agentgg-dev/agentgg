@@ -4,6 +4,7 @@ import {
   type DockerState,
   dockerDownloadUrl,
   setUpDocker,
+  windowsPowershellEnv,
 } from "../src/validation/docker-setup.js";
 
 /** Each `state()` call returns the next entry; the last one repeats. */
@@ -194,5 +195,19 @@ describe("dockerDownloadUrl", () => {
   it("has no installer for other platforms or CPUs", () => {
     expect(dockerDownloadUrl("freebsd", "x64")).toBeNull();
     expect(dockerDownloadUrl("win32", "ia32")).toBeNull();
+  });
+});
+
+describe("windowsPowershellEnv", () => {
+  // A PowerShell 7 parent puts its own module folders in PSModulePath, and
+  // Windows PowerShell 5.1 then fails to load Get-AuthenticodeSignature.
+  it("drops an inherited PSModulePath in any letter case and keeps the rest", () => {
+    const pwsh7 = "C:/Program Files/PowerShell/7/Modules";
+    expect(windowsPowershellEnv({ PATH: "C:/bin", PSModulePath: pwsh7 })).toEqual({
+      PATH: "C:/bin",
+    });
+    expect(windowsPowershellEnv({ PATH: "C:/bin", PSMODULEPATH: pwsh7 })).toEqual({
+      PATH: "C:/bin",
+    });
   });
 });
