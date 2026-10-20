@@ -132,7 +132,9 @@ describe("copyEvidence", () => {
     // the agent's turn has already returned.
     setTimeout(() => files.set("/out/page-late.webm", Buffer.from("late video")), 20);
 
-    const ev = await copyEvidence(sb, dir, FAST);
+    // A wide window: the wait ends as soon as the video appears, and a loaded CI
+    // runner can fire the timer above well past FAST's 60 ms.
+    const ev = await copyEvidence(sb, dir, { ...FAST, videoWaitMs: 5_000 });
     expect(ev.video).toBe("page-late.webm");
     expect(readFileSync(join(dir, "page-late.webm"), "utf8")).toBe("late video");
   });
