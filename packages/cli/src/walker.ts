@@ -119,7 +119,8 @@ export function walkForAgents(
   cfg: WalkConfig = {},
 ): AgentWorkItem[] {
   const absRoot = resolve(root);
-  const allFiles = collectFiles(absRoot, absRoot, cfg);
+  const allFiles: string[] = [];
+  collectFiles(absRoot, absRoot, cfg, allFiles);
 
   return agents.map((agent) => ({
     agent,
@@ -136,20 +137,23 @@ export function walkForAgents(
  */
 export function collectAllFiles(root: string, cfg: WalkConfig = {}): string[] {
   const absRoot = resolve(root);
-  return collectFiles(absRoot, absRoot, cfg);
+  const out: string[] = [];
+  collectFiles(absRoot, absRoot, cfg, out);
+  return out;
 }
 
-function collectFiles(root: string, dir: string, cfg: WalkConfig): string[] {
+// Appends to `out` in place: spreading a subtree's list into push() overflows
+// the stack past ~125k files.
+function collectFiles(root: string, dir: string, cfg: WalkConfig, out: string[]): void {
   const excludePatterns = cfg.excludePatterns ?? [];
   const includePatterns = cfg.includePatterns ?? [];
   const maxSize = cfg.maxFileSizeBytes ?? DEFAULT_MAX_FILE_SIZE;
-  const out: string[] = [];
 
   let entries: string[];
   try {
     entries = readdirSync(dir);
   } catch {
-    return out;
+    return;
   }
 
   for (const name of entries) {
@@ -166,7 +170,7 @@ function collectFiles(root: string, dir: string, cfg: WalkConfig): string[] {
       // Prune excluded directories so we never descend into (and pay for
       // statting) node_modules, .git, etc.
       if (isExcludedDir(rel, excludePatterns)) continue;
-      out.push(...collectFiles(root, abs, cfg));
+      collectFiles(root, abs, cfg, out);
       continue;
     }
     if (!stat.isFile()) continue;
@@ -182,7 +186,6 @@ function collectFiles(root: string, dir: string, cfg: WalkConfig): string[] {
 
     out.push(rel);
   }
-  return out;
 }
 
 /**
