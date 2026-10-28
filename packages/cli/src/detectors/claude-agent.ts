@@ -314,7 +314,6 @@ export class ClaudeAgentDetector implements Detector {
       maxTurns: 1,
       schema: GeneratedProofScript,
       signal: args.signal,
-      settingSources: [],
     });
     return result.script;
   }
@@ -355,8 +354,6 @@ export class ClaudeAgentDetector implements Detector {
     );
     // No built-in tools (no Read/Glob/Grep); this session works only against
     // the live target through the Playwright MCP server the sandbox hosts.
-    // settingSources: [] isolates it from the user's ~/.claude settings and
-    // CLAUDE.md, so their rules cannot disable the MCP tools or forbid browsing.
     try {
       const result = await this.runStructured({
         prompt,
@@ -370,7 +367,6 @@ export class ClaudeAgentDetector implements Detector {
           playwright: { type: "http", url: args.browserEndpoint.replace(/\/sse$/, "/mcp") },
         },
         allowedTools: ["mcp__playwright__*"],
-        settingSources: [],
       });
       return result.result === "reproduced"
         ? {
@@ -526,12 +522,6 @@ export class ClaudeAgentDetector implements Detector {
      * `mcpServers` is set.
      */
     allowedTools?: string[];
-    /**
-     * Filesystem setting sources for the SDK to load. Pass `[]` for isolation:
-     * skip the user's ~/.claude settings and CLAUDE.md. Omitted by every pass
-     * except reproduceFinding, so the others keep the SDK's load-all default.
-     */
-    settingSources?: ("user" | "project" | "local")[];
   }): Promise<z.infer<T>> {
     const jsonSchema = zodToJsonSchema(opts.schema) as Record<string, unknown>;
     // Bridge: parent gives us a signal, SDK wants a controller. Make a
@@ -572,7 +562,10 @@ export class ClaudeAgentDetector implements Detector {
           tools: opts.tools,
           ...(opts.mcpServers ? { mcpServers: opts.mcpServers } : {}),
           ...(opts.allowedTools ? { allowedTools: opts.allowedTools } : {}),
-          ...(opts.settingSources !== undefined ? { settingSources: opts.settingSources } : {}),
+          // Ignore the user's own Claude Code setup (settings, hooks, plugins,
+          // CLAUDE.md, MCP servers) so a scan behaves the same on every machine.
+          settingSources: [],
+          strictMcpConfig: true,
           permissionMode: "bypassPermissions",
           maxTurns: opts.maxTurns,
           model: this.model,
@@ -664,6 +657,8 @@ export class ClaudeAgentDetector implements Detector {
         env[k] = v;
       }
     }
+    // Empty setting sources still load auto memory; only this env var stops it.
+    env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = "1";
     if (this.oauthToken) env.CLAUDE_CODE_OAUTH_TOKEN = this.oauthToken;
     if (this.apiKey) env.ANTHROPIC_API_KEY = this.apiKey;
     return env;
