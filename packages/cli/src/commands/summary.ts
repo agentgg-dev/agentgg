@@ -1,4 +1,4 @@
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import {
   completeRun,
   createRunMeta,
@@ -89,7 +89,7 @@ export async function runSummary(
     `Wrote report for ${allFindings.length} finding(s) across ${records.length} record(s).`,
   );
   console.log(`  Summary: ${report.summaryPath}`);
-  console.log(`  Findings dir: ${outputDir}\\findings`);
+  console.log(`  Findings dir: ${join(outputDir, "findings")}`);
 }
 
 export function registerSummaryCommand(program: Command): void {

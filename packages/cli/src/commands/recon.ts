@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import type { Agent, Provider } from "@agentgg/core";
 import {
   completeRun,
@@ -293,7 +293,7 @@ export async function runReconCommand(
       if (opts.verbose) logError(`plan: failed to write: ${(err as Error).message}`);
     }
     console.log(
-      `Preconditions: ${queuedAgents.length} queued, ${skippedCount} skipped → ${outDir}\\state\\plan.json`,
+      `Preconditions: ${queuedAgents.length} queued, ${skippedCount} skipped → ${join(outDir, "state", "plan.json")}`,
     );
     // The plan is the product of this command — always print the per-agent
     // decisions, not just under --verbose (unlike scan, where they're noise

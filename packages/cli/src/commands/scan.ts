@@ -359,7 +359,7 @@ export async function runScan(
   });
   writeRunMeta(outDir, runMeta);
   if (opts.verbose) {
-    console.log(`State: ${outDir}\\state  (run ${runMeta.runId})`);
+    console.log(`State: ${join(outDir, "state")}  (run ${runMeta.runId})`);
   }
 
   // SIGINT (Ctrl+C) / SIGTERM handler: mark the run as errored on disk
@@ -558,11 +558,11 @@ export async function runScan(
         for (const g of cachedExcludes) smartExcludes.push(g);
         if (cachedExcludes.length > 0) {
           console.log(
-            `Auto-exclude: reusing ${cachedExcludes.length} folder(s) from ${outDir}\\state\\plan.json: ${cachedExcludes.join(", ")} (pass --re-recon to re-derive).`,
+            `Auto-exclude: reusing ${cachedExcludes.length} folder(s) from ${join(outDir, "state", "plan.json")}: ${cachedExcludes.join(", ")} (pass --re-recon to re-derive).`,
           );
         } else {
           console.log(
-            `Auto-exclude: reusing prior result from ${outDir}\\state\\plan.json (nothing to drop; pass --re-recon to re-derive).`,
+            `Auto-exclude: reusing prior result from ${join(outDir, "state", "plan.json")} (nothing to drop; pass --re-recon to re-derive).`,
           );
         }
       } else {
@@ -893,7 +893,7 @@ export async function runScan(
             },
         );
         console.log(
-          `\n[2/3] Preconditions — reusing cached plan from ${outDir}\\state\\plan.json (${queuedAgents.length} queued; pass --re-recon to re-evaluate).`,
+          `\n[2/3] Preconditions — reusing cached plan from ${join(outDir, "state", "plan.json")} (${queuedAgents.length} queued; pass --re-recon to re-evaluate).`,
         );
       } else {
         console.log("\n[2/3] Preconditions — deciding which agents run…");
@@ -930,7 +930,7 @@ export async function runScan(
       if (opts.verbose) logError(`plan: failed to write: ${(err as Error).message}`);
     }
     console.log(
-      `Preconditions: ${queuedAgents.length} queued, ${skippedCount} skipped → ${outDir}\\state\\plan.json`,
+      `Preconditions: ${queuedAgents.length} queued, ${skippedCount} skipped → ${join(outDir, "state", "plan.json")}`,
     );
     if (opts.verbose) {
       for (const d of decisions) {
@@ -2232,7 +2232,7 @@ export async function runScan(
     }
     if (report) {
       console.log(`  Summary: ${report.summaryPath}`);
-      console.log(`  Findings dir: ${outDir}\\findings`);
+      console.log(`  Findings dir: ${join(outDir, "findings")}`);
     } else {
       console.log(
         `  Summary: skipped (--no-summary). Run \`agentgg summary ${opts.output ?? "./scan-results/"}\` to render it.`,
