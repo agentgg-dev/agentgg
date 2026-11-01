@@ -542,6 +542,7 @@ export async function runScan(
     // Advisory: a pass failure degrades to "no auto-excludes" rather than
     // aborting the scan. Off by default, and always logged.
     const smartExcludes: string[] = [];
+    let autoExcludeFailed = false;
     if (opts.autoExclude) {
       // Reuse the auto-exclude globs a prior `recon` (or `scan`) already chose
       // for this output dir when they exist — the same plan→run hand-off that
@@ -589,6 +590,7 @@ export async function runScan(
             console.log("Auto-exclude: nothing to drop; scanning the whole tree.");
           }
         } catch (err) {
+          autoExcludeFailed = true;
           logWarn(
             `auto-exclude: pass did not complete (${(err as Error).message}); continuing without it.`,
           );
@@ -922,9 +924,10 @@ export async function runScan(
         decisions,
         // Persist the auto-excludes in effect this run so a later scan against
         // the same output dir reuses them instead of re-deriving (mirrors how
-        // `recon` records them). Present only when the pass ran or was reused;
-        // `--no-auto-exclude` writes `undefined`, matching recon's producer.
-        autoExcludes: opts.autoExclude ? smartExcludes : undefined,
+        // `recon` records them). Present only when the pass completed or was
+        // reused; a failed pass and `--no-auto-exclude` write `undefined`, so a
+        // later scan derives them again.
+        autoExcludes: opts.autoExclude && !autoExcludeFailed ? smartExcludes : undefined,
       });
     } catch (err) {
       if (opts.verbose) logError(`plan: failed to write: ${(err as Error).message}`);

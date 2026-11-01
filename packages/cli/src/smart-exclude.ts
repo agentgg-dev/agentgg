@@ -96,6 +96,7 @@ export async function runSmartExclude(
   });
   if (files.length === 0) return [];
 
+  console.log("Auto-exclude: asking the model which folders to skip…");
   const result = await opts.detector.suggestExcludes({
     instructions: loadExcludeInstructions(),
     dirTree: renderDirTree(files),

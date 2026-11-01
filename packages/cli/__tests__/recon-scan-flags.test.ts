@@ -244,6 +244,20 @@ describe("recon --auto-exclude", () => {
     expect(detectorMock.suggestExcludes).not.toHaveBeenCalled();
     expect(readScanPlan(outputDir)?.autoExcludes).toBeUndefined();
   });
+
+  it("omits autoExcludes when the pass fails, so the next run tries again", async () => {
+    suppressLogs();
+    detectorMock.suggestExcludes.mockImplementation(async () => {
+      throw new Error("Reached maximum number of turns (3)");
+    });
+    await runReconCommand(
+      projectRoot,
+      { template: [agentPlain], output: outputDir, autoExclude: true },
+      env,
+    );
+
+    expect(readScanPlan(outputDir)?.autoExcludes).toBeUndefined();
+  });
 });
 
 describe("scan --no-recon", () => {
@@ -455,6 +469,43 @@ describe("scan --auto-exclude reuse", () => {
       env,
     );
     expect(detectorMock.suggestExcludes).toHaveBeenCalledTimes(1); // re-derived, not reused
+  });
+
+  it("runs the pass again after a failed one instead of reusing an empty result", async () => {
+    suppressLogs();
+    detectorMock.suggestExcludes.mockImplementationOnce(async () => {
+      throw new Error("Reached maximum number of turns (3)");
+    });
+    await runScan(
+      projectRoot,
+      { template: [agentPlain], output: outputDir, autoExclude: true },
+      env,
+    );
+    expect(readScanPlan(outputDir)?.autoExcludes).toBeUndefined();
+
+    await runScan(
+      projectRoot,
+      { template: [agentPlain], output: outputDir, autoExclude: true },
+      env,
+    );
+    expect(detectorMock.suggestExcludes).toHaveBeenCalledTimes(2);
+    expect(readScanPlan(outputDir)?.autoExcludes).toEqual(["tests/**"]);
+  });
+
+  it("logs a line before it waits on the model", async () => {
+    suppressLogs();
+    await runScan(
+      projectRoot,
+      { template: [agentPlain], output: outputDir, autoExclude: true },
+      env,
+    );
+
+    const log = vi.mocked(console.log);
+    const i = log.mock.calls.findIndex(([m]) => String(m).startsWith("Auto-exclude: asking"));
+    expect(i).toBeGreaterThanOrEqual(0);
+    expect(log.mock.invocationCallOrder[i]).toBeLessThan(
+      detectorMock.suggestExcludes.mock.invocationCallOrder[0],
+    );
   });
 
   it("derives fresh when the prior recon ran without --auto-exclude", async () => {

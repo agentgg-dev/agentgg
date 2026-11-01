@@ -192,6 +192,7 @@ export async function runReconCommand(
     // runner (e.g. the platform's agent workers) can replay them as --exclude
     // without paying for the pass N times.
     const smartExcludes: string[] = [];
+    let autoExcludeFailed = false;
     if (opts.autoExclude) {
       const baselineWalk =
         opts.defaultExcludes === false ? [...cliExcludes] : [...DEFAULT_EXCLUDES, ...cliExcludes];
@@ -216,6 +217,7 @@ export async function runReconCommand(
           console.log("Auto-exclude: nothing to drop; planning the whole tree.");
         }
       } catch (err) {
+        autoExcludeFailed = true;
         logWarn(`Auto-exclude pass failed (continuing without it): ${(err as Error).message}`);
       }
     }
@@ -285,9 +287,9 @@ export async function runReconCommand(
         reconHash: recon.reconHash,
         rootPath: sourceId,
         decisions: selection.decisions,
-        // Present (even if []) only when the pass ran, so a reader can tell
-        // "auto-exclude didn't run" from "ran, chose nothing".
-        autoExcludes: opts.autoExclude ? smartExcludes : undefined,
+        // Present (even if []) only when the pass completed, so a reader can
+        // tell "chose nothing" from "did not run or failed" (a later run retries).
+        autoExcludes: opts.autoExclude && !autoExcludeFailed ? smartExcludes : undefined,
       });
     } catch (err) {
       if (opts.verbose) logError(`plan: failed to write: ${(err as Error).message}`);
