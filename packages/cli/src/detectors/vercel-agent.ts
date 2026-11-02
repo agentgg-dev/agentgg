@@ -2784,7 +2784,7 @@ async function buildSourceIndex(
       const fullPath = join(dir, entry.name);
       if (excluded(normalizeSep(relative(rootDir, fullPath)))) continue;
       if (entry.isDirectory()) await walk(fullPath);
-      else if (languageFromPath(entry.name) === language) files.push(fullPath);
+      else if (entry.isFile() && languageFromPath(entry.name) === language) files.push(fullPath);
     }
   }
   await walk(rootDir);
@@ -2824,12 +2824,11 @@ async function walkAndMatch(
       const relPath = normalizeSep(relative(rootDir, fullPath));
       // Excluded paths are treated as deleted — never descended or matched.
       if (excluded(relPath)) continue;
+      // A link is neither, so it is skipped: it can point outside the root.
       if (entry.isDirectory()) {
         await walk(fullPath);
-      } else {
-        if (matcher.match(relPath)) {
-          results.push(relPath);
-        }
+      } else if (entry.isFile() && matcher.match(relPath)) {
+        results.push(relPath);
       }
     }
   }

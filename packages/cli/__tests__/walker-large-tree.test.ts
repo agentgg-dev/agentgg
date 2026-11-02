@@ -10,7 +10,7 @@ vi.mock("node:fs", async (importOriginal) => {
   return {
     ...actual,
     readdirSync: (dir: string) => (basename(dir) === "big" ? bigDir : ["big"]),
-    statSync: (p: string) => {
+    lstatSync: (p: string) => {
       const isFile = /^f\d+\.ts$/.test(basename(p));
       return { isDirectory: () => !isFile, isFile: () => isFile, size: 1 };
     },

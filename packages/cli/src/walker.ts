@@ -1,4 +1,4 @@
-import { readdirSync, statSync } from "node:fs";
+import { lstatSync, readdirSync } from "node:fs";
 import { join, relative, resolve, sep } from "node:path";
 import type { Agent } from "@agentgg/core";
 import { Minimatch, minimatch } from "minimatch";
@@ -158,9 +158,11 @@ function collectFiles(root: string, dir: string, cfg: WalkConfig, out: string[])
 
   for (const name of entries) {
     const abs = join(dir, name);
-    let stat: ReturnType<typeof statSync>;
+    // lstat, so a link is neither a file nor a directory and is skipped: a
+    // link can point outside the root or back up the tree.
+    let stat: ReturnType<typeof lstatSync>;
     try {
-      stat = statSync(abs);
+      stat = lstatSync(abs);
     } catch {
       continue;
     }

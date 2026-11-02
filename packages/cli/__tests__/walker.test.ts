@@ -9,6 +9,7 @@ import {
   includedByWhere,
   walkForAgents,
 } from "../src/walker.js";
+import { linkDir, tryLinkFile } from "./fs-links.js";
 
 let tmp: string;
 
@@ -105,6 +106,44 @@ describe("collectAllFiles", () => {
     const files = collectAllFiles(tmp, { excludePatterns: DEFAULT_EXCLUDES });
     expect(files).not.toContain("scan-results/findings/old.md");
     expect(files).toContain("src/real.ts");
+  });
+
+  describe("links", () => {
+    let outside: string;
+
+    beforeEach(() => {
+      outside = mkdtempSync(join(tmpdir(), "agentgg-walker-outside-"));
+      writeFileSync(join(outside, "secret.txt"), "x", "utf8");
+    });
+
+    afterEach(() => {
+      rmSync(outside, { recursive: true, force: true });
+    });
+
+    it("skips a link to a file", (ctx) => {
+      touch("src/a.ts");
+      if (!tryLinkFile(join(outside, "secret.txt"), join(tmp, "notes.txt"))) ctx.skip();
+      expect(collectAllFiles(tmp)).toEqual(["src/a.ts"]);
+    });
+
+    it("skips a link to a folder", () => {
+      touch("src/a.ts");
+      linkDir(outside, join(tmp, "shared"));
+      expect(collectAllFiles(tmp)).toEqual(["src/a.ts"]);
+    });
+
+    it("stops at a folder link that points back up the tree", () => {
+      touch("src/a.ts");
+      linkDir(tmp, join(tmp, "src", "loop"));
+      expect(collectAllFiles(tmp)).toEqual(["src/a.ts"]);
+    });
+
+    it("walks a scan root that is itself a link", () => {
+      mkdirSync(join(outside, "src"));
+      writeFileSync(join(outside, "src", "a.ts"), "x", "utf8");
+      linkDir(outside, join(tmp, "root"));
+      expect(collectAllFiles(join(tmp, "root")).sort()).toEqual(["secret.txt", "src/a.ts"]);
+    });
   });
 });
 
