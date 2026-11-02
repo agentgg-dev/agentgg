@@ -1,5 +1,10 @@
+import { isAbsolute } from "node:path";
 import type { CvssScore, Finding, LiveResult, ReconReport } from "@agentgg/core";
-import type { McpServerConfig } from "@anthropic-ai/claude-agent-sdk";
+import type {
+  HookCallbackMatcher,
+  HookEvent,
+  McpServerConfig,
+} from "@anthropic-ai/claude-agent-sdk";
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
@@ -31,6 +36,7 @@ import {
 } from "../detect.js";
 import { buildFixPrompt, type FixRetry, type LiveScript, LlmFix } from "../fixer.js";
 import { logError, logWarn } from "../log.js";
+import { namesOutsideRoot } from "../repo-path.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import type { CallUsage, UsageMeter } from "../usage-meter.js";
 import {
@@ -557,7 +563,7 @@ export class ClaudeAgentDetector implements Detector {
       for await (const message of query({
         prompt: opts.prompt,
         options: {
-          ...(opts.cwd ? { cwd: opts.cwd } : {}),
+          ...(opts.cwd ? { cwd: opts.cwd, hooks: rootGuard(opts.cwd) } : {}),
           ...(process.env.CLAUDE_CODE_EXECUTABLE
             ? { pathToClaudeCodeExecutable: process.env.CLAUDE_CODE_EXECUTABLE }
             : {}),
@@ -696,6 +702,56 @@ export function extractClaudeUsage(usage: unknown): CallUsage {
 }
 
 /** A finite positive number, else 0. Token counts are never negative. */
+/**
+ * Why a Read, Glob or Grep call reaches outside `root`, or undefined when it
+ * stays inside. Claude Code's own tools accept any path, so this runs as a
+ * PreToolUse hook, which still applies under bypassPermissions.
+ */
+export function outsideRootReason(
+  root: string,
+  toolName: string,
+  input: unknown,
+): string | undefined {
+  const args = (input ?? {}) as Record<string, unknown>;
+  const path = toolName === "Read" ? args.file_path : args.path;
+  if (typeof path === "string" && namesOutsideRoot(root, path)) {
+    return `${path} is outside the repository`;
+  }
+  const pattern = args.pattern;
+  if (
+    toolName === "Glob" &&
+    typeof pattern === "string" &&
+    (isAbsolute(pattern) || pattern.split(/[\\/]/).includes(".."))
+  ) {
+    return `${pattern} reaches outside the repository`;
+  }
+  return undefined;
+}
+
+function rootGuard(root: string): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
+  return {
+    PreToolUse: [
+      {
+        matcher: "Read|Glob|Grep",
+        hooks: [
+          async (input) => {
+            if (input.hook_event_name !== "PreToolUse") return {};
+            const reason = outsideRootReason(root, input.tool_name, input.tool_input);
+            if (reason === undefined) return {};
+            return {
+              hookSpecificOutput: {
+                hookEventName: "PreToolUse",
+                permissionDecision: "deny",
+                permissionDecisionReason: reason,
+              },
+            };
+          },
+        ],
+      },
+    ],
+  };
+}
+
 function claudeNumberish(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) && v > 0 ? v : 0;
 }
