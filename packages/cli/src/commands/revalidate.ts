@@ -22,6 +22,7 @@ import {
   REGION_FLAG_HELP,
   validateProviderFlags,
 } from "../providers/index.js";
+import { readRepoFileSync } from "../repo-path.js";
 import { writeMarkdownReport } from "../reporters/md.js";
 import { createUsageMeter } from "../usage-meter.js";
 import { fitMembers } from "../validator.js";
@@ -283,11 +284,10 @@ export async function runRevalidate(
       return;
     }
 
-    const absPath = resolve(rootPath, finding.filePath);
     let content = fileCache.get(finding.filePath);
     if (content === undefined) {
       try {
-        content = readFileSync(absPath, "utf8");
+        content = readRepoFileSync(rootPath, finding.filePath);
       } catch {
         content = null;
       }

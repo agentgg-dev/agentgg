@@ -51,6 +51,7 @@ import {
   validateProviderFlags,
 } from "../providers/index.js";
 import { renderReconForPrompt, runRecon } from "../recon.js";
+import { namesOutsideRoot, readRepoFileSync } from "../repo-path.js";
 import { findingFilenameSlug, writeMarkdownReport } from "../reporters/md.js";
 import { getSemgrepRulesDir, isSemgrepSuppressed, runSemgrepProject } from "../semgrep.js";
 import { runSmartExclude } from "../smart-exclude.js";
@@ -1182,6 +1183,7 @@ export async function runScan(
       for (const relPath of scopedFiles) {
         let content: string;
         try {
+          // A walker path: inside the root and never a link.
           content = readFileSync(resolve(root, relPath), "utf8");
         } catch {
           continue;
@@ -1334,7 +1336,7 @@ export async function runScan(
           }
           let content: string;
           try {
-            content = readFileSync(resolve(root, rec.filePath), "utf8");
+            content = readRepoFileSync(root, rec.filePath);
           } catch {
             continue;
           }
@@ -1494,6 +1496,12 @@ export async function runScan(
             );
             return false;
           }
+          if (namesOutsideRoot(root, f.filePath)) {
+            logWarn(
+              `${agent.slug}: discarded a finding naming "${f.filePath}", which is outside the repository`,
+            );
+            return false;
+          }
           if (existsSync(resolve(root, f.filePath))) return true;
           logWarn(
             `${agent.slug}: discarded a finding naming "${f.filePath}", which is neither a file ` +
@@ -1530,7 +1538,7 @@ export async function runScan(
             content = inBatch.content;
           } else {
             try {
-              content = readFileSync(resolve(root, relPath), "utf8");
+              content = readRepoFileSync(root, relPath);
             } catch {
               continue;
             }
@@ -1649,7 +1657,7 @@ export async function runScan(
           let content = dedupeFileCache.get(filePath);
           if (content === undefined) {
             try {
-              content = readFileSync(resolve(root, filePath), "utf8");
+              content = readRepoFileSync(root, filePath);
             } catch {
               content = null;
             }
@@ -1810,7 +1818,7 @@ export async function runScan(
           let content = fileCache.get(finding.filePath);
           if (content === undefined) {
             try {
-              content = readFileSync(resolve(root, finding.filePath), "utf8");
+              content = readRepoFileSync(root, finding.filePath);
             } catch {
               content = null;
             }
@@ -2077,7 +2085,7 @@ export async function runScan(
             let content = scoreFileCache.get(finding.filePath);
             if (content === undefined) {
               try {
-                content = readFileSync(resolve(root, finding.filePath), "utf8");
+                content = readRepoFileSync(root, finding.filePath);
               } catch {
                 content = null;
               }

@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { FileRecord, Finding, Provider } from "@agentgg/core";
 import {
@@ -21,6 +20,7 @@ import {
   REGION_FLAG_HELP,
   validateProviderFlags,
 } from "../providers/index.js";
+import { readRepoFileSync } from "../repo-path.js";
 import { writeMarkdownReport } from "../reporters/md.js";
 import { createUsageMeter } from "../usage-meter.js";
 import { buildInvocation } from "./invocation.js";
@@ -243,7 +243,7 @@ export async function runDedup(
     let content = fileCache.get(filePath);
     if (content === undefined) {
       try {
-        content = readFileSync(resolve(rootPath, filePath), "utf8");
+        content = readRepoFileSync(rootPath, filePath);
       } catch {
         content = null;
       }

@@ -1,8 +1,8 @@
 /**
  * The tools show only what is inside the repository. A link can point
- * anywhere, so the tool walks skip links.
+ * anywhere, so the tool walks skip links and Read checks the real path.
  */
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -37,6 +37,30 @@ describe("Glob", () => {
   it("lists no link", async () => {
     linkDir(outside, join(root, "lib.ts"));
     expect(await run(tools().Glob, { pattern: "**/*.ts" })).toBe("a.ts");
+  });
+});
+
+describe("Read", () => {
+  it("refuses a path through a folder link that points outside the root", async () => {
+    linkDir(outside, join(root, "shared"));
+    const out = await run(tools().Read, { path: "shared/secret.ts", offset: null, limit: null });
+    expect(out).toMatch(/Access denied/);
+  });
+
+  it("refuses a folder next to the root whose name starts with the root's name", async () => {
+    const sibling = `${root}2`;
+    mkdirSync(sibling);
+    writeFileSync(join(sibling, "secret.ts"), "const needle = 1;\n", "utf8");
+    try {
+      const out = await run(tools().Read, {
+        path: join(sibling, "secret.ts"),
+        offset: null,
+        limit: null,
+      });
+      expect(out).toMatch(/Access denied/);
+    } finally {
+      rmSync(sibling, { recursive: true, force: true });
+    }
   });
 });
 

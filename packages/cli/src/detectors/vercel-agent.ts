@@ -31,6 +31,7 @@ import {
   DetectionResult,
   type DetectionResult as DetectionResultType,
   type Detector,
+  findingsInsideRoot,
   findUnverifiedExcerpts,
   GeneratedProofScript,
   hydrateFinding,
@@ -54,6 +55,7 @@ import { looksLikeToolCall } from "../fix-edits.js";
 import { buildFixPrompt, type FixRetry, type LiveScript, LlmFix } from "../fixer.js";
 import { logError, logInfo, logWarn } from "../log.js";
 import { repairMojibake } from "../mojibake.js";
+import { namesOutsideRoot, resolveInsideRoot } from "../repo-path.js";
 import { asCvssScore, buildScorePrompt, LlmScore } from "../scoring.js";
 import type { CallUsage, UsageMeter } from "../usage-meter.js";
 import {
@@ -1108,9 +1110,12 @@ export class VercelAgentDetector implements Detector {
         throw parseErr;
       }
       const fallback = args.candidates[0]?.filePath ?? "(unknown)";
-      const findings = result.findings.map((f) =>
-        hydrateFinding(repairFindingPath(f, args.rootDir, args.candidates), args.agent, fallback),
+      const repaired = result.findings.map((f) =>
+        repairFindingPath(f, args.rootDir, args.candidates),
       );
+      const findings = findingsInsideRoot(repaired, args.rootDir, (path) =>
+        logWarn(`[${label}] discarded a finding naming "${path}", which is outside the repository`),
+      ).map((f) => hydrateFinding(f, args.agent, fallback));
       return await this.verifyExcerpts(label, findings, args);
     } catch (err) {
       debugLog("VercelAgentDetector.runAgent", err);
@@ -1133,9 +1138,9 @@ export class VercelAgentDetector implements Detector {
       const sources = args.candidates.map((c) => c.content);
       let fileText = args.candidates.find((c) => c.filePath === finding.filePath)?.content;
       if (fileText === undefined) {
-        fileText = await readFile(resolve(args.rootDir, finding.filePath), "utf-8").catch(
-          () => undefined,
-        );
+        const real = resolveInsideRoot(args.rootDir, finding.filePath);
+        fileText =
+          real === undefined ? undefined : await readFile(real, "utf-8").catch(() => undefined);
         if (fileText !== undefined) sources.push(fileText);
       }
       const text = fileText;
@@ -2549,7 +2554,7 @@ async function readToolExecute(
 ): Promise<ReadOutput> {
   try {
     const absolutePath = resolve(cwd, path);
-    if (!isSafe(absolutePath, cwd)) {
+    if (namesOutsideRoot(cwd, path)) {
       return failedRead("Error: Access denied. Path must be within the repository root.");
     }
     if (isExcludedPath(normalizeSep(relative(cwd, absolutePath)), exclude)) {
@@ -2840,12 +2845,6 @@ async function walkAndMatch(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function isSafe(absolutePath: string, cwd: string): boolean {
-  const a = normalizeSep(absolutePath).toLowerCase();
-  const b = normalizeSep(cwd).toLowerCase();
-  return a.startsWith(b);
-}
 
 function normalizeSep(p: string): string {
   return p.replace(/\\/g, "/");

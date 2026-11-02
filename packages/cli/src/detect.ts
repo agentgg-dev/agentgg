@@ -6,6 +6,7 @@ import { z } from "zod";
 import type { AgentSpec } from "./agent-spec.js";
 import type { FixRetry, LiveScript } from "./fixer.js";
 import type { PreFilterHit, TaintStep } from "./pre-filter.js";
+import { namesOutsideRoot } from "./repo-path.js";
 import type { UsageMeter } from "./usage-meter.js";
 import { proofRules } from "./validation/proof-rules.js";
 import { CONTROL_TEST, EXPLOIT_TEST } from "./validation/proof-script.js";
@@ -1297,6 +1298,23 @@ export function repairFindingPath(
   if (existsSync(resolve(rootDir, reported))) return raw;
   const repaired = resolveCandidatePath(reported, candidates);
   return repaired === undefined || repaired === reported ? raw : { ...raw, filePath: repaired };
+}
+
+/**
+ * The findings whose path names no place outside `rootDir`. Runs after
+ * `repairFindingPath` and before `hydrateFinding`: a dropped finding must not
+ * fall back onto a batch file.
+ */
+export function findingsInsideRoot(
+  raw: readonly LlmFinding[],
+  rootDir: string,
+  onDrop: (path: string) => void,
+): LlmFinding[] {
+  return raw.filter((f) => {
+    if (!namesOutsideRoot(rootDir, f.filePath)) return true;
+    onDrop(f.filePath ?? "");
+    return false;
+  });
 }
 
 /** Fence tags that name a language by a short alias. */

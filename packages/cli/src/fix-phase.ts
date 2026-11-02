@@ -1,5 +1,5 @@
 import { readFileSync, statSync } from "node:fs";
-import { isAbsolute, join, resolve, sep } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import type { Finding, ReconReport } from "@agentgg/core";
 import {
   effectiveVerdict,
@@ -15,6 +15,7 @@ import { FatalScanError, handleDetectorError } from "./diagnostics.js";
 import { type FileReader, finishFix } from "./fix-edits.js";
 import type { FixRetry, LiveScript } from "./fixer.js";
 import { logError, logWarn } from "./log.js";
+import { resolveInsideRoot } from "./repo-path.js";
 
 const shardPath = (f: Finding): string => f.filePath.replace(/\\/g, "/");
 
@@ -54,11 +55,11 @@ export function repoReader(root: string): FileReader {
   return (path) => {
     if (cache.has(path)) return cache.get(path);
     let content: string | undefined;
-    const full = resolve(base, path);
-    if (!isAbsolute(path) && full.startsWith(base + sep)) {
+    const real = isAbsolute(path) ? undefined : resolveInsideRoot(base, path);
+    if (real !== undefined) {
       try {
-        const stat = statSync(full);
-        if (stat.isFile() && stat.size <= MAX_EDITABLE_BYTES) content = readFileSync(full, "utf8");
+        const stat = statSync(real);
+        if (stat.isFile() && stat.size <= MAX_EDITABLE_BYTES) content = readFileSync(real, "utf8");
       } catch {
         // not there
       }

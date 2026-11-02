@@ -16,6 +16,7 @@ import {
   type CreateAgentArgs,
   DetectionResult,
   type Detector,
+  findingsInsideRoot,
   GeneratedProofScript,
   hydrateFinding,
   PreconditionCheck,
@@ -226,9 +227,14 @@ export class ClaudeAgentDetector implements Detector {
       throw err;
     }
     const fallback = args.candidates[0]?.filePath ?? "(unknown)";
-    return result.findings.map((f) =>
-      hydrateFinding(repairFindingPath(f, args.rootDir, args.candidates), args.agent, fallback),
+    const repaired = result.findings.map((f) =>
+      repairFindingPath(f, args.rootDir, args.candidates),
     );
+    return findingsInsideRoot(repaired, args.rootDir, (path) =>
+      logWarn(
+        `[${args.agent.slug}] discarded a finding naming "${path}", which is outside the repository`,
+      ),
+    ).map((f) => hydrateFinding(f, args.agent, fallback));
   }
 
   async validateFinding(args: {

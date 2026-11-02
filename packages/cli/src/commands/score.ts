@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { FileRecord, Finding, Provider } from "@agentgg/core";
 import {
@@ -21,6 +20,7 @@ import {
   REGION_FLAG_HELP,
   validateProviderFlags,
 } from "../providers/index.js";
+import { readRepoFileSync } from "../repo-path.js";
 import { findingFilenameSlug, writeMarkdownReport } from "../reporters/md.js";
 import { createUsageMeter } from "../usage-meter.js";
 import { buildInvocation } from "./invocation.js";
@@ -185,11 +185,10 @@ export async function runScore(
   // in await-free regions, so concurrent workers can't race.
   const concurrency = Math.max(1, opts.concurrency ?? 5);
   await runConcurrent(tasks, concurrency, async ({ record, finding }) => {
-    const absPath = resolve(rootPath, finding.filePath);
     let content = fileCache.get(finding.filePath);
     if (content === undefined) {
       try {
-        content = readFileSync(absPath, "utf8");
+        content = readRepoFileSync(rootPath, finding.filePath);
       } catch {
         content = null;
       }
